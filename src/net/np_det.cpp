@@ -64,6 +64,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -76,18 +77,13 @@
 #include <rex/system/thread_state.h>
 #include <rex/system/util/object_table.h>
 #include <rex/system/xthread.h>
+#include <rex/thread.h>
 
 #include "generated/default/dead_or_alive_4_init.h"
 
 #include "np_core.h"
 #include "np_det_internal.h"
 #include "np_session.h"
-
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 
 extern "C" {
 REX_EXTERN(__imp__sub_82334C60);
@@ -99,10 +95,10 @@ REX_EXTERN(__imp__sub_8275AD70);
 REX_EXTERN(__imp__sub_82731790);
 // SDK netplay exports (sdk-np0 src/system/kernel_state.cpp, src/audio/audio_system.cpp,
 // src/system/xnotifylistener.cpp).
-__declspec(dllimport) void rex_overlapped_inline(int on);
-__declspec(dllimport) void rex_notify_lockstep(int on);
-__declspec(dllimport) void rex_audio_lockstep(int on);
-__declspec(dllimport) int rex_audio_worker_callback(uint64_t* index);
+REX_DLL_IMPORT void rex_overlapped_inline(int on);
+REX_DLL_IMPORT void rex_notify_lockstep(int on);
+REX_DLL_IMPORT void rex_audio_lockstep(int on);
+REX_DLL_IMPORT int rex_audio_worker_callback(uint64_t* index);
 }
 
 namespace doa4::np::det {
@@ -204,7 +200,8 @@ void ReaderStarted(int32_t ret, uint8_t* base) {
       auto thread = ks->object_table()->LookupObject<rex::system::XThread>(handle);
       if (thread && thread->thread()) {
         found = true;
-        ended = WaitForSingleObject(thread->thread()->native_handle(), DWORD(kReaderWaitMs)) == WAIT_OBJECT_0;
+        ended = rex::thread::Wait(thread->thread(), false, std::chrono::milliseconds(kReaderWaitMs)) ==
+                rex::thread::WaitResult::kSuccess;
       }
     }
   }
@@ -417,7 +414,7 @@ REX_HOOK_RAW(sub_82793B68) {
     if (const char* v = doa4::np::TestSwitch("DOA4_NP_FORCE_LOADER_RACE")) {
       const unsigned long ms = std::strtoul(v, nullptr, 10);
       REXLOG_INFO("[doa4][NET] forced loader race: the creator sleeps {} ms before the critical section init", ms);
-      Sleep(DWORD(ms));
+      std::this_thread::sleep_for(std::chrono::milliseconds(ms));
     }
   }
   if (!doa4::np::Active()) return;

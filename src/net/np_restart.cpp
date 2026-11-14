@@ -6,6 +6,7 @@
 #include <fstream>
 #include <system_error>
 
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -13,6 +14,15 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <spawn.h>
+#include <unistd.h>
+
+#include <cstring>
+#include <map>
+
+extern char** environ;
+#endif
 
 namespace doa4::np::restart {
 namespace fs = std::filesystem;
@@ -24,7 +34,11 @@ fs::path SessionUserData(const fs::path& user_data) { return user_data / "netpla
 fs::path SessionDir(const fs::path& user_data, const fs::path& test_dir, bool host, std::time_t now) {
   if (!test_dir.empty()) return test_dir / "session";
   std::tm local{};
+#if defined(_WIN32)
   localtime_s(&local, &now);
+#else
+  localtime_r(&now, &local);
+#endif
   char name[48];
   std::snprintf(name, sizeof name, "%04d%02d%02d-%02d%02d%02d_%s", local.tm_year + 1900, local.tm_mon + 1,
                 local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec, host ? "host" : "joiner");
@@ -39,7 +53,9 @@ bool RedirectHolds(const fs::path& runtime_user_data, const fs::path& session_us
     if (ec) a = p;
     std::wstring s = a.lexically_normal().generic_wstring();
     while (s.size() > 3 && s.back() == L'/') s.pop_back();
-    for (wchar_t& c : s) c = wchar_t(towlower(c));
+#if defined(_WIN32)
+    for (wchar_t& c : s) c = wchar_t(towlower(c));  // Windows paths are case-insensitive
+#endif
     return s;
   };
   return norm(runtime_user_data) == norm(session_user_data);
@@ -60,6 +76,7 @@ std::string Text(const fs::path& p) {
   return std::string(u.begin(), u.end());
 }
 
+#if defined(_WIN32)
 // The attributes of the entry itself (a link is not followed: GetFileAttributesW reports the link's own attributes).
 DWORD Attributes(const fs::path& p) { return GetFileAttributesW(p.c_str()); }
 
@@ -104,9 +121,11 @@ bool Empty(const fs::path& dir, std::string* error) {
   FindClose(h);
   return ok;
 }
+#endif
 
 }  // namespace
 
+#if defined(_WIN32)
 bool ClearFolder(const fs::path& dir, std::string* error) {
   error->clear();
   const DWORD a = Attributes(dir);
@@ -134,6 +153,47 @@ bool ClearFolder(const fs::path& dir, std::string* error) {
   }
   return Empty(dir, error);
 }
+#else
+bool ClearFolder(const fs::path& dir, std::string* error) {
+  error->clear();
+  std::error_code ec;
+  const fs::file_status st = fs::symlink_status(dir, ec);  // the entry itself: a link is not followed
+  if (!fs::exists(st)) {
+    fs::create_directories(dir, ec);
+    if (ec || !fs::is_directory(dir, ec)) {
+      *error = "cannot create " + Text(dir);
+      return false;
+    }
+    // a parent of the folder may itself be a link the creation went through: refuse a folder that is not real now
+    if (fs::is_symlink(fs::symlink_status(dir, ec))) {
+      *error = Text(dir) + " is a link, not a folder";
+      return false;
+    }
+    return true;
+  }
+  if (fs::is_symlink(st)) {
+    *error = Text(dir) + " is a link (symbolic link), not a folder: it is not cleared or used";
+    return false;
+  }
+  if (!fs::is_directory(st)) {
+    *error = Text(dir) + " is a file, not a folder";
+    return false;
+  }
+  // remove_all removes a link as the link itself, never its target
+  for (const fs::directory_entry& entry : fs::directory_iterator(dir, ec)) {
+    fs::remove_all(entry.path(), ec);
+    if (ec) {
+      *error = "cannot remove " + Text(entry.path()) + " (" + ec.message() + ")";
+      return false;
+    }
+  }
+  if (ec) {
+    *error = "cannot list " + Text(dir) + " (" + ec.message() + ")";
+    return false;
+  }
+  return true;
+}
+#endif
 
 bool WriteSaveFiles(const fs::path& dir, const std::vector<handoff::File>& files, std::string* error) {
   error->clear();
@@ -169,6 +229,7 @@ RelaunchPlan PlanRelaunch(const std::wstring& command_line, unsigned long parent
   return plan;
 }
 
+#if defined(_WIN32)
 bool Relaunch(const fs::path* handoff, bool after_session, std::string* error) {
   wchar_t exe[MAX_PATH];
   const DWORD length = GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -213,5 +274,70 @@ bool Relaunch(const fs::path* handoff, bool after_session, std::string* error) {
   CloseHandle(pi.hProcess);
   return true;
 }
+#else
+namespace {
+
+// This process's own arguments, from /proc/self/cmdline (NUL-separated).
+std::vector<std::string> OwnArguments() {
+  std::ifstream in("/proc/self/cmdline", std::ios::binary);
+  std::vector<std::string> args;
+  for (std::string arg; std::getline(in, arg, '\0');) args.push_back(arg);
+  return args;
+}
+
+// This process's environment with the plan's variables set (an empty value removes one).
+std::vector<std::string> ChildEnvironment(const std::vector<EnvVar>& changes) {
+  std::map<std::string, std::string> env;
+  for (char** e = environ; *e; ++e) {
+    const char* eq = std::strchr(*e, '=');
+    if (eq) env[std::string(*e, size_t(eq - *e))] = eq + 1;
+  }
+  for (const EnvVar& v : changes) {
+    const std::string name = fs::path(v.name).string();  // wide to UTF-8 (a path converts both ways)
+    if (v.value.empty()) env.erase(name);
+    else env[name] = fs::path(v.value).string();
+  }
+  std::vector<std::string> out;
+  for (const auto& [name, value] : env) out.push_back(name + "=" + value);
+  return out;
+}
+
+std::vector<char*> PointerList(std::vector<std::string>& strings) {
+  std::vector<char*> list;
+  for (std::string& s : strings) list.push_back(s.data());
+  list.push_back(nullptr);
+  return list;
+}
+
+}  // namespace
+
+bool Relaunch(const fs::path* handoff, bool after_session, std::string* error) {
+  std::error_code ec;
+  const std::string exe = fs::read_symlink("/proc/self/exe", ec).string();
+  std::vector<std::string> args = OwnArguments();
+  if (exe.empty() || args.empty()) {
+    *error = "cannot find the game's executable";
+    return false;
+  }
+  // The command line and window state of the plan are Windows things; the child gets this process's arguments.
+  const RelaunchPlan plan = PlanRelaunch(std::wstring(), static_cast<unsigned long>(getpid()), handoff, after_session,
+                                         false, 0);
+  std::vector<std::string> env = ChildEnvironment(plan.env);
+  std::vector<char*> argv = PointerList(args), envp = PointerList(env);
+  // No descriptor of this process reaches the child (CreateProcessW with bInheritHandles FALSE): the child would
+  // otherwise keep this game's UDP socket and its port open.
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+  pid_t child = 0;
+  const int e = posix_spawn(&child, exe.c_str(), &actions, nullptr, argv.data(), envp.data());
+  posix_spawn_file_actions_destroy(&actions);
+  if (e != 0) {
+    *error = "posix_spawn failed (" + std::string(std::strerror(e)) + ")";
+    return false;
+  }
+  return true;
+}
+#endif
 
 }  // namespace doa4::np::restart

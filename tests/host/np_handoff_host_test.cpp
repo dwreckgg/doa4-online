@@ -268,6 +268,7 @@ static const NotCarried kSdkNotCarried[] = {
     {"update_data_root", "path"},
     {"use_fuzzy_alpha_epsilon", "gpu-render"},
     {"user_data_root", "path"},
+    {"video_driver", "window"},
     {"vulkan_allow_present_mode_fifo_relaxed", "present"},
     {"vulkan_allow_present_mode_immediate", "present"},
     {"vulkan_allow_present_mode_mailbox", "present"},
@@ -332,7 +333,7 @@ static constexpr size_t kSdkCount = sizeof(kSdkNames) / sizeof(kSdkNames[0]);
 static constexpr size_t kSdkNotCarriedCount = sizeof(kSdkNotCarried) / sizeof(kSdkNotCarried[0]);
 static constexpr size_t kPortNotCarriedCount = sizeof(kPortNotCarried) / sizeof(kPortNotCarried[0]);
 static constexpr size_t kTrustedCount = sizeof(kTrusted) / sizeof(kTrusted[0]);
-static constexpr size_t kSdkTotal = 199;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c)
+static constexpr size_t kSdkTotal = 200;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 the SDL window's video_driver)
 
 // The expected names: the carried list, then the Extras tweak cvars of the tweaks module.
 // The port's own carried settings beyond the tweaks: they change guest memory and are no trust matter (np_handoff.cpp

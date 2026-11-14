@@ -164,10 +164,17 @@ static void TestGameFilesPathRoundTrip() {
 // folder is therefore saved in generic form (forward slashes): that raw line
 // must parse back to the same folder.
 static void TestGameFilesSurvivesTheSdkWriter() {
+#if defined(_WIN32)
   const std::filesystem::path folders[] = {
       std::filesystem::path(L"C:\\Users\\fred\\doa4\\xex\\DOA4"),
       std::filesystem::path(u8"D:\\\u30b2\u30fc\u30e0\\DOA4"),
   };
+#else  // a backslash is an ordinary name character in a POSIX path: the folders use '/' only
+  const std::filesystem::path folders[] = {
+      std::filesystem::path("/home/fred/doa4/xex/DOA4"),
+      std::filesystem::path(u8"/media/\u30b2\u30fc\u30e0/DOA4"),
+  };
+#endif
   for (const auto& folder : folders) {
     const std::string text = doa4::Utf8Generic(folder);
     CHECK(text.find('\\') == std::string::npos);

@@ -51,7 +51,6 @@ set(DEADORALIVE4_SOURCES
     src/doa4_lowmem.cpp
     src/doa4_speakers.cpp
     src/doa4_photo.cpp
-    src/doa4_photo_win.cpp
     src/doa4_photo_service.cpp
     src/doa4_photo_notice.cpp
     src/doa4_photo_watch.cpp
@@ -62,7 +61,6 @@ set(DEADORALIVE4_SOURCES
     src/doa4_suits_import_flow.cpp
     src/doa4_suits_import_runner.cpp
     src/doa4_suits_import_view.cpp
-    src/doa4_setup_win.cpp
     src/doa4_setup_dialog.cpp
     src/net/np_core.cpp
     src/net/np_exec.cpp
@@ -83,6 +81,13 @@ set(DEADORALIVE4_SOURCES
     src/net/np_live.cpp
     src/net/np_restart.cpp
 )
+
+# The platform parts behind doa4_photo_win.h and doa4_setup_win.h: Windows' own, or SDL3's elsewhere.
+if(WIN32)
+    list(APPEND DEADORALIVE4_SOURCES src/doa4_photo_win.cpp src/doa4_setup_win.cpp)
+else()
+    list(APPEND DEADORALIVE4_SOURCES src/doa4_photo_posix.cpp src/doa4_setup_posix.cpp src/doa4_sdl_dialog.cpp)
+endif()
 
 if(WIN32)
     # The window, taskbar, Explorer and Task Manager icon (src/dead_or_alive_4.rc).
@@ -124,8 +129,11 @@ add_library(miniupnpc STATIC
     ${DOA4_UPNP}/src/receivedata.c ${DOA4_UPNP}/src/addr_is_reserved.c)
 target_include_directories(miniupnpc PUBLIC ${DOA4_UPNP}/include PRIVATE ${DOA4_UPNP} ${DOA4_UPNP}/src)
 target_compile_definitions(miniupnpc PUBLIC MINIUPNP_STATICLIB PRIVATE _WIN32_WINNT=0x0601 _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(miniupnpc PUBLIC ws2_32 iphlpapi)
-target_link_libraries(dead_or_alive_4 PRIVATE gekkonet miniupnpc ws2_32 iphlpapi winhttp bcrypt)
+target_link_libraries(dead_or_alive_4 PRIVATE gekkonet miniupnpc)
+if(WIN32)
+    target_link_libraries(miniupnpc PUBLIC ws2_32 iphlpapi)
+    target_link_libraries(dead_or_alive_4 PRIVATE ws2_32 iphlpapi winhttp bcrypt)
+endif()
 
 # Local build fix: the ReXGlue SDK at v0.8.0 does not pass ImGui's headers on to the
 # game target (src/doa4_diag_overlay.cpp includes <imgui.h>); ImGui itself is
@@ -138,6 +146,11 @@ endif()
 # target's own SDK sources (ui/rex_app.cpp) do not search.
 if(REXSDK_DIR)
     target_include_directories(dead_or_alive_4 PRIVATE ${CMAKE_BINARY_DIR}/rexglue-sdk/include)
+endif()
+# Outside Windows the game-file SHA-1 (src/doa4_gamefiles.cpp) is the SDK's header-only TinySHA1
+# (thirdparty/crypto), which the SDK keeps to its own targets.
+if(REXSDK_DIR AND NOT WIN32)
+    target_include_directories(dead_or_alive_4 PRIVATE ${REXSDK_DIR}/thirdparty)
 endif()
 # Netplay hashing (src/net/np_session.cpp) uses rex/hash.h, whose xxhash.h the SDK
 # keeps to its own targets; header-only use (XXH_INLINE_ALL), nothing to link.

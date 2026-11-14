@@ -4,10 +4,25 @@
 
 #include "doa4_suitconv_job.h"
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include "doa4_utf8.h"
+#include "net/np_posix.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -41,6 +56,7 @@ constexpr auto kPoke = std::chrono::milliseconds(10);  // CancelSynchronousIo is
 
 using Logger = std::function<void(const std::string&)>;
 
+#if defined(_WIN32)
 std::string Utf8(const fs::path& p) {
   const std::wstring w = p.wstring();
   if (w.empty()) return {};
@@ -50,7 +66,27 @@ std::string Utf8(const fs::path& p) {
   return s;
 }
 
-std::string WinError(DWORD e) { return "Windows error " + std::to_string(e); }
+std::string OsError(DWORD e) { return "Windows error " + std::to_string(e); }
+DWORD LastOsError() { return GetLastError(); }
+#else
+std::string Utf8(const fs::path& p) { return doa4::Utf8(p); }  // a POSIX path is already UTF-8
+
+std::string OsError(DWORD e) { return std::string(std::strerror(int(e))) + " (errno " + std::to_string(e) + ")"; }
+DWORD LastOsError() { return DWORD(errno); }
+
+// Writes all of `n` bytes; false (errno set) when the file takes fewer.
+bool WriteAll(int fd, const void* data, size_t n) {
+  const auto* p = static_cast<const char*>(data);
+  while (n > 0) {
+    const ssize_t put = write(fd, p, n);
+    if (put < 0 && errno == EINTR) continue;
+    if (put <= 0) return false;
+    p += put;
+    n -= size_t(put);
+  }
+  return true;
+}
+#endif
 
 bool Exists(const fs::path& p) {
   std::error_code ec;
@@ -91,6 +127,14 @@ bool RemoveOwnerless(const fs::path& dir, std::string* why) {
 }
 
 // Puts the marker back (best effort) into a folder that could not be deleted after its marker went.
+#if !defined(_WIN32)
+void RestoreMarker(const fs::path& dir) {
+  const int fd = open((dir / kMarkerName).c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  if (fd < 0) return;
+  WriteAll(fd, kMarkerText, sizeof(kMarkerText) - 1);
+  close(fd);
+}
+#else
 void RestoreMarker(const fs::path& dir) {
   HANDLE h = CreateFileW((dir / kMarkerName).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -98,6 +142,7 @@ void RestoreMarker(const fs::path& dir) {
   WriteFile(h, kMarkerText, DWORD(sizeof(kMarkerText) - 1), &put, nullptr);
   CloseHandle(h);
 }
+#endif
 
 // Deletes a folder of ours: every entry except the marker first, and if any of them cannot be deleted (a file held open) it
 // stops there, the marker kept and *why saying what failed, so the next import or CompletePendingSwap still recognises the
@@ -147,6 +192,7 @@ bool RemoveCreated(const fs::path& dir, std::string* why = nullptr) {
   return true;
 }
 
+#if defined(_WIN32)
 bool IsBlocked(DWORD e) { return e == ERROR_SHARING_VIOLATION || e == ERROR_ACCESS_DENIED; }
 
 bool Rename(const fs::path& from, const fs::path& to, DWORD* err) {
@@ -154,6 +200,16 @@ bool Rename(const fs::path& from, const fs::path& to, DWORD* err) {
   *err = GetLastError();
   return false;
 }
+#else
+// An open file never blocks a rename on Linux; a busy mount point is the only passing obstacle.
+bool IsBlocked(DWORD e) { return e == EBUSY; }
+
+bool Rename(const fs::path& from, const fs::path& to, DWORD* err) {  // never replaces, as MoveFileExW without flags
+  if (renameat2(AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE) == 0) return true;
+  *err = DWORD(errno);
+  return false;
+}
+#endif
 
 enum class RenameResult { kOk, kFailed, kCancelled };
 
@@ -191,6 +247,51 @@ dsuits::Manifest ReferenceManifest(std::span<const SuitRecipe> suits) {
   return m;
 }
 
+#if !defined(_WIN32)
+// Reads `fd` to its end in chunks of buf.size(), each passed to `take`; false when a read fails or `take` says stop.
+template <class Take>
+bool ReadChunks(int fd, std::vector<char>& buf, Take&& take) {
+  for (;;) {
+    const ssize_t n = read(fd, buf.data(), buf.size());
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0) return false;
+    if (n == 0) return true;
+    if (!take(size_t(n))) return false;
+  }
+}
+
+bool ReadWholeFile(const fs::path& p, uint64_t limit, std::string* out) {
+  const int fd = open(p.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  out->clear();
+  std::vector<char> buf(65536);
+  const bool ok = ReadChunks(fd, buf, [&](size_t n) {
+    out->append(buf.data(), n);
+    return out->size() <= limit;
+  });
+  close(fd);
+  return ok;
+}
+
+// A file's size and SHA-1 as it is on disk. (Linux has no CancelSynchronousIo: the token is looked at between reads.)
+bool HashFile(const fs::path& p, uint64_t* size, std::string* sha1, const CancelToken* cancel) {
+  const int fd = open(p.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  gamefiles::Sha1 hash;
+  std::vector<char> buf(size_t(1) << 20);
+  uint64_t total = 0;
+  const bool ok = ReadChunks(fd, buf, [&](size_t n) {
+    hash.Update(buf.data(), n);
+    total += n;
+    return !(cancel && cancel->cancelled());
+  });
+  close(fd);
+  if (!ok) return false;
+  *size = total;
+  *sha1 = hash.HexDigest();
+  return true;
+}
+#else
 bool ReadWholeFile(const fs::path& p, uint64_t limit, std::string* out) {
   HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -244,6 +345,7 @@ bool HashFile(const fs::path& p, uint64_t* size, std::string* sha1, const Cancel
   *sha1 = hash.HexDigest();
   return true;
 }
+#endif
 
 std::string VerifyImpl(const fs::path& folder, const CancelToken* cancel) {
   std::string text;
@@ -293,7 +395,7 @@ SwapStatus SwapNewIn(const fs::path& ud, const Logger& log, std::string* why, co
                      const CancelToken* cancel = nullptr) {
   const fs::path cur = Cur(ud), nw = New(ud), old = Old(ud);
   const auto fail = [&](const std::string& what, DWORD e) {
-    *why = what + ": " + WinError(e);
+    *why = what + ": " + OsError(e);
     return IsBlocked(e) ? SwapStatus::kBlocked : SwapStatus::kFailed;
   };
   DWORD err = 0;
@@ -327,7 +429,7 @@ SwapStatus SwapNewIn(const fs::path& ud, const Logger& log, std::string* why, co
     const DWORD first = err;
     std::string what = "cannot rename " + Utf8(nw) + " to " + Utf8(cur);
     if (had_cur && RenameRetrying(old, cur, &err, nullptr) != RenameResult::kOk) {
-      *why = what + ": " + WinError(first) + "; and the first rename could not be undone: " + WinError(err);
+      *why = what + ": " + OsError(first) + "; and the first rename could not be undone: " + OsError(err);
       return SwapStatus::kFailed;
     }
     return fail(what, first);
@@ -429,9 +531,15 @@ uint64_t DefaultFreeBytes(const fs::path& path) {
     if (parent == p) break;
     p = parent;
   }
+#if defined(_WIN32)
   ULARGE_INTEGER avail{};
   if (p.empty() || !GetDiskFreeSpaceExW(p.c_str(), &avail, nullptr, nullptr)) return 0;
   return avail.QuadPart;
+#else
+  struct statvfs st;
+  if (p.empty() || statvfs(p.c_str(), &st) != 0) return 0;
+  return uint64_t(st.f_bavail) * st.f_frsize;  // the space an unprivileged user may fill
+#endif
 }
 
 // The bytes a leftover .new gives back when the recovery deletes it: the file sizes in it, when it is ours (marked, or
@@ -459,15 +567,26 @@ bool WriteProbe(const fs::path& ud, std::string* why) {
     return false;
   }
   const fs::path probe = ud / (L".doa4-write-probe-" + std::to_wstring(GetCurrentProcessId()));
+#if defined(_WIN32)
   HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h == INVALID_HANDLE_VALUE) {
-    *why = "cannot create a file in " + Utf8(ud) + ": " + WinError(GetLastError());
+    *why = "cannot create a file in " + Utf8(ud) + ": " + OsError(LastOsError());
     return false;
   }
   DWORD put = 0;
   const bool ok = WriteFile(h, "x", 1, &put, nullptr) && put == 1;
   CloseHandle(h);
   const bool gone = DeleteFileW(probe.c_str()) != 0;
+#else
+  const int fd = open(probe.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    *why = "cannot create a file in " + Utf8(ud) + ": " + OsError(LastOsError());
+    return false;
+  }
+  const bool ok = WriteAll(fd, "x", 1);
+  close(fd);
+  const bool gone = unlink(probe.c_str()) == 0;
+#endif
   if (!ok || !gone) {
     *why = "cannot write and delete a file in " + Utf8(ud);
     return false;
@@ -478,7 +597,9 @@ bool WriteProbe(const fs::path& ud, std::string* why) {
 struct SimulatedCrash {};
 
 struct IoThread {
+#if defined(_WIN32)
   HANDLE handle = nullptr;
+#endif
   std::atomic<bool> in_read{false};
 };
 
@@ -496,12 +617,14 @@ std::wstring FolderKey(const fs::path& ud) {
   if (ec) c = ud.lexically_normal();
   std::wstring k = c.wstring();
   while (!k.empty() && (k.back() == L'\\' || k.back() == L'/')) k.pop_back();
+#if defined(_WIN32)
   if (!k.empty()) {  // case folded: NTFS folders are case-insensitive
     std::wstring low(k.size(), L'\0');
     const int n = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, k.data(), int(k.size()), low.data(), int(low.size()),
                                 nullptr, nullptr, 0);
     if (n == int(k.size())) k = std::move(low);
   }
+#endif
   return k;
 }
 
@@ -513,8 +636,20 @@ std::wstring FolderClaimName(const fs::path& ud) {
   return L"Local\\doa4-suitconv-" + std::wstring(hex.begin(), hex.end());
 }
 
+#if defined(_WIN32)
 // Test seam: replaces CreateEventW in FolderClaim::Take (null = the real one), so a host test can reach the failure branch.
 HANDLE (*g_create_event)(const wchar_t* name) = nullptr;
+#else
+// The claim outside Windows: an exclusive flock on "<runtime dir>/doa4-suitconv-<SHA-1>.lock", the name FolderClaimName
+// gives (its "Local\\" prefix dropped). Like the named event, the OS drops the lock when its process dies, and it may be
+// released from any thread. The lock file lives in $XDG_RUNTIME_DIR (or /tmp), never in the user data folder.
+fs::path FolderClaimLockPath(const fs::path& ud) {
+  std::wstring name = FolderClaimName(ud);
+  name.erase(0, name.find(L'\\') + 1);
+  const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+  return fs::path(runtime && *runtime ? runtime : "/tmp") / (name + L".lock");
+}
+#endif
 
 class FolderClaim {
  public:
@@ -532,6 +667,7 @@ class FolderClaim {
     key_ = FolderKey(ud);
     std::lock_guard<std::mutex> lk(g_active_mu);
     if (!ActiveFolders().insert(key_).second) return false;
+#if defined(_WIN32)
     SetLastError(0);
     const std::wstring name = FolderClaimName(ud);
     HANDLE event = g_create_event ? g_create_event(name.c_str()) : CreateEventW(nullptr, TRUE, FALSE, name.c_str());
@@ -543,21 +679,41 @@ class FolderClaim {
       return false;
     }
     event_ = event;
+#else
+    const int fd = open(FolderClaimLockPath(ud).c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0) {
+      const int err = errno;
+      if (fd >= 0) close(fd);
+      if (fd < 0 || err != EWOULDBLOCK) *error = DWORD(err);  // EWOULDBLOCK: another process holds the folder
+      ActiveFolders().erase(key_);
+      return false;
+    }
+    lock_fd_ = fd;
+#endif
     held_ = true;
     return true;
   }
   void Release() {
     if (!held_) return;
     std::lock_guard<std::mutex> lk(g_active_mu);
+#if defined(_WIN32)
     if (event_) CloseHandle(event_);
     event_ = nullptr;
+#else
+    close(lock_fd_);  // drops the flock (the lock file stays: deleting it would race another process's open)
+    lock_fd_ = -1;
+#endif
     ActiveFolders().erase(key_);
     held_ = false;
   }
 
  private:
   std::wstring key_;
+#if defined(_WIN32)
   HANDLE event_ = nullptr;
+#else
+  int lock_fd_ = -1;
+#endif
   bool held_ = false;
 };
 
@@ -614,19 +770,25 @@ struct ImportJob::Impl {
     // go wrong is "not registered" and the caller ends the job.
     explicit Registration(Impl* impl) noexcept : impl_(impl) {
       const int n = ++impl->reg_count;
+#if defined(_WIN32)
       if (impl->hooks.fail_register_at == n ||
           !DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &t_.handle, 0, FALSE,
                            DUPLICATE_SAME_ACCESS)) {
         t_.handle = nullptr;  // Cancel could not reach this thread's reads: the caller ends the job
         return;
       }
+#else
+      if (impl->hooks.fail_register_at == n) return;
+#endif
       try {
         std::lock_guard<std::mutex> lk(impl_->io_mu);
         impl_->io.push_back(&t_);
         ok_ = true;
       } catch (...) {
+#if defined(_WIN32)
         CloseHandle(t_.handle);
         t_.handle = nullptr;
+#endif
       }
     }
     ~Registration() {
@@ -635,7 +797,9 @@ struct ImportJob::Impl {
         std::lock_guard<std::mutex> lk(impl_->io_mu);
         impl_->io.erase(std::find(impl_->io.begin(), impl_->io.end(), &t_));
       }
+#if defined(_WIN32)
       CloseHandle(t_.handle);
+#endif
     }
     bool ok() const { return ok_; }
     IoThread& thread() { return t_; }
@@ -685,8 +849,10 @@ struct ImportJob::Impl {
       if (finished.load()) break;
       if (!cancel.cancelled()) continue;
       std::lock_guard<std::mutex> io_lk(io_mu);
+#if defined(_WIN32)
       for (IoThread* t : io)
         if (t->in_read.load()) CancelSynchronousIo(t->handle);
+#endif  // (elsewhere the readers look at the token between their reads)
     }
   }
 
@@ -700,13 +866,22 @@ struct ImportJob::Impl {
     const bool crash = hooks.crash_at_write == idx;
     fs::path tmp = dest;
     tmp += L".tmp";
+#if defined(_WIN32)
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-      *why = "cannot create " + Utf8(tmp) + ": " + WinError(GetLastError());
+      *why = "cannot create " + Utf8(tmp) + ": " + OsError(LastOsError());
       return false;
     }
+#else
+    const int h = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (h < 0) {
+      *why = "cannot create " + Utf8(tmp) + ": " + OsError(LastOsError());
+      return false;
+    }
+#endif
     const size_t want = crash ? n / 2 : n;
     bool ok = true;
+#if defined(_WIN32)
     for (size_t at = 0; ok && at < want;) {
       const DWORD chunk = DWORD(std::min<size_t>(want - at, size_t(1) << 20));
       DWORD put = 0;
@@ -722,14 +897,34 @@ struct ImportJob::Impl {
     ok = CloseHandle(h) && ok;
     if (!ok) {
       DeleteFileW(tmp.c_str());
-      *why = "cannot write " + Utf8(dest) + ": " + WinError(werr);
+      *why = "cannot write " + Utf8(dest) + ": " + OsError(werr);
       return false;
     }
     if (!MoveFileExW(tmp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-      *why = "cannot rename " + Utf8(tmp) + ": " + WinError(GetLastError());
+      *why = "cannot rename " + Utf8(tmp) + ": " + OsError(LastOsError());
       DeleteFileW(tmp.c_str());
       return false;
     }
+#else
+    ok = WriteAll(h, data, want);
+    if (crash) {
+      close(h);
+      throw SimulatedCrash{};  // the disk stays as a crash would leave it
+    }
+    ok = ok && fsync(h) == 0;
+    const DWORD werr = LastOsError();
+    ok = close(h) == 0 && ok;
+    if (!ok) {
+      unlink(tmp.c_str());
+      *why = "cannot write " + Utf8(dest) + ": " + OsError(werr);
+      return false;
+    }
+    if (std::rename(tmp.c_str(), dest.c_str()) != 0) {
+      *why = "cannot rename " + Utf8(tmp) + ": " + OsError(LastOsError());
+      unlink(tmp.c_str());
+      return false;
+    }
+#endif
     if (hooks.on_write) hooks.on_write(idx);
     return true;
   }
@@ -1246,9 +1441,11 @@ uint64_t BytesNeeded(std::span<const SuitRecipe> suits) {
 uint64_t BytesNeeded() { return BytesNeeded(Suits()); }
 
 std::wstring FolderClaimNameForTest(const fs::path& user_data) { return FolderClaimName(user_data); }
+#if defined(_WIN32)
 void SetFolderClaimCreateEventForTest(void* (*create_event)(const wchar_t* name)) {
   g_create_event = reinterpret_cast<HANDLE (*)(const wchar_t*)>(create_event);
 }
+#endif
 
 std::string CompletePendingSwap(const fs::path& user_data, const std::function<void(std::string_view)>& log) {
   FolderClaim claim;  // held while it works: an import started meanwhile on this folder is refused

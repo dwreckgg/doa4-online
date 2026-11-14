@@ -11,10 +11,20 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <windows.h>
+#else
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+
+#include <cstdio>
+
+#include "np_posix.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -146,6 +156,7 @@ bool IsPrivate(const std::array<uint8_t, 4>& ip) {
 }
 
 // The first IPv4 address of an adapter that is up and not loopback (the LAN code when STUN has no answer).
+#if defined(_WIN32)
 std::optional<rules::Endpoint> LanAddress() {
   ULONG size = 16 * 1024;
   std::vector<uint8_t> buf(size);
@@ -169,6 +180,35 @@ std::optional<rules::Endpoint> LanAddress() {
   }
   return std::nullopt;
 }
+#else
+std::optional<rules::Endpoint> LanAddress() {
+  ifaddrs* list = nullptr;
+  if (getifaddrs(&list) != 0) return std::nullopt;
+  std::optional<rules::Endpoint> found;
+  for (const ifaddrs* a = list; a && !found; a = a->ifa_next) {
+    if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET) continue;
+    if (!(a->ifa_flags & IFF_UP) || !(a->ifa_flags & IFF_RUNNING) || (a->ifa_flags & IFF_LOOPBACK)) continue;
+    rules::Endpoint e;
+    std::memcpy(e.ip.data(), &reinterpret_cast<const sockaddr_in*>(a->ifa_addr)->sin_addr, 4);
+    if (e.ip[0] == 169 && e.ip[1] == 254) continue;  // link-local
+    found = e;
+  }
+  freeifaddrs(list);
+  return found;
+}
+#endif
+
+// Renames `from` over `to` in one step (a reader sees the old or the new file, never neither): "" or the error number.
+std::string RenameOver(const fs::path& from, const fs::path& to, bool write_through) {
+#if defined(_WIN32)
+  const DWORD flags = MOVEFILE_REPLACE_EXISTING | (write_through ? MOVEFILE_WRITE_THROUGH : 0);
+  if (!MoveFileExW(from.c_str(), to.c_str(), flags)) return std::to_string(GetLastError());
+#else
+  (void)write_through;  // rename(2) is atomic; the data reaches the disk with the next writeback
+  if (std::rename(from.c_str(), to.c_str()) != 0) return std::to_string(errno);
+#endif
+  return "";
+}
 
 // Written to <path>.tmp, then renamed over <path>, so a reader never sees half a file. "" or why not.
 std::string WriteAtomic(const fs::path& path, const void* data, size_t n) {
@@ -183,8 +223,8 @@ std::string WriteAtomic(const fs::path& path, const void* data, size_t n) {
     f.close();
     if (!f) return "cannot write " + tmp.filename().string();
   }
-  if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return "cannot rename onto " + path.filename().string() + " (error " + std::to_string(GetLastError()) + ")";
+  if (const std::string e = RenameOver(tmp, path, true); !e.empty())
+    return "cannot rename onto " + path.filename().string() + " (error " + e + ")";
   return "";
 }
 
@@ -540,7 +580,7 @@ void Lobby::Impl::WriteStatus(uint32_t now) {
 // The request file, taken (renamed, read, deleted) by the I/O thread without `mu` (M-1). False when there is none.
 static bool TakeCtl(const fs::path& dir, std::string* text) {
   const fs::path on = dir / "np_ctl.on", taking = dir / "np_ctl.taking";
-  if (!MoveFileExW(on.c_str(), taking.c_str(), MOVEFILE_REPLACE_EXISTING)) return false;
+  if (!RenameOver(on, taking, false).empty()) return false;
   {
     std::ifstream f(taking, std::ios::binary);
     text->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());

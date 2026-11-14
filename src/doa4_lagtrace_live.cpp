@@ -7,6 +7,27 @@
 
 #include "doa4_lagtrace.h"
 
+#if !defined(_WIN32)
+#include <rex/logging.h>
+
+// The trace joins frames to the SDK's present marks, which only the D3D12 presenter records (Windows); the Vulkan
+// presenter has none, so the trace stays off and On() stays false (no call-out below is reached).
+namespace doa4::lagtrace {
+bool g_on = false;
+void Start(const std::filesystem::path&) {
+  if (const char* v = std::getenv("DOA4_LAG_TRACE"); v && std::string(v) == "1")
+    REXLOG_WARN("[doa4][LAG] lagtrace needs the D3D12 presenter's present marks; it stays off on this system");
+}
+void Stop() {}
+void OnFrameStart(int32_t, bool, bool) {}
+void OnFrameNpDone(int64_t) {}
+void OnFrameFnDone() {}
+void OnPad() {}
+void OnSwapCall() {}
+void OnSwapReturn() {}
+}  // namespace doa4::lagtrace
+#else
+
 #ifndef NOMINMAX
 #define NOMINMAX  // rex/pace_stats.h uses std::min / std::max
 #endif
@@ -20,6 +41,7 @@
 #include <thread>
 #include <vector>
 
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/pace_stats.h>
 
@@ -27,10 +49,10 @@
 
 // The SDK's lag marks (sdk-ou1 src/ui/d3d12/d3d12_presenter.cpp).
 extern "C" {
-__declspec(dllimport) void rex_lag_marks_enable(int on);
-__declspec(dllimport) uint32_t rex_lag_marks_drain(rex::pace_stats::LagPresentMark* out, uint32_t max);
-__declspec(dllimport) uint64_t rex_lag_marks_dropped();
-__declspec(dllimport) uint32_t rex_lag_last_guest_swap(int64_t* qpc_out);
+REX_DLL_IMPORT void rex_lag_marks_enable(int on);
+REX_DLL_IMPORT uint32_t rex_lag_marks_drain(rex::pace_stats::LagPresentMark* out, uint32_t max);
+REX_DLL_IMPORT uint64_t rex_lag_marks_dropped();
+REX_DLL_IMPORT uint32_t rex_lag_last_guest_swap(int64_t* qpc_out);
 }
 
 namespace doa4::lagtrace {
@@ -119,7 +141,7 @@ void Start(const std::filesystem::path& default_dir) {
   std::filesystem::path dir = default_dir;
   if (const wchar_t* d = _wgetenv(L"DOA4_LAG_DIR"); d && *d) dir = d;
   const std::filesystem::path path = dir / ("lagtrace_" + std::to_string(GetCurrentProcessId()) + ".csv");
-  g_csv = _wfopen(path.c_str(), L"wb");
+  g_csv = rex::filesystem::OpenFile(path, "wb");
   if (!g_csv) {
     REXLOG_WARN("[doa4][LAG] lagtrace: cannot open {}; the trace stays off", path.string());
     return;
@@ -226,3 +248,4 @@ void OnSwapReturn() {
 }
 
 }  // namespace doa4::lagtrace
+#endif  // _WIN32

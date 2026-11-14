@@ -7,9 +7,22 @@
 // Timing checks (Stop <= 200 ms, the STUN cadence 500/300 ms +- 50 ms, the simulator's >= 40 ms) read the wall clock;
 // the runner prints them as info lines so a reader can see how close each was.
 
+#if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/file.h>
+#include <sys/select.h>
+
+#include <condition_variable>
+
+#include "../../src/net/np_posix.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -112,6 +125,18 @@ struct LogSink {
   }
 };
 
+// The transport's gekko_arrived signalled within ms milliseconds (and reset: it is an auto-reset event).
+#if defined(_WIN32)
+static bool WaitArrived(void* arrived, int ms) { return WaitForSingleObject(static_cast<HANDLE>(arrived), ms) == WAIT_OBJECT_0; }
+#else
+static bool WaitArrived(int arrived, int ms) {
+  pollfd w{arrived, POLLIN, 0};
+  if (poll(&w, 1, ms) <= 0) return false;
+  posix::Consume(arrived);
+  return true;
+}
+#endif
+
 // ---- a plain UDP socket of the test, bound to 127.0.0.1 ----
 struct Udp {
   SOCKET s = INVALID_SOCKET;
@@ -127,11 +152,13 @@ struct Udp {
       s = INVALID_SOCKET;
       return;
     }
-    int l = sizeof a;
+    socklen_t l = sizeof a;
     getsockname(s, reinterpret_cast<sockaddr*>(&a), &l);
     port = ntohs(a.sin_port);
+#if defined(_WIN32)
     DWORD b = FALSE, ret = 0;  // an ICMP port-unreachable must not fail later receives
     WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12), &b, sizeof b, nullptr, 0, &ret, nullptr, nullptr);
+#endif
     int big = 1 << 20;
     setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&big), sizeof big);
   }
@@ -154,10 +181,10 @@ struct Udp {
     FD_ZERO(&fs);
     FD_SET(s, &fs);
     timeval tv{ms / 1000, (ms % 1000) * 1000};
-    if (select(0, &fs, nullptr, nullptr, &tv) <= 0) return false;
+    if (select(int(s) + 1, &fs, nullptr, nullptr, &tv) <= 0) return false;  // (Windows ignores the first argument)
     char buf[4096];
     sockaddr_in from{};
-    int fl = sizeof from;
+    socklen_t fl = sizeof from;
     const int n = recvfrom(s, buf, sizeof buf, 0, reinterpret_cast<sockaddr*>(&from), &fl);
     if (n < 0) return false;
     out->assign(buf, buf + n);
@@ -363,11 +390,15 @@ static void TestDeliveryAndFilters() {
   p.b.SetPeer(Loop(pa), kToken);
 
   // gekko_arrived: not set before anything arrived, set by the first payload.
-  HANDLE arrived = static_cast<HANDLE>(p.b.gekko_arrived());
+  const auto arrived = p.b.gekko_arrived();
+#if defined(_WIN32)
   CHECK(arrived != nullptr);
-  CHECK(WaitForSingleObject(arrived, 0) == WAIT_TIMEOUT);
+#else
+  CHECK(arrived >= 0);
+#endif
+  CHECK(!WaitArrived(arrived, 0));
   CHECK(p.a.PushGekko(Payload(0, 20)));
-  CHECKF(WaitForSingleObject(arrived, 1000) == WAIT_OBJECT_0, "gekko_arrived was not set within 1 s of the first payload");
+  CHECKF(WaitArrived(arrived, 1000), "gekko_arrived was not set within 1 s of the first payload");
   Bytes got;
   CHECK(p.b.PopGekko(&got) && got == Payload(0, 20));
   CHECK(!p.b.PopGekko(&got));
@@ -381,7 +412,7 @@ static void TestDeliveryAndFilters() {
   }
   const int64_t until = NowUs() + 3'000'000;
   while (next < 1000 && NowUs() < until) {
-    if (WaitForSingleObject(arrived, 50) == WAIT_OBJECT_0) ++waits_signalled;
+    if (WaitArrived(arrived, 50)) ++waits_signalled;
     while (p.b.PopGekko(&got)) wrong += got == Payload(next, 4 + next % 60) ? 0 : 1, ++next;
   }
   CHECKF(next == 1000 && wrong == 0, "1,000 payloads: %u arrived, %u wrong or out of order", next, wrong);
@@ -449,7 +480,7 @@ static void TestDeliveryAndFilters() {
   const int64_t until2 = NowUs() + 2'000'000;
   std::vector<uint32_t> after;
   while (after.size() < 100 && NowUs() < until2) {
-    WaitForSingleObject(arrived, 20);
+    WaitArrived(arrived, 20);
     while (p.b.PopGekko(&got)) after.push_back(got == Payload(SeqOf(got), 4 + SeqOf(got) % 60) ? SeqOf(got) : 0xFFFFFFFFu);
   }
   SleepMs(200);  // anything late would show here
@@ -488,6 +519,16 @@ static void TestDeliveryAndFilters() {
 
 // Review M-5: two copies of this suite at once would race for the same P. The ports group (the only one on fixed ports;
 // every other group binds port 0) holds a named mutex of the user's session while it runs, so a second copy waits.
+#if !defined(_WIN32)
+// Outside Windows: an exclusive flock on a file in /tmp, dropped when the process ends.
+struct PortsLock {
+  int fd = open("/tmp/doa4_np_transport_test_ports.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+  bool held = fd >= 0 && flock(fd, LOCK_EX) == 0;
+  ~PortsLock() {
+    if (fd >= 0) close(fd);
+  }
+};
+#else
 struct PortsLock {
   HANDLE h = CreateMutexW(nullptr, FALSE, L"Local\\doa4_np_transport_test_ports");
   bool held = false;
@@ -500,6 +541,7 @@ struct PortsLock {
     if (h) CloseHandle(h);
   }
 };
+#endif
 
 static void TestPorts() {
   Group("transport, ports: preferred, next, exact");
@@ -956,7 +998,7 @@ static void TestSimTransport() {
   }
   const int64_t until = NowUs() + 2'000'000;
   while (delivered.size() < kept.size() && NowUs() < until) {
-    WaitForSingleObject(static_cast<HANDLE>(p.b.gekko_arrived()), 20);
+    WaitArrived(p.b.gekko_arrived(), 20);
     drain();
   }
   SleepMs(150);
@@ -1227,7 +1269,7 @@ static void TestGekkoEarlyAndForeignProto() {
 // socket that sets SO_REUSEADDR bind the same address and port, and that socket then receives the transport's datagrams.
 static SOCKET ReuseBind(uint16_t port, int* err) {
   SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  BOOL on = TRUE;
+  int on = 1;
   setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&on), sizeof on);
   sockaddr_in a{};
   a.sin_family = AF_INET;
@@ -1261,7 +1303,7 @@ static void TestExclusiveBind() {
     SOCKET holder = ReuseBind(0, &err);
     CHECK(holder != INVALID_SOCKET);
     sockaddr_in a{};
-    int l = sizeof a;
+    socklen_t l = sizeof a;
     getsockname(holder, reinterpret_cast<sockaddr*>(&a), &l);
     const uint16_t q = ntohs(a.sin_port);
     LogSink ls;
@@ -1275,12 +1317,39 @@ static void TestExclusiveBind() {
   }
 }
 
+#if !defined(_WIN32)
+// A manual-reset event for the outbound-ring group: SetEvent and WaitForSingleObject as the Windows test uses them.
+struct ManualEvent {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool set = false;
+};
+static void SetEvent(ManualEvent* e) {
+  {
+    std::lock_guard<std::mutex> lock(e->mu);
+    e->set = true;
+  }
+  e->cv.notify_all();
+}
+static constexpr int WAIT_OBJECT_0 = 0, WAIT_TIMEOUT = 258;
+static int WaitForSingleObject(ManualEvent* e, int ms) {
+  std::unique_lock<std::mutex> lock(e->mu);
+  return e->cv.wait_for(lock, std::chrono::milliseconds(ms), [e] { return e->set; }) ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
+}
+#endif
+
 // Review I-3(c): PushGekko refused on a full outbound ring counts queue_full. The I/O thread is held inside on_tick
 // (bounded wait) so it cannot drain: 1,024 pushes fit, the 1,025th is refused and counted.
 static void TestOutboundQueueFull() {
   Group("transport, outbound ring full");
   LogSink l;
+#if defined(_WIN32)
   HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr), release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+#else
+  ManualEvent entered_event, release_event;
+  ManualEvent* entered = &entered_event;
+  ManualEvent* release = &release_event;
+#endif
   std::atomic<int> hold{0};
   net::Transport t;
   t.on_tick = [&](uint32_t) {
@@ -1301,8 +1370,10 @@ static void TestOutboundQueueFull() {
   CHECKF(t.stats().queue_full == 1, "queue_full %u after one refused PushGekko", t.stats().queue_full);
   SetEvent(release);
   t.Stop();
+#if defined(_WIN32)
   CloseHandle(entered);
   CloseHandle(release);
+#endif
 }
 
 // Review M-3: the log sink is never called once Stop has returned (a misuse after Stop is counted, not logged).
@@ -1337,6 +1408,26 @@ static void TestNoLogAfterStop() {
 // line is logged. On: Start and Stop succeed and one line gives the number of interfaces set (0 on a PC without Wi-Fi;
 // the mode itself is checked on a Wi-Fi PC at plan 1b's real-world gate). The WLAN handle is closed by Stop, which
 // releases the mode, so the test leaves nothing set.
+#if !defined(_WIN32)
+// Outside Windows the mode does not exist: off logs nothing, on logs once that it is not available; no interface is set.
+static void TestWifi() {
+  Group("transport, Wi-Fi media streaming mode");
+  for (const bool on : {false, true}) {
+    LogSink l;
+    net::Transport t;
+    net::Config c = LoopCfg();
+    c.wifi_streaming = on;
+    std::string e;
+    CHECK(t.Start(c, l.Fn(), &e));
+    CHECK(l.WaitPrefix("[doa4][NET] transport started", 1000));
+    SleepMs(100);
+    CHECK(l.CountExact("[doa4][NET] Wi-Fi media streaming mode is not available on this system") == (on ? 1 : 0));
+    CHECK(l.CountPrefix("[doa4][NET] Wi-Fi") == (on ? 1 : 0));
+    CHECK(t.stats().wifi_interfaces == -1);
+    t.Stop();
+  }
+}
+#else
 static void TestWifi() {
   Group("transport, Wi-Fi media streaming mode");
   const bool loaded_before = GetModuleHandleW(L"wlanapi.dll") != nullptr;
@@ -1377,6 +1468,7 @@ static void TestWifi() {
     CHECKF(NowUs() - s0 <= 200'000, "Stop with the WLAN handle took %.1f ms", (NowUs() - s0) / 1000.0);
   }
 }
+#endif
 
 // =====================================================================================================
 // Stop
@@ -1429,8 +1521,10 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     std::_Exit(3);
   }).detach();
+#if defined(_WIN32)
   WSADATA w;
   WSAStartup(MAKEWORD(2, 2), &w);
+#endif
   TestSpscOneThread();
   TestSpscTwoThreads();
   TestDeliveryAndFilters();

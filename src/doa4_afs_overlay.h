@@ -43,9 +43,10 @@ class MemorySource final : public Source {
   std::vector<uint8_t> bytes_;
 };
 
-// A host file opened for reading. Others may read it but not write it while it is open, so a
-// checked file cannot change under the game. Reads pass their offset in an OVERLAPPED, so
-// concurrent calls are safe. Open returns null when the file cannot be opened.
+// A host file opened for reading. On Windows others may read it but not write it while it is
+// open, so a checked file cannot change under the game (POSIX has no such share mode). Reads pass
+// their offset (an OVERLAPPED, or pread), so concurrent calls are safe. Open returns null when the
+// file cannot be opened.
 class FileSource final : public Source {
  public:
   static std::shared_ptr<FileSource> Open(const std::filesystem::path& path);
@@ -56,8 +57,13 @@ class FileSource final : public Source {
   bool Read(uint64_t offset, void* dst, size_t n) const override;
 
  private:
+#if defined(_WIN32)
   FileSource(void* handle, uint64_t size) : handle_(handle), size_(size) {}
   void* handle_;
+#else
+  FileSource(int fd, uint64_t size) : fd_(fd), size_(size) {}
+  int fd_;
+#endif
   uint64_t size_;
 };
 
