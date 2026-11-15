@@ -41,15 +41,23 @@ constexpr uint32_t kSocketFailedError = 0x1F;
 constexpr uint32_t kNoSocket = 0xFFFFFFFFu;  // INVALID_SOCKET: what sub_82449EA8 tests before its recvfrom loop
 }  // namespace
 
+// sub_82445178 as after a failed socket(): the manager's socket field -1, the thread's last error and r3 0x1F.
+// Returns the field's value before.
+static uint32_t TakeFailedSocketPath(PPCContext& ctx, uint8_t* base) {
+  const uint32_t field = ctx.r3.u32;
+  const uint32_t before = rex::memory::load_and_swap<uint32_t>(base + field);
+  rex::memory::store_and_swap<uint32_t>(base + field, kNoSocket);
+  if (rex::system::XThread::IsInThread()) rex::system::XThread::SetLastError(kSocketFailedError);
+  ctx.r3.u64 = kSocketFailedError;
+  return before;
+}
+
 // sub_82445178(manager r3): (re)opens the online manager's port-1000 socket into *(u32*)manager; 0 or an error.
 REX_HOOK_RAW(sub_82445178) {
   using namespace doa4::np::det;
   if (doa4::np::Active() && On(kPort1000)) {
     const uint32_t field = ctx.r3.u32;
-    const uint32_t before = rex::memory::load_and_swap<uint32_t>(base + field);
-    rex::memory::store_and_swap<uint32_t>(base + field, kNoSocket);
-    if (rex::system::XThread::IsInThread()) rex::system::XThread::SetLastError(kSocketFailedError);
-    ctx.r3.u64 = kSocketFailedError;
+    const uint32_t before = TakeFailedSocketPath(ctx, base);
     static std::atomic<int> logged{0};
     if (logged.fetch_add(1) == 0) {
       doa4::np::LogLine(fmt::format(
@@ -59,5 +67,16 @@ REX_HOOK_RAW(sub_82445178) {
     }
     return;
   }
+#if !defined(_WIN32)
+  // Outside Windows a port below 1024 is root's (net.ipv4.ip_unprivileged_port_start): the bind fails, the game then
+  // skips making the socket non-blocking and its first recvfrom in sub_82449EA8 blocks the main loop for good. The
+  // socket could not reach port 1000 anyway, so the game takes its own failed-socket() path, as in a session.
+  TakeFailedSocketPath(ctx, base);
+  static std::atomic<int> logged_posix{0};
+  if (logged_posix.fetch_add(1) == 0) {
+    REXLOG_INFO("[doa4][NET] port 1000: the game's own socket is not opened (a port below 1024 needs root here)");
+  }
+  return;
+#endif
   __imp__sub_82445178(ctx, base);
 }
