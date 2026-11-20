@@ -1892,10 +1892,13 @@ std::optional<uint8_t> SessionMixedSuitHolders() {
   return S().ho.suit_holders;
 }
 
-std::optional<bool> SessionFullBust() {
-  if (!Online()) return std::nullopt;
-  const std::optional<std::string> value = SessionGuestValue("doa4_suits_full_bust");
-  return value ? std::optional<bool>(*value == "true") : std::nullopt;
+std::optional<doa4::suits::bust::AgeSetting> SessionBust() {
+  if (!Online() && !Replaying()) return std::nullopt;
+  std::string note;
+  const doa4::suits::bust::AgeSetting s = doa4::suits::bust::SettingFromText(
+      SessionGuestValue("doa4_bust_age"), SessionGuestValue("doa4_bust_age_on"), &note);
+  if (!note.empty()) REXLOG_WARN("[doa4][NP] session: bust age: {}; the box is off at 18 for this session", note);
+  return s;
 }
 
 // The hold banner is up (a hold has lasted >= 1 s and not ended yet); UI thread.

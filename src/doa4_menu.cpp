@@ -887,10 +887,7 @@ void MenuDialog::DrawExtrasTab() {
 
   ImGui::SeparatorText("Physics");
   // The "Age:" box on its own line, the slider below it. Box off: retail DOA4 for every costume, the slider greyed.
-  // Until the first save an old full-bust player sees the box on at 99 (EffectiveSetting).
-  suits::bust::AgeSetting s = suits::bust::EffectiveSetting(rex::cvar::Query<int32_t>("doa4_bust_age"),
-                                                            rex::cvar::Query<bool>("doa4_bust_age_on"),
-                                                            rex::cvar::Query<bool>("doa4_suits_full_bust"));
+  suits::bust::AgeSetting s = suits::bust::LineSetting(rex::cvar::Query<int32_t>("doa4_bust_age"), rex::cvar::Query<bool>("doa4_bust_age_on"));
   if (ImGui::Checkbox("Age:", &s.on)) SaveBustSetting(s);
   ImGui::BeginDisabled(!s.on);
   if (ImGui::SliderInt("##bust_age", &s.age, 1, 99, "%d", ImGuiSliderFlags_AlwaysClamp)) {

@@ -35,13 +35,16 @@
 //
 // Pure code over a big-endian memory accessor (ReadU32 / WriteU32), so host tests run it without the game. The test
 // switch DOA4_BUST_AGE_MAX=<float> (the retail strongest ratio) is parsed here too (ParseStrongest), and the "Age:"
-// box's rule (EffectiveSetting, WantedAge: box off = age 18 for every block).
+// box's rule (LineSetting on this line, over Part A's EffectiveSetting; SettingFromText for a session's hand-off text;
+// WantedAge: box off = age 18 for every block).
 #pragma once
 
 #include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace doa4::suits::bust {
@@ -81,11 +84,43 @@ struct AgeSetting {
 };
 
 // The saved settings to what the menu shows: raw doa4_bust_age, box doa4_bust_age_on (never saved reads as false),
-// legacy_full the old doa4_suits_full_bust. Until the first save (raw below 1) the old toggle on shows the box ON at
+// legacy_full the old doa4_suits_full_bust (Part A's rule; on 0.3.7's line it is retired: LineSetting passes false).
+// Until the first save (raw below 1) the old toggle on shows the box ON at
 // 99; a save writes both keys, so after it the box alone decides.
 inline AgeSetting EffectiveSetting(int32_t raw_age, bool box, bool legacy_full) {
   const bool on = raw_age < kAgeMin ? box || legacy_full : box;
   return {on, EffectiveAge(raw_age, legacy_full)};
+}
+
+// This line's rule (0.3.7, ruling B1): the old full-bust setting is retired, so the box alone decides, from the first
+// run: never saved reads as the box off at 18. Every reader on this line (the hook, the menu) calls this, never
+// EffectiveSetting.
+inline AgeSetting LineSetting(int saved_age, bool box) {
+  return EffectiveSetting(saved_age, box, /*legacy_full=*/false);
+}
+
+// A session's box and age from the host's hand-off text (np::SessionBust; a replay's from its recording). Age: a whole
+// decimal int32 (from_chars over the whole text: no sign '+', no spaces, no suffix); box: exactly "true" or "false" (the
+// cvar registry's text). Both valid: LineSetting. A missing line (either nullopt: a recording made before the box, on
+// 0.3.7) is the game's own, box off at 18, silently. Anything else: box off at 18, and *note names each ignored value.
+// *note is cleared first. Pure, like doa4::language::ResolveText.
+inline AgeSetting SettingFromText(const std::optional<std::string>& age, const std::optional<std::string>& box,
+                                  std::string* note) {
+  note->clear();
+  constexpr AgeSetting kGameOwn{false, kAgeRetail};
+  if (!age || !box) return kGameOwn;
+  int32_t raw = 0;
+  const char* const end = age->data() + age->size();
+  const auto [stop, ec] = std::from_chars(age->data(), end, raw);
+  const bool age_ok = ec == std::errc() && stop == end;
+  const bool box_ok = *box == "true" || *box == "false";
+  if (age_ok && box_ok) return LineSetting(raw, *box == "true");
+  if (!age_ok) *note = "ignored doa4_bust_age \"" + *age + "\" (not a whole number)";
+  if (!box_ok) {
+    if (!note->empty()) *note += "; ";
+    *note += "ignored doa4_bust_age_on \"" + *box + "\" (not true or false)";
+  }
+  return kGameOwn;
 }
 
 // The age the hook wants: the slider's with the box on, retail DOA4 (18) for every block with it off.

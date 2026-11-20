@@ -1351,6 +1351,43 @@ static void TestMpvHeaderMarks() {
   MpvMem m2;
   m2.bytes = mpv2;
   CK(rdr::IsMarked(m2, kBase + mpp2));
+  // Part B PB8: the converter's output with a pin, through Part A's hook path. Bound as mpv is above (+8 = 1, +0x18 and
+  // the pose addresses absolute), behind 0x200 bytes of room so the pin's cloth target (pins[0].rel = -0x100 from the
+  // block) is test memory. At 18 ApplyAge writes nothing and asks for the pins; FollowPins with a non-zero blend then
+  // writes the target, which needs the converter's pin table where Part A's place check looks (right after the up pose,
+  // 16-aligned, +0x2C records). Expected target: rest + down weight * down ratio (1) * down + up weight * up ratio (1) *
+  // up, from the fixture's own rows: (1 + 0.5*4 + 0.25*7, 2 + 0.5*5 + 0.25*8, 3 + 0.5*6 + 0.25*9) = (4.75, 6.5, 8.25).
+  {
+    constexpr uint32_t kRoom = 0x200;
+    MpvMem g;
+    g.bytes.assign(kRoom, 0);
+    g.bytes.insert(g.bytes.end(), mpv2.begin(), mpv2.end());
+    const uint32_t blk = kBase + kRoom + mpp2;
+    for (int i = 0; i < 3; ++i) g.WriteU32(blk + 0x1C + 4 * i, blk + Be32(mpv2, mpp2 + 28 + 4 * i));
+    g.WriteU32(blk + 0x08, 1);
+    g.WriteU32(blk + 0x18, blk + Be32(mpv2, mpp2 + 0x18));
+    const rdr::AgeStep st = rdr::ApplyAge(g, blk, true, 18, 2.0f);
+    CKF(!st.wrote && st.follow_pins && st.refused == rdr::Refusal::kNone, "ApplyAge at 18: wrote %d follow_pins %d refused %d",
+        int(st.wrote), int(st.follow_pins), int(st.refused));
+    MpvMem g99 = g;  // positive control: the binding is one Rescale accepts (wrote == false above is not a refusal)
+    CK(rdr::ApplyAge(g99, blk, true, 99, 2.0f).wrote);
+    const uint32_t target = blk - 0x100;
+    CK(target >= kBase + 0x10 && g.ReadU32(target) == 0 && g.ReadU32(target + 4) == 0 && g.ReadU32(target + 8) == 0);
+    const std::vector<uint8_t> before_pins = g.bytes;
+    rdr::FollowPins(g, blk, rdr::Blend{0.5f, 0.25f});
+    const float want_pin[3] = {4.75f, 6.5f, 8.25f};
+    int moved = 0;
+    for (uint32_t p = 0; p < g.ReadU32(blk + 0x44); ++p) {
+      const uint32_t t = blk + uint32_t(int32_t(g.ReadU32(blk + g.ReadU32(blk + 0x40) + 40 * p)));
+      bool all = true;
+      for (int c = 0; c < 3; ++c) all = all && g.F(t + 4 * c) == want_pin[c];
+      moved += all ? 1 : 0;
+    }
+    CKF(moved == 1, "FollowPins moved %d of the converter's 1 pin target to (4.75, 6.5, 8.25)", moved);
+    size_t changed = 0;
+    for (size_t i = 0; i < g.bytes.size(); ++i) changed += g.bytes[i] != before_pins[i] ? 1 : 0;
+    CKF(changed > 0 && changed <= 12, "FollowPins changed %zu bytes, all inside the one target's 12", changed);
+  }
   // an empty list of pins is Python's None
   const std::vector<cb::PinRow> none;
   CK(cb::BuildMpv(ch.objects, ch.geos, ch.bind4, ch.chest, 0.0005, fd, fu, nullptr, &none) == mpv);

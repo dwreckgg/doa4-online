@@ -13,6 +13,8 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -297,6 +299,96 @@ void TestEffectiveSetting() {
                   int(r.box), int(r.legacy), r.wanted, b::WantedAge(s));
     Check(b::WantedAge(s) == r.wanted, what);
   }
+}
+
+// Part B (0.3.7's line): LineSetting is EffectiveSetting with the old full-bust setting retired (ruling B1: nobody gets
+// retail costumes changed without ticking the new box themselves). T2.2: the likeliest wrong version passes
+// legacy_full = true (or reads the old cvar), which turns every never-saved row into the box on at 99; each such row
+// carries that answer as an explicit NOT. Expected values from the Interfaces (LineSetting = EffectiveSetting(age, box,
+// false)), traced by hand and through the pre-flight model (p1_scratch/model.py), not from the code under test.
+void TestLineSetting() {
+  struct Row {
+    int saved_age;
+    bool box, on;
+    int age, wanted;
+  };
+  constexpr bool F = false, T = true;
+  const Row rows[] = {
+      {0, F, F, 18, 18},    // never saved, box off: retail; NOT {true, 99} (B1)
+      {0, T, T, 18, 18},    // never saved, box on: the slider's default 18; NOT {true, 99}
+      {-5, F, F, 18, 18},   // hand-edited below 1: never saved
+      {99, T, T, 99, 99},
+      {99, F, F, 99, 18},   // the greyed slider shows 99, the hook wants 18
+      {150, T, T, 99, 99},  // hand-edited above 99: clamped
+      {1, T, T, 1, 1},      // the lowest age is kept, not raised to 18
+  };
+  for (const Row& r : rows) {
+    char what[160];
+    const b::AgeSetting s = b::LineSetting(r.saved_age, r.box);
+    std::snprintf(what, sizeof what, "LineSetting(%d, box %d) == {on %d, age %d} (got {%d, %d})", r.saved_age,
+                  int(r.box), int(r.on), r.age, int(s.on), s.age);
+    Check(s == b::AgeSetting{r.on, r.age}, what);
+    std::snprintf(what, sizeof what, "LineSetting(%d, box %d) is NOT {true, 99} unless saved at 99+ with the box on",
+                  r.saved_age, int(r.box));
+    Check(r.saved_age >= 99 && r.box ? s == b::AgeSetting{true, 99} : !(s == b::AgeSetting{true, 99}), what);
+    std::snprintf(what, sizeof what, "WantedAge(LineSetting(%d, box %d)) == %d (got %d)", r.saved_age, int(r.box),
+                  r.wanted, b::WantedAge(s));
+    Check(b::WantedAge(s) == r.wanted, what);
+  }
+}
+
+// Part B (PB4): the session's box and age from the host's hand-off text (np::SessionBust reads it once). Age: a whole
+// decimal int32, box: exactly "true" or "false"; both valid -> LineSetting; a missing line (a 0.3.7 recording's replay)
+// -> box off at 18 silently; anything else -> box off at 18 and the note names the ignored value. T2.2: the likeliest
+// wrong versions are a parse of the numeric prefix ("99abc" -> 99), a box read as "not false" ("maybe", "True", "" ->
+// on), a missing line treated as a malformed one (a note on every old replay), and a fallback to the old full-bust
+// rule ("0" with the box on -> 99). Every malformed row carries NOT {true, 99}: that is what each wrong parse gives.
+using OptText = std::optional<std::string>;
+
+std::string Show(const OptText& t) { return t ? "\"" + *t + "\"" : std::string("missing"); }
+
+void CheckFromText(const OptText& age, const OptText& box, b::AgeSetting want, const char* note_has, const char* why) {
+  std::string note = "stale";  // the reader must clear it
+  const b::AgeSetting s = b::SettingFromText(age, box, &note);
+  char what[256];
+  std::snprintf(what, sizeof what, "SettingFromText(age %s, box %s) == {on %d, age %d} (got {%d, %d}): %s",
+                Show(age).c_str(), Show(box).c_str(), int(want.on), want.age, int(s.on), s.age, why);
+  Check(s == want, what);
+  if (note_has == nullptr) {
+    std::snprintf(what, sizeof what, "SettingFromText(age %s, box %s): no note (got \"%s\")", Show(age).c_str(),
+                  Show(box).c_str(), note.c_str());
+    Check(note.empty(), what);
+  } else {
+    std::snprintf(what, sizeof what, "SettingFromText(age %s, box %s): the note names %s (got \"%s\")",
+                  Show(age).c_str(), Show(box).c_str(), note_has, note.c_str());
+    Check(note.find(note_has) != std::string::npos, what);
+    std::snprintf(what, sizeof what, "SettingFromText(age %s, box %s) is NOT {true, 99}", Show(age).c_str(),
+                  Show(box).c_str());
+    Check(!(s == b::AgeSetting{true, 99}), what);
+  }
+}
+
+void TestSettingFromText() {
+  const b::AgeSetting off{false, 18};
+  // valid pairs: LineSetting of the parsed values
+  CheckFromText(std::nullopt, std::nullopt, off, nullptr, "no lines (a 0.3.7 recording): the game's own, silently");
+  CheckFromText("99", "true", {true, 99}, nullptr, "valid");
+  CheckFromText("99", "false", {false, 99}, nullptr, "valid, box off");
+  CheckFromText("0", "false", off, nullptr, "never saved, box off");
+  CheckFromText("0", "true", {true, 18}, nullptr, "never saved, box on: 18, NOT 99 (B1)");
+  CheckFromText("150", "true", {true, 99}, nullptr, "clamped like the cvar");
+  CheckFromText("-5", "true", {true, 18}, nullptr, "below 1 like the cvar");
+  // malformed: box off at 18, the note names the ignored value
+  CheckFromText("abc", "true", off, "doa4_bust_age \"abc\"", "not a number");
+  CheckFromText("99", "maybe", off, "doa4_bust_age_on \"maybe\"", "not a bool");
+  CheckFromText("99abc", "true", off, "doa4_bust_age \"99abc\"", "a numeric prefix is not a number");
+  CheckFromText(" 99", "true", off, "doa4_bust_age \" 99\"", "a leading space is not part of a number");
+  CheckFromText("99", "True", off, "doa4_bust_age_on \"True\"", "the registry prints true in lower case");
+  CheckFromText("99", "", off, "doa4_bust_age_on \"\"", "an empty box is not false");
+  CheckFromText("4294967395", "true", off, "doa4_bust_age \"4294967395\"", "out of int32 (2^32 + 99): not 99");
+  // one missing line: the game's own, silently, whichever line is missing
+  CheckFromText("99", std::nullopt, off, nullptr, "box line missing");
+  CheckFromText(std::nullopt, "true", off, nullptr, "age line missing");
 }
 
 void TestIsBustState() {
@@ -1072,6 +1164,8 @@ int main() {
   TestConstants();
   TestEffectiveAge();
   TestEffectiveSetting();
+  TestLineSetting();
+  TestSettingFromText();
   TestIsBustState();
   TestCountRecords();
   TestIsRetailBustCandidate();

@@ -535,8 +535,10 @@ REX_HOOK_RAW(sub_823FE150) {
 
 // The morph dispatcher (r3 = a morph state, +0 = its bound MPP block) runs for every morph of every fighter each frame,
 // before the appliers write the pose into the vertices. The Extras tab's "Age:" box (doa4_bust_age_on) and slider
-// (doa4_bust_age, 1-99, 18 = the file's own strength) give the wanted age (doa4_suits_bust.h EffectiveSetting,
-// WantedAge), applied here, so a change takes effect at once:
+// (doa4_bust_age, 1-99, 18 = the file's own strength) give the wanted age (doa4_suits_bust.h LineSetting, WantedAge;
+// the old doa4_suits_full_bust is retired on this line and never read), applied here, so a change takes effect at once
+// offline. In a session or a replay AgeWanted runs the host's (the recording's) box and age instead, from the hand-off
+// text, read once and latched (np::SessionBust; np_handoff.cpp kPortSettings):
 // - a converted suit's bust block (marked "DX2B" by the converter) is moved to the age's ratio, and its chest cloth's
 //   pins follow;
 // - a retail bust block on one of the four channel-4 morph states is tagged ("D4AG") the first time a frame wants an age
@@ -557,7 +559,8 @@ REX_HOOK_RAW(sub_823FE150) {
 // A failed save of the box changes nothing live.
 // A retail block's strongest ratio (its age-99 ratio) is one value for every girl (route G3), 2.0; test switch
 // DOA4_BUST_AGE_MAX=<float> overrides it, read once. Test switch DOA4_SUITS_BUST_FLIP_S=<seconds>: alternates ages 18
-// and 99 on that period, read once.
+// and 99 on that period, read once, ahead of the session value and the cvars. Both switches change guest state, so both
+// go through np::TestSwitch (in a session they count only with DOA4_NP_TEST_DIR set).
 namespace {
 
 struct GuestMem {
@@ -593,7 +596,7 @@ SeenOnce g_seen_refused;     // refused candidates (one WARN each, 8 in total)
 
 float RetailFull() {
   static const float full = [] {
-    const char* env = std::getenv("DOA4_BUST_AGE_MAX");
+    const char* env = doa4::np::TestSwitch("DOA4_BUST_AGE_MAX");  // changes guest state: not a player's to set online
     const doa4::suits::bust::StrongestTable t = doa4::suits::bust::ParseStrongest(
         env ? std::string_view(env) : std::string_view(), doa4::suits::bust::kRetailStrongest);
     if (t.dropped) {
@@ -608,23 +611,44 @@ float RetailFull() {
 }
 
 int AgeWanted() {
+  namespace bust = doa4::suits::bust;
+  // 1. The flip switch (a TestSwitch: in a session only with DOA4_NP_TEST_DIR), read once; it decides alone.
   static const int flip = [] {
     const char* env = doa4::np::TestSwitch("DOA4_SUITS_BUST_FLIP_S");  // changes guest state: not a player's to set online
     return env ? std::atoi(env) : 0;
   }();
-  // Read order: the age, then the box (the menu writes the box, then the age; Review Focus 1), then the old setting.
-  const int32_t raw = rex::cvar::Query<int32_t>("doa4_bust_age");
-  const bool box = rex::cvar::Query<bool>("doa4_bust_age_on");
-  const bool legacy = rex::cvar::Query<bool>("doa4_suits_full_bust");
-  int age = doa4::suits::bust::WantedAge(doa4::suits::bust::EffectiveSetting(raw, box, legacy));
+  bust::AgeSetting s{false, bust::kAgeRetail};
+  bool from_session = false;
   if (flip > 0) {
     using namespace std::chrono;
     const bool high = (duration_cast<seconds>(steady_clock::now().time_since_epoch()).count() / flip) % 2 != 0;
-    age = high ? doa4::suits::bust::kAgeMax : doa4::suits::bust::kAgeRetail;
+    s = high ? bust::AgeSetting{true, bust::kAgeMax} : bust::AgeSetting{false, bust::kAgeRetail};
+  } else {
+    // 2. In a session or a replay: the host's (the recording's) box and age, read once and latched, never the cvars.
+    // The SDK's F4 overlay writes the cvars on one PC at any moment (the Extras lock does not reach it), and a rescale
+    // writes guest memory (np_handoff.h, GuestSettingNames). A function-local static: this runs on the morph worker
+    // threads before g_bust_mutex is taken, and its first call initialises it once.
+    static const std::optional<bust::AgeSetting> session = [] {
+      const std::optional<bust::AgeSetting> value = doa4::np::SessionBust();
+      if (value) REXLOG_INFO("[doa4][SUITS] session: bust age box {} age {}", value->on, value->age);
+      return value;
+    }();
+    if (session) {
+      s = *session;
+      from_session = true;
+    } else {
+      // 3. Offline: the cvars, live, so the Extras box and slider act at once. Read order: the age, then the box (the
+      // menu writes the box, then the age; Review Focus 1).
+      const int32_t raw = rex::cvar::Query<int32_t>("doa4_bust_age");
+      const bool box = rex::cvar::Query<bool>("doa4_bust_age_on");
+      s = bust::LineSetting(raw, box);
+    }
   }
+  const int age = bust::WantedAge(s);
   if (g_last_wanted.exchange(age, std::memory_order_relaxed) != age &&
       g_wanted_logs.fetch_add(1, std::memory_order_relaxed) < 40) {
-    REXLOG_INFO("[doa4][SUITS] bust age: wanted {} (raw {}, box {}, legacy {}, flip {})", age, raw, box, legacy, flip);
+    REXLOG_INFO("[doa4][SUITS] bust age: wanted {} (age {}, box {}, session {}, flip {})", age, s.age, s.on,
+                from_session, flip);
   }
   return age;
 }
