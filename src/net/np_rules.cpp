@@ -569,9 +569,9 @@ std::string MismatchAdvice(std::string_view mine, std::string_view theirs) {
   if (theirs.empty())  // its own updater cannot fetch releases
     return "The other player has an older game: they need the newest release from the GitHub Releases page.";
   if (IsDevBuild(mine))
-    return "You run a self-built exe: both of you should use the latest release (press Check for Updates). A native Linux build plays only against the same Linux build.";
+    return "You run a self-built exe: both of you should use the latest release (press Check for Updates), or the same native Linux build.";
   if (IsDevBuild(theirs))
-    return "The other player runs a self-built exe: both of you should use the latest release (Check for Updates). A native Linux build plays only against the same Linux build.";
+    return "The other player runs a self-built exe: both of you should use the latest release (Check for Updates), or the same native Linux build.";
   // Two release schemes: the retired "netplay" channel (netplay-v1.0.x) is the older game whatever its numbers, since
   // the alpha channel restarted the numbering. Any other pair of differing channels: the numbers decide.
   const bool cross = Channel(mine) != Channel(theirs);
@@ -588,7 +588,7 @@ std::string MismatchAdvice(std::string_view mine, std::string_view theirs) {
   if (c > 0)
     return "The other player has an older release (" + t + ", you " + m + "): they need to press Check for Updates.";
   return "Both games say the same version (" + (cross ? m + ", " + t : m) +
-         ") but the builds differ: Windows and native Linux builds cannot play each other; otherwise download it again from the GitHub Releases page.";
+         ") but the builds differ: download it again from the Releases page, unless one is native Linux.";
 }
 
 // =====================================================================================================
