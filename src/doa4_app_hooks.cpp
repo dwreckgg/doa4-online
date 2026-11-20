@@ -519,7 +519,11 @@ static void DOA4_FIBER_PROC GuestFiberProc(void* param) {
     if (tls_initial_fiber && tls_initial_fiber != HostFiberCurrent()) {
       HostFiberSwitch(tls_initial_fiber);
     } else {
+#if defined(_WIN32)
+      Sleep(1000);
+#else
       std::this_thread::sleep_for(std::chrono::seconds(1));
+#endif
     }
   }
 }
