@@ -13,14 +13,15 @@ namespace doa4::colour_costumes {
 
 namespace {
 
-// Task 2's value table (ou_runs/colour_costumes/colours/values.txt), printed by a script from it. tpr_file = 914 + the
-// avt.afs entry Task 1B proved and assigned (373-379).
+// Task 2's value table (ou_runs/colour_costumes/colours/values.txt), printed by a script from it; the two Halo 3 rows
+// (Pink on base COS. 3, Orchid on base COS. 6) from colours_po/values.txt (Spartan pink/orchid plan, Task 3). tpr_file =
+// 914 + the avt.afs entry Task 1B proved and assigned (373-379).
 constexpr SlotTable kSlots = {
     SlotDef{Slot::kAlphaRed, "alpha_red", 16, 1, 1287, 428, 427, 3758080, "caf01e0e2d9874c8f87f664ecfe3469ee864999e"},
     SlotDef{Slot::kAlphaBlue, "alpha_blue", 16, -1, 1288, 428, 427, 3758080, "c9c10d06da970a63460521eff34f0a3119b8e192"},
     SlotDef{Slot::kAlphaLilac, "alpha_lilac", 16, -1, 1289, 428, 427, 3758080, "624851c6b8ce5550fa169db4b0371e87a401f6b4"},
-    SlotDef{Slot::kSpartanH3Red, "spartan_h3_red", 18, -1, 1290, 444, 443, 18741248, "068a8ba170264dcc556060ede12c2a81f7c00715"},
-    SlotDef{Slot::kSpartanH3Blue, "spartan_h3_blue", 18, -1, 1291, 446, 445, 18741248, "dc13e4fd5410ec68049cbdb89aa4c5fc3abb6c9e"},
+    SlotDef{Slot::kSpartanH3Pink, "spartan_h3_pink", 18, -1, 1290, 440, 439, 18741248, "21f76e0b9f91bf5bfa9b1a1bdaee328b36e77a45"},
+    SlotDef{Slot::kSpartanH3Orchid, "spartan_h3_orchid", 18, -1, 1291, 446, 445, 18741248, "40b71311f008d6cd7b773502777033ad70c51f4c"},
     SlotDef{Slot::kSpartanH2Orange, "spartan_h2_orange", 18, -1, 1292, 438, 437, 18741248, "f9c779965c82b84bbc8b1320469327ac53a959e2"},
     SlotDef{Slot::kSpartanH2Cyan, "spartan_h2_cyan", 18, -1, 1293, 448, 447, 18741248, "9dde70ca7fc656da0e4026e6c2b0d9d9cc7c5c50"},
 };

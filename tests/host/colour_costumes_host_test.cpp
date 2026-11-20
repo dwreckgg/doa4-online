@@ -69,8 +69,8 @@ static const LedgerRow kLedger[kSlotCount] = {
     {"alpha_red", 16, 1, 1287, 428, 427, 3758080ull, "caf01e0e2d9874c8f87f664ecfe3469ee864999e"},
     {"alpha_blue", 16, -1, 1288, 428, 427, 3758080ull, "c9c10d06da970a63460521eff34f0a3119b8e192"},
     {"alpha_lilac", 16, -1, 1289, 428, 427, 3758080ull, "624851c6b8ce5550fa169db4b0371e87a401f6b4"},
-    {"spartan_h3_red", 18, -1, 1290, 444, 443, 18741248ull, "068a8ba170264dcc556060ede12c2a81f7c00715"},
-    {"spartan_h3_blue", 18, -1, 1291, 446, 445, 18741248ull, "dc13e4fd5410ec68049cbdb89aa4c5fc3abb6c9e"},
+    {"spartan_h3_pink", 18, -1, 1290, 440, 439, 18741248ull, "21f76e0b9f91bf5bfa9b1a1bdaee328b36e77a45"},
+    {"spartan_h3_orchid", 18, -1, 1291, 446, 445, 18741248ull, "40b71311f008d6cd7b773502777033ad70c51f4c"},
     {"spartan_h2_orange", 18, -1, 1292, 438, 437, 18741248ull, "f9c779965c82b84bbc8b1320469327ac53a959e2"},
     {"spartan_h2_cyan", 18, -1, 1293, 448, 447, 18741248ull, "9dde70ca7fc656da0e4026e6c2b0d9d9cc7c5c50"},
 };
@@ -84,7 +84,7 @@ static const StandInRow kStandInLedger[kSlotCount] = {
     {427, 3758080ull, "b2d94ab7b1da6d4ccdf0e136140d58216639a209"},
     {427, 3758080ull, "b2d94ab7b1da6d4ccdf0e136140d58216639a209"},
     {427, 3758080ull, "b2d94ab7b1da6d4ccdf0e136140d58216639a209"},
-    {443, 18741248ull, "8d68f350c547f935b25225aa3a95b795ee7a16d5"},
+    {439, 18741248ull, "2f8b20c08c23ec96635bbc10d042c77260e27062"},
     {445, 18741248ull, "7467381f8b20fa3a0ab739e3f4486ddba81b3fe2"},
     {437, 18741248ull, "05274f0370b48e8306580d3585ce7f6de655e098"},
     {447, 18741248ull, "9c4fc2f8019a2b12a1c5bfd9374a4d2d8f1b40ea"},
@@ -92,9 +92,10 @@ static const StandInRow kStandInLedger[kSlotCount] = {
 // Task 1B's proven avt.afs entries (files 914 + entry), the ones assigned to the slots.
 static constexpr uint32_t kProvenFirst = 373, kProvenLast = 379;
 static constexpr uint32_t kAvtFirstFile = 914;
-// Where Task 2 mapped the chrthree files: (file, entry).
-static const std::map<int, uint32_t> kChrthreeEntry = {{427, 22}, {428, 23}, {437, 32}, {438, 33}, {443, 38},
-                                                       {444, 39}, {445, 40}, {446, 41}, {447, 42}, {448, 43}};
+// Where Task 2 mapped the chrthree files: (file, entry); the pink/orchid plan's Task 3 put pink on COS. 3 (439/440 =
+// entries 34/35) in place of h3_red's COS. 5 (443/444).
+static const std::map<int, uint32_t> kChrthreeEntry = {{427, 22}, {428, 23}, {437, 32}, {438, 33}, {439, 34},
+                                                       {440, 35}, {445, 40}, {446, 41}, {447, 42}, {448, 43}};
 
 struct FakeGuest {
   std::map<uint32_t, uint8_t> bytes;
@@ -386,7 +387,7 @@ static void TestLoadWrongSize() {
   PrintNotes("TestLoadWrongSize", s);
   CHECK(s.usable);
   CHECK(s.notes.size() == 1);
-  CHECK(NotesNaming(s, "spartan_h3_blue") == 1);
+  CHECK(NotesNaming(s, "spartan_h3_orchid") == 1);
   CheckSlots(s, {4});
   // A missing file: the same grain (another folder: `s` holds this one's files open, so they cannot be deleted).
   World w2;
@@ -429,14 +430,14 @@ static void TestStandInUnreadable() {
     CHECK(Contains(s.Summary(), "not installed"));
   }
   {
-    // One slot needs its stand-in, and its entry (40, spartan_h3_blue's) is past the archive's end; the others are good.
+    // One slot needs its stand-in, and its entry (40, spartan_h3_orchid's) is past the archive's end; the others are good.
     World w(40);
     fs::remove(w.File(4));
     const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
     PrintNotes("TestStandInUnreadable (b)", s);
     CHECK(!s.usable);
     CHECK(s.notes.size() == 2);  // the missing file, then the stand-in
-    CHECK(NotesNaming(s, "spartan_h3_blue") == 2);
+    CHECK(NotesNaming(s, "spartan_h3_orchid") == 2);
     CHECK(TableExtras(s).empty());
     CHECK(Replacements(s, g.guest).empty());
     CHECK(EntryLabels(s, g.guest).empty());
@@ -559,7 +560,7 @@ static void TestEntryLabels() {
   CHECK(s2.usable && s2.slots.size() == kSlotCount && s2.slots[3].stand_in);
   const auto labels2 = EntryLabels(s2, g.guest);
   const auto l2 = labels2.find("avt.afs");
-  CHECK(l2 != labels2.end() && l2->second.count(376) && l2->second.at(376) == "colour spartan_h3_red");
+  CHECK(l2 != labels2.end() && l2->second.count(376) && l2->second.at(376) == "colour spartan_h3_pink");
 }
 
 static uint32_t Bits(float f) { return std::bit_cast<uint32_t>(f); }
@@ -584,7 +585,7 @@ static void TestAlphaRows() {
   CHECK(blue && RowIs(blue->outline, {0x3D23D70Au, 0x3D8F5C29u, 0x3ECCCCCDu, 0x41200000u}));
   CHECK(lilac && RowIs(lilac->refract, {0x3F800000u, 0x3F19999Au, 0x4019999Au, 0x3ECCCCCDu}));
   CHECK(lilac && RowIs(lilac->outline, {0x3DE147AEu, 0x3D851EB8u, 0x3ECCCCCDu, 0x41200000u}));
-  for (Slot sp : {Slot::kSpartanH3Red, Slot::kSpartanH3Blue, Slot::kSpartanH2Orange, Slot::kSpartanH2Cyan}) {
+  for (Slot sp : {Slot::kSpartanH3Pink, Slot::kSpartanH3Orchid, Slot::kSpartanH2Orange, Slot::kSpartanH2Cyan}) {
     CHECK(!AlphaRowFor(sp).has_value());
   }
 }
@@ -634,8 +635,8 @@ static void TestSlotTableValues() {
 static void TestSlotTableOnImage() {
   FakeGuest g = ImageGuest();
   const SlotTable& t = Slots();
-  static const uint32_t kCatEntry[kSlotCount] = {23, 23, 23, 39, 41, 33, 43};
-  static const uint32_t kStandInEntry[kSlotCount] = {22, 22, 22, 38, 40, 32, 42};
+  static const uint32_t kCatEntry[kSlotCount] = {23, 23, 23, 35, 41, 33, 43};
+  static const uint32_t kStandInEntry[kSlotCount] = {22, 22, 22, 34, 40, 32, 42};
   for (size_t i = 0; i < kSlotCount; ++i) {
     const auto tpr = costumes::FileLocation(g.guest, t[i].tpr_file);
     const auto cat = costumes::FileLocation(g.guest, t[i].cat_file);
@@ -763,9 +764,9 @@ static void TestManifestGrains() {
     lines[1] = "alpha_blue ../colour_costumes/alpha_blue.tpr";
     lines[2] = "alpha_lilac sub\\alpha_lilac.tpr";
     Write(w.colours / "sub" / "alpha_lilac.tpr", ColourBytes(2));
-    lines[3] = "spartan_h3_red c:spartan_h3_red.tpr";
-    lines[4] = "spartan_h3_blue ..spartan_h3_blue.tpr";
-    Write(w.colours / "..spartan_h3_blue.tpr", ColourBytes(4));
+    lines[3] = "spartan_h3_pink c:spartan_h3_pink.tpr";
+    lines[4] = "spartan_h3_orchid ..spartan_h3_orchid.tpr";
+    Write(w.colours / "..spartan_h3_orchid.tpr", ColourBytes(4));
     WriteText(w.colours / "manifest.txt", ManifestOf(lines, "\n"));
     // Precondition: each path names a real file of the right bytes, so only the name rule can refuse it.
     CHECK(ReadAll(w.colours / "sub/alpha_red.tpr") == ColourBytes(0));
@@ -812,6 +813,59 @@ static void TestManifestGrains() {
   }
 }
 
+// Spartan pink/orchid plan, Review Focus 1: a colour folder made for the OLD table (its manifest names spartan_h3_red and
+// spartan_h3_blue, the two slots Pink and Orchid replaced) beside the new table. Those two lines are unknown slots (one
+// note each, ignored), the two new slots have no line and show their stand-ins (the new bases' retail entries 34 and 40),
+// the other five load. The old files hold bytes the new slots WOULD accept, so only the name rule refuses them; the
+// folder holds no file under a new name (as the play copy's old folder). Mutants (task-3-report.md): an unknown
+// "spartan_h3_" name falling to the first such slot, and a slot with no line taking the file on its own line number.
+static void TestOldManifestBesideNewTable() {
+  World w;
+  FakeGuest g = PlantedGuest();
+  CHECK(fs::remove(w.File(3)) && fs::remove(w.File(4)));  // no spartan_h3_pink.tpr / spartan_h3_orchid.tpr
+  Write(w.colours / "spartan_h3_red.tpr", ColourBytes(3));
+  Write(w.colours / "spartan_h3_blue.tpr", ColourBytes(4));
+  // The old extract's manifest (ou_runs/colour_costumes/colours/manifest.txt), line for line.
+  WriteText(w.colours / "manifest.txt",
+            "alpha_red alpha_red.tpr\n"
+            "alpha_blue alpha_blue.tpr\n"
+            "alpha_lilac alpha_lilac.tpr\n"
+            "spartan_h3_red spartan_h3_red.tpr\n"
+            "spartan_h3_blue spartan_h3_blue.tpr\n"
+            "spartan_h2_orange spartan_h2_orange.tpr\n"
+            "spartan_h2_cyan spartan_h2_cyan.tpr\n");
+  // Preconditions: the old files pass the new slots' size and SHA-1 (only the name can refuse them); the table's names.
+  CHECK(Sha(ReadAll(w.colours / "spartan_h3_red.tpr")) == TestSlots()[3].sha1);
+  CHECK(Sha(ReadAll(w.colours / "spartan_h3_blue.tpr")) == TestSlots()[4].sha1);
+  CHECK(std::string(Slots()[3].name) == "spartan_h3_pink" && std::string(Slots()[4].name) == "spartan_h3_orchid");
+  CHECK(!fs::exists(w.File(3)) && !fs::exists(w.File(4)));
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  PrintNotes("old manifest", s);
+  CHECK(s.usable);
+  CHECK(s.notes.size() == 4);
+  CHECK(NoteAt(s, 0) == "manifest line 4 ignored (no colour slot is called spartan_h3_red)");
+  CHECK(NoteAt(s, 1) == "manifest line 5 ignored (no colour slot is called spartan_h3_blue)");
+  CHECK(NoteAt(s, 2) == "spartan_h3_pink: no manifest line; stand-in");
+  CHECK(NoteAt(s, 3) == "spartan_h3_orchid: no manifest line; stand-in");
+  CHECK(s.Summary() == "colour costumes: 7 slots, 5 from files, 2 stand-ins");
+  CheckSlots(s, {3, 4});
+  // The stand-ins are the new bases' retail entries (pink: COS. 3 = entry 34, orchid: COS. 6 = entry 40), not h3_red's
+  // COS. 5 (entry 38).
+  CHECK(s.slots.size() == kSlotCount && Holds(s.slots[3].tpr, StandInBytes(34)) && Holds(s.slots[4].tpr, StandInBytes(40)));
+  CHECK(s.slots.size() == kSlotCount && !Holds(s.slots[3].tpr, StandInBytes(38)));
+  // Every slot still gets its row and label: COS. 8 and 9 exist and draw their stand-ins (the new bases' cats).
+  const std::vector<costumes::Extra> extras = TableExtras(s);
+  CHECK(extras.size() == kSlotCount);
+  CHECK(extras.size() == kSlotCount && extras[3].body_tpr == 1290 && extras[3].body_cat == 440 &&
+        extras[3].label == "colour spartan_h3_pink");
+  CHECK(extras.size() == kSlotCount && extras[4].body_tpr == 1291 && extras[4].body_cat == 446 &&
+        extras[4].label == "colour spartan_h3_orchid");
+  const auto labels = EntryLabels(s, g.guest);
+  const auto l = labels.find("avt.afs");
+  CHECK(l != labels.end() && l->second.count(376) && l->second.at(376) == "colour spartan_h3_pink");
+  CHECK(l != labels.end() && l->second.count(377) && l->second.at(377) == "colour spartan_h3_orchid");
+}
+
 // A slot whose tpr_file has no place in the file table: its entry could never be overlaid, so nothing is installed (no
 // record may name an entry that is not overlaid).
 static void TestTprWithoutPlace() {
@@ -824,7 +878,7 @@ static void TestTprWithoutPlace() {
   PrintNotes("TestTprWithoutPlace", s);
   CHECK(!s.usable);
   CHECK(s.notes.size() == 1);
-  CHECK(NotesNaming(s, "spartan_h3_red") == 1);
+  CHECK(NotesNaming(s, "spartan_h3_pink") == 1);
   CHECK(TableExtras(s).empty());
   CHECK(Replacements(s, g.guest).empty());
   CHECK(EntryLabels(s, g.guest).empty());
@@ -947,8 +1001,8 @@ static void TestAppendedModels() {
   add(16, 2, 1, "colour alpha_red", true);
   add(16, 3, 2, "colour alpha_blue", false);
   add(16, 4, 3, "colour alpha_lilac", false);
-  add(18, 8, 7, "colour spartan_h3_red", false);
-  add(18, 9, 8, "colour spartan_h3_blue", false);
+  add(18, 8, 7, "colour spartan_h3_pink", false);
+  add(18, 9, 8, "colour spartan_h3_orchid", false);
   const std::map<uint32_t, std::vector<uint8_t>> want = {{5, {7}}, {16, {3, 4}}, {18, {8, 9}}};
   CHECK(costumes::AppendedModels(applied) == want);
   // A character whose only extra replaces: no entry at all (CarrySuits is not called for her).
@@ -1103,6 +1157,7 @@ int main() {
   TestReplacementsByArchive();
   TestEntryLabels();
   TestManifestGrains();
+  TestOldManifestBesideNewTable();
   TestTprWithoutPlace();
   TestDecideRows();
   TestNotInstalledNoExtras();

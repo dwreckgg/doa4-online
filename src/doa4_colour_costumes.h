@@ -38,7 +38,7 @@
 
 namespace doa4::colour_costumes {
 
-enum class Slot : uint8_t { kAlphaRed, kAlphaBlue, kAlphaLilac, kSpartanH3Red, kSpartanH3Blue, kSpartanH2Orange, kSpartanH2Cyan };
+enum class Slot : uint8_t { kAlphaRed, kAlphaBlue, kAlphaLilac, kSpartanH3Pink, kSpartanH3Orchid, kSpartanH2Orange, kSpartanH2Cyan };
 inline constexpr size_t kSlotCount = 7;
 inline constexpr uint64_t kManifestLimit = 64 * 1024;
 

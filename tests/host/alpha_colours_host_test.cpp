@@ -537,7 +537,7 @@ static void TestRowsByModel() {
   applied.push_back({16, kRed, 1, "colour alpha_red", true});
   applied.push_back({16, 10, 3, "colour alpha_blue", false});
   applied.push_back({16, 11, 4, "colour alpha_lilac", false});
-  applied.push_back({18, 12, 7, "colour spartan_h3_red", false});
+  applied.push_back({18, 12, 7, "colour spartan_h3_pink", false});
   applied.push_back({16, 13, 5, "a swimsuit", false});
   applied.push_back({18, kBlue, 8, "colour alpha_blue", false});  // Alpha's label on another character: no row
   const ac::RowMap m = ac::RowsByModel(applied);
