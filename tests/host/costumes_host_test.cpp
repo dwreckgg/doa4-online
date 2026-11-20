@@ -1583,6 +1583,36 @@ static void TestExtrasLimit() {
     CHECK(r.refused.size() == 1 && r.refused.count("c24b c0") == 1);  // m255 would mean "none"
     CHECK(r.guard.records[24] == 255);
   }
+  for (uint32_t blocks : {254u, 255u}) {  // A replacing extra needs a record too: m254 is the last one it may take.
+    FakeGuest g;
+    PokeBe32(g, kModelTable + 4, 0x82C5E720 + 8 * blocks);
+    CHECK(RecordCount(g.guest, 24) == blocks);  // precondition
+    const ApplyResult r = Apply(g.guest, g.alloc, {MakeExtra(24, 901, 902, 1, "c24 red")}, {});
+    if (blocks == 254) {
+      CHECK(r.refused.empty() && AppliedIs(r, 0, 24, 254, 1, true, "c24 red") && r.guard.records[24] == 255);
+    } else {
+      CHECK(r.applied.empty() && r.refused.count("c24 red") == 1 && g.written.empty());
+    }
+  }
+  {  // An appending extra past a limit is refused by name too: 254 records take one more, not two.
+    FakeGuest g;
+    PokeBe32(g, kModelTable + 4, 0x82C5E720 + 8 * 254);
+    CHECK(RecordCount(g.guest, 24) == 254);  // precondition
+    const ApplyResult r =
+        Apply(g.guest, g.alloc, {MakeExtra(24, 901, 902, -1, "c24 one"), MakeExtra(24, 903, 904, -1, "c24 two")}, {});
+    CHECK(r.applied.size() == 1 && AppliedIs(r, 0, 24, 254, 3, false, "c24 one"));
+    CHECK(r.refused.size() == 1 && r.refused.count("c24 two") == 1);
+  }
+  {  // 17 costumes with extras only: Spartan 7 + 10 appending extras fit, the 11th is refused by name.
+    FakeGuest g;
+    std::vector<Extra> extras;
+    for (int j = 0; j < 11; ++j) {
+      extras.push_back(MakeExtra(18, uint16_t(961 + 2 * j), uint16_t(962 + 2 * j), -1, ("x" + std::to_string(j)).c_str()));
+    }
+    const ApplyResult r = Apply(g.guest, g.alloc, extras, {});
+    CHECK(r.applied.size() == 10 && r.refused.size() == 1 && r.refused.count("x10") == 1);
+    CHECK(g.Get(kMaxTable + 18) == 17 && g.Get(kLenTable + 18) == 17 && r.guard.records[18] == 18);
+  }
 }
 
 static void TestReplaceRefusals() {
