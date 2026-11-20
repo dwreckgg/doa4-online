@@ -81,7 +81,8 @@ bool PlainFileName(const std::string& file) {
   return suits::SafeFileName(file) && file.find("..") == std::string::npos;
 }
 
-// The name for a note: bytes outside printable ASCII as \xNN, so a log line never carries them raw.
+// Text for a note: bytes outside printable ASCII as \xNN, so a log line never carries them raw. Every note that holds
+// text from outside the program (a manifest line, a word of it, a file name, the folder's path) holds it through this.
 std::string Printable(const std::string& text) {
   static const char kHex[] = "0123456789ABCDEF";
   std::string out;
@@ -120,7 +121,7 @@ Parsed ParseManifest(const SlotTable& slots, std::string text, std::vector<std::
     if (words.empty() || words[0][0] == '#') continue;
     const std::string at = "manifest line " + std::to_string(number);
     if (words.size() != 2) {
-      notes->push_back(at + " ignored (not \"<slot> <file>\"): " + std::string(line));
+      notes->push_back(at + " ignored (not \"<slot> <file>\"): " + Printable(std::string(line)));
       continue;
     }
     size_t slot = kSlotCount;
@@ -128,7 +129,7 @@ Parsed ParseManifest(const SlotTable& slots, std::string text, std::vector<std::
       if (words[0] == slots[i].name) slot = i;
     }
     if (slot == kSlotCount) {
-      notes->push_back(at + " ignored (no colour slot is called " + words[0] + ")");
+      notes->push_back(at + " ignored (no colour slot is called " + Printable(words[0]) + ")");
       continue;
     }
     if (seen_at[slot]) {
@@ -175,6 +176,29 @@ const SlotTable& Slots() { return kSlots; }
 
 bool Enabled(bool session, std::string_view np_mode) { return !session && (np_mode.empty() || np_mode == "record"); }
 
+std::filesystem::path ColourFolder(const std::filesystem::path& user_data, std::string_view override_utf8) {
+  std::filesystem::path folder = user_data / "colour_costumes";
+  if (!override_utf8.empty()) {
+    // A toml value that is not UTF-8 cannot name a folder: the default is read (the start-up line names it).
+    try {
+      folder = PathFromUtf8(override_utf8);
+    } catch (...) {
+    }
+  }
+  std::error_code ec;
+  const std::filesystem::path absolute = std::filesystem::absolute(folder, ec);
+  return ec ? folder : absolute;
+}
+
+InstallOutcome Decide(bool usable, bool build_ok, bool install_ok, bool retry_ok) {
+  const bool first_ok = build_ok && install_ok;
+  if (!usable) return first_ok ? InstallOutcome::kNotUsable : InstallOutcome::kFailed;
+  if (first_ok) return InstallOutcome::kInstalled;
+  return retry_ok ? InstallOutcome::kDropped : InstallOutcome::kFailed;
+}
+
+bool Installed(InstallOutcome outcome) { return outcome == InstallOutcome::kInstalled; }
+
 std::string Status::Summary() const {
   if (slots.empty()) return "colour costumes: off";
   if (!usable) return "colour costumes: not installed (see the notes)";
@@ -207,9 +231,9 @@ Status Load(const SlotTable& slots, const std::filesystem::path& folder, const s
   std::error_code ec;
   std::string text;
   if (!std::filesystem::is_directory(folder, ec)) {
-    status.notes.push_back("the colour folder " + Utf8(folder) + " is missing; every slot shows its stand-in");
+    status.notes.push_back("the colour folder " + Printable(Utf8(folder)) + " is missing; every slot shows its stand-in");
   } else if (!ReadSmallFile(folder / "manifest.txt", kManifestLimit, &text)) {
-    status.notes.push_back("manifest.txt in " + Utf8(folder) + " is missing, unreadable or over " +
+    status.notes.push_back("manifest.txt in " + Printable(Utf8(folder)) + " is missing, unreadable or over " +
                            std::to_string(kManifestLimit) + " bytes; every slot shows its stand-in");
   } else {
     const Parsed parsed = ParseManifest(slots, std::move(text), &status.notes);

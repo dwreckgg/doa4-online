@@ -357,6 +357,14 @@ SuitCounts CountSuits(const std::vector<Applied>& applied) {
   return counts;
 }
 
+std::map<uint32_t, std::vector<uint8_t>> AppendedModels(const std::vector<Applied>& applied) {
+  std::map<uint32_t, std::vector<uint8_t>> models;
+  for (const Applied& a : applied) {
+    if (!a.replaced) models[a.character].push_back(uint8_t(a.model));
+  }
+  return models;
+}
+
 std::vector<Raised> RaiseCountRow(const GuestBytes& g, uint32_t row, const SuitCounts& suits) {
   std::vector<Raised> changed;
   for (uint32_t c = 0; c < kCharCount; ++c) {

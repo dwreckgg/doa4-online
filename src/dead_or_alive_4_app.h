@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -70,6 +71,7 @@
 #include "doa4_setup_win.h"
 #include "doa4_afs_overlay.h"
 #include "doa4_afs_vfs.h"
+#include "doa4_colour_costumes.h"
 #include "doa4_display.h"
 #include "doa4_suitconv_job.h"
 #include "doa4_suits.h"
@@ -2085,6 +2087,18 @@ class DeadOrAlive4App : public rex::ReXApp {
     const std::filesystem::path game_root = std::filesystem::absolute(rt->game_data_root());
     using doa4::np::rules::SuitSession;
     const bool session = session_.has_value();
+    // The colour costumes (doa4_colour_costumes.h, local offline build), read first: an offline feature (no session, DOA4_NP
+    // "" or "record"). Their entries go into the swimsuits' overlays and their rows into the same Apply, before the suits.
+    // The line names the resolved folder, so a run can check the folder it really read (plan F17).
+    const char* np_mode = std::getenv("DOA4_NP");
+    const bool colours_on = doa4::colour_costumes::Enabled(session, np_mode ? np_mode : "");
+    const std::filesystem::path colour_dir = doa4::colour_costumes::ColourFolder(
+        UserData(), rex::cvar::Query<std::string>("doa4_colour_costumes_dir"));
+    doa4::colour_costumes::Status colours;
+    if (colours_on) colours = doa4::colour_costumes::Load(colour_dir, game_root, guest_);
+    REXLOG_INFO("[doa4][COLOURS] {}; folder {}{}", colours.Summary(), doa4::Utf8(colour_dir),
+                colours_on ? "" : " (not read: a session, replay or hash process)");
+    for (const std::string& note : colours.notes) REXLOG_WARN("[doa4][COLOURS] {}", note);
     // Review Focus 2: a session process never completes a swap (s.complete_swap is false there). The hand-off's checksum names
     // the import the lobby process loaded, and the session must load that same import, so nothing may replace it here. In a
     // process that is not a session the finished import is put in place BEFORE LoadImport opens the folder (LoadImport holds
@@ -2117,20 +2131,66 @@ class DeadOrAlive4App : public rex::ReXApp {
     // The combined archives that were really put in place (empty when there are none, or when
     // installing them failed): the empty-slot marks are read through exactly these.
     std::map<std::string, std::shared_ptr<const doa4::afs::Overlay>> installed;
-    bool any_applied = false;  // at least one suit is in the costume tables: the labels are needed
-    if (!suits_status_.suits.empty()) {
-      std::string error;
-      auto overlays = doa4::suits::BuildOverlays(suits_status_, game_root, guest_, &error);
-      if (overlays.empty()) {
-        suits_status_.Fail(error);
-      } else {
-        error = doa4::afs::InstallOverlays(*rt->file_system(), overlays,
-                                           doa4::suits::EntryLabels(suits_status_, guest_));
-        if (!error.empty()) {
-          suits_status_.Fail(error);
-        } else {
-          installed = std::move(overlays);
+    bool any_applied = false;  // at least one suit or colour costume is in the costume tables: the labels are needed
+    bool colours_installed = false;  // the colour entries are overlaid: only then do their rows go to Apply
+    if (!suits_status_.suits.empty() || colours.usable) {
+      // First-read labels: the suits' and, when their entries are in the build, the colours' (avt.afs).
+      const auto labels_with = [&](bool with_colours) {
+        auto labels = doa4::suits::EntryLabels(suits_status_, guest_);
+        if (with_colours) {
+          for (const auto& [archive, entries] : doa4::colour_costumes::EntryLabels(colours, guest_)) {
+            labels[archive].insert(entries.begin(), entries.end());
+          }
         }
+        return labels;
+      };
+      const std::map<std::string, std::vector<doa4::afs::Replacement>> colour_entries =
+          doa4::colour_costumes::Replacements(colours, guest_);  // empty unless colours.usable
+      size_t colour_entry_count = 0;
+      for (const auto& [archive, list] : colour_entries) colour_entry_count += list.size();
+      std::string error;
+      auto overlays = doa4::suits::BuildOverlays(suits_status_, game_root, guest_, &error, colour_entries);
+      const bool build_ok = !overlays.empty();
+      if (build_ok) error = doa4::afs::InstallOverlays(*rt->file_system(), overlays, labels_with(colours.usable));
+      const bool install_ok = build_ok && error.empty();
+      // A failure while the colour entries were in it: they are dropped and the suits built and installed again without
+      // them (InstallOverlays checks every target before it replaces any, so a failed install left nothing behind).
+      bool retry_ok = false;
+      std::string retry_error;
+      std::map<std::string, std::shared_ptr<const doa4::afs::Overlay>> without_colours;
+      if (colours.usable && !install_ok) {
+        if (suits_status_.suits.empty()) {
+          retry_ok = true;  // nothing else to install
+        } else {
+          without_colours = doa4::suits::BuildOverlays(suits_status_, game_root, guest_, &retry_error);
+          if (!without_colours.empty()) {
+            retry_error = doa4::afs::InstallOverlays(*rt->file_system(), without_colours, labels_with(false));
+          }
+          retry_ok = !without_colours.empty() && retry_error.empty();
+        }
+      }
+      switch (doa4::colour_costumes::Decide(colours.usable, build_ok, install_ok, retry_ok)) {
+        case doa4::colour_costumes::InstallOutcome::kInstalled:
+          installed = std::move(overlays);
+          colours_installed = true;
+          REXLOG_INFO("[doa4][COLOURS] installed: {} colour entries overlaid, beside {} swimsuits", colour_entry_count,
+                      suits_status_.suits.size());
+          break;
+        case doa4::colour_costumes::InstallOutcome::kDropped:
+          installed = std::move(without_colours);
+          REXLOG_WARN("[doa4][COLOURS] dropped: the overlays with the colour entries failed ({}); built and installed "
+                      "again without them, {} swimsuits kept",
+                      error, suits_status_.suits.size());
+          break;
+        case doa4::colour_costumes::InstallOutcome::kNotUsable:
+          installed = std::move(overlays);
+          REXLOG_INFO("[doa4][COLOURS] none installed (off or not usable); the swimsuits as without them");
+          break;
+        case doa4::colour_costumes::InstallOutcome::kFailed:
+          suits_status_.Fail(colours.usable ? retry_error : error);
+          REXLOG_WARN("[doa4][COLOURS] none installed: the overlays failed ({}){}", error,
+                      colours.usable ? ", and again without the colour entries (" + retry_error + ")" : std::string());
+          break;
       }
     }
     // What the lobby tells the other player: what this PC can really serve, boxes aside (they are the host's in a session).
@@ -2149,10 +2209,14 @@ class DeadOrAlive4App : public rex::ReXApp {
     } else {
       table_suits = doa4::suits::SuitsOf(suits_status_);
     }
-    if (!table_suits.empty()) {
+    // The colour costumes' rows (plan F10, step 4): only when their entries were installed, so no record ever names an entry
+    // that is not overlaid.
+    std::vector<doa4::costumes::Extra> extras;
+    if (colours_installed) extras = doa4::colour_costumes::TableExtras(colours);
+    if (!table_suits.empty() || !extras.empty()) {
       const auto alloc = [memory](uint32_t size) { return memory->SystemHeapAlloc(size); };
-      // The tables as they stand: the Extras boxes (SetUpExtras) went first.
-      const doa4::costumes::ApplyResult applied = doa4::costumes::Apply(guest_, alloc, table_suits);
+      // The tables as they stand: the Extras boxes (SetUpExtras) went first. Per character her colour rows, then her suits.
+      const doa4::costumes::ApplyResult applied = doa4::costumes::Apply(guest_, alloc, extras, table_suits);
       std::vector<doa4::suits::LoadedSuit> kept;
       for (const doa4::suits::LoadedSuit& l : suits_status_.suits) {
         bool in = false;
@@ -2168,14 +2232,24 @@ class DeadOrAlive4App : public rex::ReXApp {
       }
       suits_status_.suits = std::move(kept);
       for (const std::string& e : applied.errors) REXLOG_ERROR("[doa4][SUITS] {}", e);
-      std::map<uint32_t, std::vector<uint8_t>> models;
-      for (const auto& a : applied.applied) {
-        REXLOG_INFO("[doa4][SUITS] {}: charId {:#x} costume #{} = model {}", a.label, a.character,
-                    a.costume, a.model);
-        models[a.character].push_back(uint8_t(a.model));
+      std::set<std::string> colour_labels;
+      for (const doa4::costumes::Extra& e : extras) {
+        colour_labels.insert(e.label);
+        const auto refused = applied.refused.find(e.label);
+        if (refused != applied.refused.end()) REXLOG_ERROR("[doa4][COLOURS] {} refused: {}", e.label, refused->second);
       }
-      // The boxes can be toggled from the menu later: each state of her box holds her suits too.
-      for (const auto& [character, list] : models) {
+      for (const auto& a : applied.applied) {
+        if (colour_labels.count(a.label)) {
+          REXLOG_INFO("[doa4][COLOURS] {}: charId {:#x} costume #{} = model {}{}", a.label, a.character, a.costume, a.model,
+                      a.replaced ? " (takes over that costume's list entry)" : "");
+        } else {
+          REXLOG_INFO("[doa4][SUITS] {}: charId {:#x} costume #{} = model {}", a.label, a.character,
+                      a.costume, a.model);
+        }
+      }
+      // The boxes can be toggled from the menu later: each state of her box holds her suits too, and her appended colour
+      // costumes; a replacing one adds no costume, so it is not carried (plan F19: costumes::AppendedModels).
+      for (const auto& [character, list] : doa4::costumes::AppendedModels(applied.applied)) {
         const std::string error = patcher_.CarrySuits(guest_, alloc, character, list);
         if (!error.empty()) REXLOG_ERROR("[doa4][SUITS] {}", error);
       }

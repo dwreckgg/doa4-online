@@ -45,6 +45,11 @@ REXCVAR_DEFINE_STRING(doa4_game_files, "", "DOA4",
 REXCVAR_DEFINE_BOOL(doa4_suits_import_pending, false, "DOA4",
                     "A DOAX2 swimsuit import was started and has not finished; the next start offers it again");
 
+// Colour costumes (doa4_colour_costumes.h, local offline build): the folder holding manifest.txt and the colour files.
+// Empty: <user data>/colour_costumes.
+REXCVAR_DEFINE_STRING(doa4_colour_costumes_dir, "", "DOA4",
+                      "Folder holding the colour costume files (empty: the user data folder's colour_costumes)");
+
 // The save and shader-cache folder (doa4_gamefiles.h ChooseUserData); the
 // command line's --user_data_root overrides it. Empty: Documents\dead_or_alive_4.
 REXCVAR_DEFINE_STRING(doa4_user_data, "", "DOA4",

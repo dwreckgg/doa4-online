@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "../../src/doa4_costume_lists.h"
 #include "../../src/doa4_costumes.h"
 #include "../../src/doa4_gamefiles.h"
 #include "../../src/doa4_tweaks.h"
@@ -102,6 +103,13 @@ struct FakeGuest {
                            return it == bytes.end() ? uint8_t(0) : it->second;
                          },
                          [this](uint32_t a, uint8_t v) { bytes[a] = v; }};
+  // A heap for costumes::Apply's moved blocks (as costumes_host_test.cpp's): outside the image, 32-byte steps.
+  uint32_t next_block = 0x40000000;
+  costumes::AllocFn alloc = [this](uint32_t size) -> uint32_t {
+    const uint32_t block = next_block;
+    next_block += (size + 31) / 32 * 32;
+    return block;
+  };
   void Load(uint32_t start, const std::vector<uint8_t>& data) {
     for (size_t i = 0; i < data.size(); ++i) bytes[start + uint32_t(i)] = data[i];
   }
@@ -826,6 +834,206 @@ static void TestTprWithoutPlace() {
   CHECK(ok.usable && ok.notes.empty() && TableExtras(ok).size() == kSlotCount);
 }
 
+// ---- Task 5: start-up wiring ------------------------------------------------------------------------------------------
+
+// F10: what SetUpSuits does with the overlays' outcome. Decide(usable, build_ok, install_ok, retry_ok): `usable` = the colour
+// entries went into the first build; build_ok / install_ok = that build and its install; retry_ok = the build and install
+// again without the colours (read only when the colours were in a first try that failed).
+static void TestDecideRows() {
+  using O = InstallOutcome;
+  // F10's five rows.
+  CHECK(Decide(true, true, true, false) == O::kInstalled);   // (usable, ok, ok): installed, extras passed
+  CHECK(Decide(true, false, false, true) == O::kDropped);    // (usable, build fails): again without colours, suits kept
+  CHECK(Decide(true, true, false, true) == O::kDropped);     // (usable, build ok, install fails): the same
+  CHECK(Decide(true, false, false, false) == O::kFailed);    // (usable, fails, retry fails): today's suits_status_.Fail
+  CHECK(Decide(false, true, true, false) == O::kNotUsable);  // (!usable): no colour entries, no extras, suits as today
+  // Fields read only under a condition hold, with the condition off, the value that would change the outcome (#0759):
+  // install_ok after a failed build, retry_ok after a first try that worked, retry_ok without colour entries.
+  CHECK(Decide(true, false, true, true) == O::kDropped);
+  CHECK(Decide(true, false, true, false) == O::kFailed);
+  CHECK(Decide(true, true, true, true) == O::kInstalled);
+  CHECK(Decide(true, true, false, false) == O::kFailed);
+  CHECK(Decide(false, false, false, true) == O::kFailed);  // nothing to drop: a failure is today's Fail, whatever retry_ok
+  CHECK(Decide(false, true, false, true) == O::kFailed);
+  CHECK(Decide(false, false, true, true) == O::kFailed);
+  CHECK(Decide(false, true, true, true) == O::kNotUsable);
+  // All sixteen inputs: the colours count as installed only after a first try with them that worked.
+  for (int bits = 0; bits < 16; ++bits) {
+    const bool u = (bits & 8) != 0, b = (bits & 4) != 0, i = (bits & 2) != 0, r = (bits & 1) != 0;
+    CHECK(Installed(Decide(u, b, i, r)) == (u && b && i));
+  }
+  CHECK(Installed(O::kInstalled) && !Installed(O::kDropped) && !Installed(O::kFailed) && !Installed(O::kNotUsable));
+}
+
+// "Colours not installed means no records" (Review Focus 2), first half: SetUpSuits' step 4 as F10 writes it
+// (`std::vector<costumes::Extra> extras; if (installed) extras = TableExtras(colours);`), for every Decide input, on a
+// usable Status whose rows exist: the rows go to Apply only after an install with them.
+static void TestNotInstalledNoExtras() {
+  World w;
+  FakeGuest g = PlantedGuest();
+  const Status colours = Load(TestSlots(), w.colours, w.game, g.guest);
+  CHECK(colours.usable && TableExtras(colours).size() == kSlotCount);  // precondition: there are rows to withhold
+  size_t with = 0, without = 0;
+  for (int bits = 0; bits < 16; ++bits) {
+    const InstallOutcome o = Decide((bits & 8) != 0, (bits & 4) != 0, (bits & 2) != 0, (bits & 1) != 0);
+    const bool installed = Installed(o);
+    std::vector<costumes::Extra> extras;
+    if (installed) extras = TableExtras(colours);
+    CHECK(extras.size() == (o == InstallOutcome::kInstalled ? kSlotCount : 0));
+    (extras.empty() ? without : with) += 1;
+  }
+  CHECK(with == 2 && without == 14);  // (u, b, i) all true: two inputs (retry_ok either way)
+}
+
+// Second half, on the image: Apply as SetUpSuits calls it, with one swimsuit (Kasumi, appended, so Apply runs whatever
+// the colours do). Not installed: no record, list entry or Applied row for Alpha (16) or Spartan (18); installed: all seven.
+static void TestNotInstalledNoRecords() {
+  World w;
+  FakeGuest planted = PlantedGuest();
+  const Status colours = Load(TestSlots(), w.colours, w.game, planted.guest);
+  CHECK(colours.usable);
+  doa4::suits::Suit kasumi;
+  kasumi.character = 5;
+  kasumi.body_tpr = 271;
+  kasumi.body_cat = 272;
+  kasumi.design = "vks_test";
+  for (const bool installed : {false, true}) {
+    FakeGuest g = ImageGuest();
+    const costumes::GuardState before = costumes::ReadGuardState(g.guest);
+    CHECK(before.records[16] == 2 && before.records[18] == 8);  // precondition (the image)
+    std::vector<costumes::Extra> extras;
+    if (installed) extras = TableExtras(colours);
+    const costumes::ApplyResult r = costumes::Apply(g.guest, g.alloc, extras, {kasumi});
+    size_t rows_16_18 = 0, kasumi_rows = 0;
+    for (const costumes::Applied& a : r.applied) {
+      rows_16_18 += (a.character == 16 || a.character == 18) ? 1 : 0;
+      kasumi_rows += a.character == 5 ? 1 : 0;
+    }
+    CHECK(kasumi_rows == 1);  // Apply ran
+    CHECK(rows_16_18 == (installed ? kSlotCount : 0));
+    CHECK(r.guard.records[16] == (installed ? 5u : 2u));
+    CHECK(r.guard.records[18] == (installed ? 12u : 8u));
+    // Not installed: Alpha's and Spartan's list words, counts and record blocks are the image's; installed: all moved.
+    const FakeGuest image = ImageGuest();
+    for (const uint32_t c : {16u, 18u}) {
+      const doa4::costume_lists::Tables was = doa4::costume_lists::Read(image.guest, c);
+      const doa4::costume_lists::Tables now = doa4::costume_lists::Read(g.guest, c);
+      const uint32_t records_was = image.guest.ReadBe32(costumes::kModelTable + 8 * c + 4);
+      const uint32_t records_now = g.guest.ReadBe32(costumes::kModelTable + 8 * c + 4);
+      const bool same = was.list == now.list && was.variants == now.variants && was.length == now.length &&
+                        was.maximum == now.maximum && records_was == records_now;
+      CHECK(same == !installed);
+    }
+    CHECK(doa4::costume_lists::Read(g.guest, 5).maximum == doa4::costume_lists::Read(image.guest, 5).maximum + 1);
+    CHECK(costumes::CountSuits(r.applied)[16] == (installed ? 2 : 0));
+    CHECK(costumes::CountSuits(r.applied)[18] == (installed ? 4 : 0));
+  }
+}
+
+// F19: the models CarrySuits gets, per character, in Apply's order: appended ones only (a replacing extra adds no costume,
+// and passing it makes CarrySuits' "box state plus k" one too many).
+static void TestAppendedModels() {
+  std::vector<costumes::Applied> applied;
+  const auto add = [&](uint8_t c, uint32_t model, uint32_t costume, const char* label, bool replaced) {
+    costumes::Applied a;
+    a.character = c;
+    a.model = model;
+    a.costume = costume;
+    a.label = label;
+    a.replaced = replaced;
+    applied.push_back(a);
+  };
+  add(5, 7, 4, "vks_test c0", false);
+  add(16, 2, 1, "colour alpha_red", true);
+  add(16, 3, 2, "colour alpha_blue", false);
+  add(16, 4, 3, "colour alpha_lilac", false);
+  add(18, 8, 7, "colour spartan_h3_red", false);
+  add(18, 9, 8, "colour spartan_h3_blue", false);
+  const std::map<uint32_t, std::vector<uint8_t>> want = {{5, {7}}, {16, {3, 4}}, {18, {8, 9}}};
+  CHECK(costumes::AppendedModels(applied) == want);
+  // A character whose only extra replaces: no entry at all (CarrySuits is not called for her).
+  CHECK(costumes::AppendedModels({applied[1]}).empty());
+  CHECK(costumes::AppendedModels({}).empty());
+  // The same count CountSuits gives the save (one rule for both).
+  const costumes::SuitCounts counts = costumes::CountSuits(applied);
+  for (const auto& [c, models] : costumes::AppendedModels(applied)) CHECK(models.size() == counts[c]);
+}
+
+// The same on the image, after Apply with the real slot table's rows: Alpha 3, 4 (red's model 2 replaced COS. 2), Spartan
+// 8-11.
+static void TestAppendedModelsOnImage() {
+  World w;
+  FakeGuest planted = PlantedGuest();
+  const Status colours = Load(TestSlots(), w.colours, w.game, planted.guest);
+  FakeGuest g = ImageGuest();
+  const costumes::ApplyResult r = costumes::Apply(g.guest, g.alloc, TableExtras(colours), {});
+  CHECK(r.applied.size() == kSlotCount && r.refused.empty());
+  const std::map<uint32_t, std::vector<uint8_t>> want = {{16, {3, 4}}, {18, {8, 9, 10, 11}}};
+  CHECK(costumes::AppendedModels(r.applied) == want);
+}
+
+static bool PrintableAscii(const std::string& s) {
+  return std::all_of(s.begin(), s.end(), [](char c) { return uint8_t(c) >= 0x20 && uint8_t(c) < 0x7F; });
+}
+
+// M3-5: SetUpSuits logs every note, one line each, so no note carries raw bytes: a manifest's unknown slot name and
+// malformed line holding control bytes (ESC, BEL, a CR inside the line, NUL, DEL) and a byte past ASCII come out as \xNN;
+// so does a folder name past ASCII.
+static void TestNotesPrintable() {
+  FakeGuest g = PlantedGuest();
+  const std::string esc(1, char(0x1B)), bel(1, char(0x07)), cr(1, char(0x0D)), nul(1, char(0x00)), del(1, char(0x7F)),
+      e9(1, char(0xE9));
+  {
+    World w;
+    std::vector<std::string> lines = GoodLines();
+    lines.push_back("kasumi" + bel + e9 + "_red kasumi.tpr");             // two words, unknown slot
+    lines.push_back("alpha" + cr + "x alpha_red.tpr");                     // a CR inside the line: unknown slot
+    lines.push_back("bad" + esc + "[31m line" + nul + " three" + del);  // three words: malformed
+    WriteText(w.colours / "manifest.txt", ManifestOf(lines, "\n"));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable);
+    CheckSlots(s, {});
+    CHECK(s.notes.size() == 3);
+    size_t printable = 0;
+    for (const std::string& note : s.notes) printable += PrintableAscii(note) ? 1 : 0;
+    CHECK(printable == s.notes.size());
+    // Each byte is named, not dropped: the reader of the log can still see what the line held.
+    CHECK(NotesNaming(s, "kasumi\\x07\\xE9_red") == 1);
+    CHECK(NotesNaming(s, "alpha\\x0Dx") == 1);
+    CHECK(NotesNaming(s, "bad\\x1B[31m line\\x00 three\\x7F") == 1);
+  }
+  {
+    World w;
+    const fs::path folder = w.root / doa4::PathFromUtf8("caf" + std::string(1, char(0xC3)) + std::string(1, char(0xA9)));
+    const Status s = Load(TestSlots(), folder, w.game, g.guest);
+    CHECK(s.usable && s.notes.size() == 1);
+    CHECK(PrintableAscii(NoteAt(s, 0)) && Contains(NoteAt(s, 0), "caf\\xC3\\xA9"));
+  }
+}
+
+// D1: the colour folder is <user data>/colour_costumes unless doa4_colour_costumes_dir names one; always absolute (the
+// [COLOURS] line prints it for the run's first check, F17).
+static void TestColourFolder() {
+  const fs::path user = fs::path(L"C:\\Users\\someone\\Documents\\dead_or_alive_4");
+  CHECK(ColourFolder(user, "") == user / "colour_costumes");
+  CHECK(ColourFolder(user, "D:/colours") == fs::path("D:/colours"));
+  CHECK(ColourFolder(user, "relative_here") == fs::absolute(fs::path("relative_here")));
+  CHECK(ColourFolder(fs::path("rel_user"), "") == fs::absolute(fs::path("rel_user") / "colour_costumes"));
+  CHECK(ColourFolder(user, "D:/colours").is_absolute() && ColourFolder(user, "").is_absolute());
+  // UTF-8 in the override (a toml string) is read as UTF-8.
+  const std::string utf8 = "D:/caf" + std::string(1, char(0xC3)) + std::string(1, char(0xA9));
+  CHECK(ColourFolder(user, utf8) == doa4::PathFromUtf8(utf8));
+  // An override that is not UTF-8 (a lone 0xE9) cannot name a folder: the default, and no throw (a throw here ends start-up).
+  std::string threw;
+  fs::path got;
+  try {
+    got = ColourFolder(user, "D:/caf" + std::string(1, char(0xE9)));
+  } catch (...) {
+    threw = "threw";
+  }
+  CHECK(threw.empty() && got == user / "colour_costumes");
+}
+
 static void TestSummaryOff() {
   const Status off;
   CHECK(off.Summary() == "colour costumes: off");
@@ -896,10 +1104,17 @@ int main() {
   TestEntryLabels();
   TestManifestGrains();
   TestTprWithoutPlace();
+  TestDecideRows();
+  TestNotInstalledNoExtras();
+  TestAppendedModels();
+  TestNotesPrintable();
+  TestColourFolder();
 
   if (image) {
     g_image = &*image;
     TestSlotTableOnImage();
+    TestNotInstalledNoRecords();
+    TestAppendedModelsOnImage();
   } else if (doa4_test::ReportNoImage("slot table on the image", why)) {
     ++g_checks;
     ++g_failures;

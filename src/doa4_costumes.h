@@ -182,6 +182,12 @@ inline constexpr uint32_t kCountCopyPlayers = 4;
 using SuitCounts = std::array<uint8_t, kCharCount>;
 SuitCounts CountSuits(const std::vector<Applied>& applied);
 
+// Each character's APPENDED models (`replaced` false: suits and appending extras), in Apply's order: what the app hands
+// TweakPatcher::CarrySuits, so a costume box toggled later keeps them. A replacing extra adds no costume, so it is left out
+// (CarrySuits requires her costume count = her box's state + the models it is given). A character with none has no entry.
+// The same rule as CountSuits: each list's size is her count there.
+std::map<uint32_t, std::vector<uint8_t>> AppendedModels(const std::vector<Applied>& applied);
+
 // One girl's copy raised to what VisibleCount offers.
 struct Raised {
   uint8_t character = 0;

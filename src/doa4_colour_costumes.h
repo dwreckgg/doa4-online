@@ -61,6 +61,26 @@ const SlotTable& Slots();
 // The colour slots are an offline feature: true only with no netplay session and DOA4_NP "" or "record".
 bool Enabled(bool session, std::string_view np_mode);
 
+// The colour folder (plan D1): `override_utf8` (the toml's doa4_colour_costumes_dir) when it is not empty, else
+// <user data>/colour_costumes; made absolute, so the start-up line names the folder that was really read.
+std::filesystem::path ColourFolder(const std::filesystem::path& user_data, std::string_view override_utf8);
+
+// What start-up does with the overlays (SetUpSuits, plan Task 5 step 3 and F10). The colour entries go into the same build
+// as the swimsuits; if that build or its install fails while they are in it, they are dropped and the swimsuits are built
+// and installed again without them.
+enum class InstallOutcome : uint8_t {
+  kInstalled,  // the colour entries are overlaid (with the swimsuits): their costume rows go to costumes::Apply
+  kDropped,    // the try with them failed, the one without them worked: swimsuits as usual, no colour rows
+  kNotUsable,  // no colour entries were in the build (off, or not usable): swimsuits as usual, no colour rows
+  kFailed,     // nothing was installed: the swimsuits fail as before (ImportStatus::Fail), no colour rows
+};
+// usable: the colour entries were in the first build (Status::usable). build_ok, install_ok: that build and its install
+// (install_ok is read only when build_ok). retry_ok: the build and install without the colours (read only when usable and
+// the first try failed; true when there was nothing left to install).
+InstallOutcome Decide(bool usable, bool build_ok, bool install_ok, bool retry_ok);
+// Whether the colour costume rows may go to costumes::Apply: only when their entries were installed.
+bool Installed(InstallOutcome outcome);
+
 struct LoadedSlot {
   const SlotDef* def = nullptr;
   std::shared_ptr<const afs::Source> tpr;  // the slot's file, or its stand-in entry; null only when !usable

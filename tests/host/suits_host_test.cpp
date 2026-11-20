@@ -792,6 +792,160 @@ static void TestBuildOverlaysEdges() {
   }
 }
 
+// ---- Task 5 (colour costumes): BuildOverlays' `extra` entries ----
+
+static uint32_t Get32(const std::vector<uint8_t>& b, size_t at) {
+  if (at + 4 > b.size()) return 0;
+  return uint32_t(b[at]) | uint32_t(b[at + 1]) << 8 | uint32_t(b[at + 2]) << 16 | uint32_t(b[at + 3]) << 24;
+}
+
+// An archive in which every entry holds bytes of its own (entry i: Content(900 + i, its size)), so an entry served from
+// another place reads as other bytes; sizes as `sizes`, 16 elsewhere. Entry 0 starts after the TOC rounded up to 2048:
+// for 700 entries 0x1800, as the game's avt.afs (the colour test's real-folder tier reads that off the game's file).
+static std::vector<uint8_t> DistinctArchive(uint32_t count, const std::map<uint32_t, uint32_t>& sizes) {
+  std::vector<uint8_t> a = Archive(count, sizes);
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t at = Get32(a, 8 + 8 * i), size = Get32(a, 12 + 8 * i);
+    const std::vector<uint8_t> c = Content(int(900 + i), size);
+    if (size_t(at) + size <= a.size()) std::memcpy(a.data() + at, c.data(), size);
+  }
+  return a;
+}
+
+// Entry `i` of an archive held in memory, through its TOC (empty when the TOC does not place it).
+static std::vector<uint8_t> EntryOf(const std::vector<uint8_t>& archive, uint32_t i) {
+  const uint32_t at = Get32(archive, 8 + 8 * size_t(i)), size = Get32(archive, 12 + 8 * size_t(i));
+  if (size_t(at) + size > archive.size()) return {};
+  return std::vector<uint8_t>(archive.begin() + at, archive.begin() + at + size);
+}
+
+static std::shared_ptr<const doa4::afs::Source> Bytes(std::vector<uint8_t> v);  // defined with the marks' fixtures
+
+// An archive with only extra entries gets an overlay; the extras are real files, so the suits' empty-slot check is not
+// made on them (both entries are 26,624 bytes, as avt.afs's creature placeholders). Amendment 2: an avt-shaped archive
+// (700 entries, entry 0 at 0x1800) keeps entry 0's offset, and every entry nobody replaced keeps its bytes.
+static void TestBuildOverlaysExtraOnly() {
+  World w;
+  FakeGuest g;  // no suits: nothing reads the tables, so this runs with or without the image
+  const std::vector<uint8_t> avt = DistinctArchive(700, {{373, 26624}, {374, 26624}});
+  Write(w.game / "avt.afs", avt);
+  CHECK(Get32(avt, 4) == 700 && Get32(avt, 8) == 0x1800);  // precondition: avt.afs's shape
+  CHECK(EntryOf(avt, 373).size() == 26624);                // precondition: not an empty slot
+  const std::vector<uint8_t> red = Content(41, 70001), blue = Content(43, 3001);
+  const auto game_before = Snapshot(w.game);
+  const ImportStatus none;
+  {
+    std::string error;
+    const auto overlays =
+        BuildOverlays(none, w.game, g.guest, &error, {{"avt.afs", {{373, Bytes(red)}, {374, Bytes(blue)}}}});
+    CHECK(error.empty() && overlays.size() == 1 && overlays.count("avt.afs") == 1);
+    CHECK(EntryHolds(overlays, "avt.afs", 373, red));
+    CHECK(EntryHolds(overlays, "avt.afs", 374, blue));
+    if (overlays.count("avt.afs")) {
+      const doa4::afs::Overlay& o = *overlays.at("avt.afs");
+      CHECK(o.original_size() == avt.size());
+      CHECK(o.entry_offset(0) == 0x1800);
+      // The combined archive's own TOC (what the game reads): the count, entry 0 at 0x1800, every word the layout's.
+      std::vector<uint8_t> head(8 + 8 * 700 + 8);
+      CHECK(o.Read(0, head.data(), head.size()));
+      CHECK(Get32(head, 4) == 700 && Get32(head, 8) == 0x1800);
+      size_t compared = 0, differ = 0, toc_wrong = 0;
+      for (uint32_t i = 0; i < 700; ++i) {
+        if (Get32(head, 8 + 8 * size_t(i)) != o.entry_offset(i) || Get32(head, 12 + 8 * size_t(i)) != o.entry_size(i)) {
+          ++toc_wrong;
+        }
+        if (i == 373 || i == 374) continue;
+        ++compared;
+        if (!EntryHolds(overlays, "avt.afs", i, EntryOf(avt, i))) ++differ;
+      }
+      CHECK(compared == 698 && differ == 0 && toc_wrong == 0);
+      // Entries before the first replaced one are where the game's file has them.
+      size_t moved = 0;
+      for (uint32_t i = 0; i < 373; ++i) moved += o.entry_offset(i) == Get32(avt, 8 + 8 * size_t(i)) ? 0 : 1;
+      CHECK(moved == 0);
+    }
+  }
+  // Nothing to build: no extra entries and no suits (an archive named with an empty list included) is no overlay and no
+  // error.
+  {
+    std::string error;
+    CHECK(BuildOverlays(none, w.game, g.guest, &error, {}).empty() && error.empty());
+    CHECK(BuildOverlays(none, w.game, g.guest, &error, {{"avt.afs", {}}}).empty() && error.empty());
+  }
+  // An archive the game folder does not have, and an entry past the archive's end: no overlays, the reason.
+  {
+    std::string error;
+    CHECK(BuildOverlays(none, w.game, g.guest, &error, {{"nothere.afs", {{0, Bytes(red)}}}}).empty());
+    CHECK(error == "cannot open nothere.afs in the game folder");
+    error.clear();
+    CHECK(BuildOverlays(none, w.game, g.guest, &error, {{"avt.afs", {{700, Bytes(red)}}}}).empty());
+    CHECK(error == "avt.afs: replacement for entry 700 of 700");
+  }
+  CHECK(!game_before.empty() && Snapshot(w.game) == game_before);  // the game folder is only read
+}
+
+// Suits and extras together: ONE overlay per archive holding both (an extra in the suits' own archive), an archive with
+// only extras beside it, and the suits keep their own empty-slot recheck when extras are there.
+static void TestBuildOverlaysExtraAndSuits() {
+  World w;
+  FakeGuest g;
+  WriteText(w.import / "manifest.txt", w.TwoSuits());
+  Write(w.game / "avt.afs", DistinctArchive(700, {{373, 26624}}));
+  const ImportStatus s = LoadImport(w.import, w.game, g.guest);
+  CHECK(s.suits.size() == 2 && s.skipped.empty());
+  const std::vector<uint8_t> x = Content(51, 4321), y = Content(53, 26629);
+  const std::map<std::string, std::vector<doa4::afs::Replacement>> extra = {{"chrone.afs", {{10, Bytes(x)}}},
+                                                                            {"avt.afs", {{373, Bytes(y)}}}};
+  {
+    std::string error;
+    const auto overlays = BuildOverlays(s, w.game, g.guest, &error, extra);
+    CHECK(error.empty() && overlays.size() == 2 && overlays.count("chrone.afs") == 1 && overlays.count("avt.afs") == 1);
+    CHECK(EntryHolds(overlays, "chrone.afs", 65, w.files["ka.tpr"]) && EntryHolds(overlays, "chrone.afs", 66, w.files["ka.cat"]));
+    CHECK(EntryHolds(overlays, "chrone.afs", 71, w.files["ay.tpr"]) && EntryHolds(overlays, "chrone.afs", 72, w.files["ay.cat"]));
+    CHECK(EntryHolds(overlays, "chrone.afs", 10, x));
+    CHECK(EntryHolds(overlays, "avt.afs", 373, y));
+    if (overlays.count("chrone.afs")) {
+      const doa4::afs::Overlay& o = *overlays.at("chrone.afs");
+      CHECK(o.entry_size(9) == 16 && o.entry_size(11) == 16 && o.entry_size(64) == 16);
+    }
+    // Without the extras (the default argument: every caller before the colour costumes): the suits' overlay alone.
+    std::string error2;
+    const auto plain = BuildOverlays(s, w.game, g.guest, &error2);
+    CHECK(error2.empty() && plain.size() == 1 && plain.count("chrone.afs") == 1);
+    if (plain.count("chrone.afs")) CHECK(plain.at("chrone.afs")->entry_size(10) == 16);
+  }
+  // A suit's entry that stopped being an empty slot fails the whole build, extras or not (the overlays above are gone, so
+  // the archive can be written).
+  PokeEntry(w.game / "chrone.afs", 71, 0, 0x00);
+  std::string error;
+  const auto changed = BuildOverlays(s, w.game, g.guest, &error, extra);
+  CHECK(changed.empty() && error == "chrone.afs changed since the import was checked (entry 71)");
+}
+
+// An entry named by both a suit and an extra: no overlays, and the error names both (cannot happen with the compiled
+// colour table, whose entries are in avt.afs, where no suit may be).
+static void TestBuildOverlaysExtraCollides() {
+  World w;
+  FakeGuest g;
+  WriteText(w.import / "manifest.txt", w.TwoSuits());
+  Write(w.game / "avt.afs", DistinctArchive(700, {{373, 26624}}));
+  const ImportStatus s = LoadImport(w.import, w.game, g.guest);
+  CHECK(s.suits.size() == 2 && s.skipped.empty());
+  const auto x = Bytes(Content(61, 999));
+  std::string error;
+  auto overlays = BuildOverlays(s, w.game, g.guest, &error, {{"avt.afs", {{373, x}}}, {"chrone.afs", {{65, x}}}});
+  CHECK(overlays.empty());
+  CHECK(error == "chrone.afs entry 65 is both the swimsuit vks_ch_d c0 (tpr) and a colour costume's file");
+  error.clear();
+  overlays = BuildOverlays(s, w.game, g.guest, &error, {{"chrone.afs", {{72, x}}}});
+  CHECK(overlays.empty());
+  CHECK(error == "chrone.afs entry 72 is both the swimsuit vay_cs_b c0 (cat) and a colour costume's file");
+  // Control: the entry between the two suits' pairs collides with nothing, and builds.
+  error.clear();
+  overlays = BuildOverlays(s, w.game, g.guest, &error, {{"chrone.afs", {{70, x}}}});
+  CHECK(error.empty() && overlays.size() == 1 && EntryHolds(overlays, "chrone.afs", 70, Content(61, 999)));
+}
+
 // What Fail does: the reason is kept, the suits go, and so do the files they held.
 static void TestFailDropsSuits() {
   World w;
@@ -1518,6 +1672,38 @@ static void CheckRealMarksWithImport(const fs::path& game, const fs::path& impor
   CHECK(MarksOf(without).size() == 36 + 19);  // the census plus the 19 appended models (no overlay: still empty slots)
 }
 
+// Task 5, on the game's own avt.afs (read-only): one colour-sized extra (3,758,080 bytes, Alpha's body tpr's size) in entry
+// 373 builds an overlay that keeps the archive's entry count and entry 0 at 0x1800, puts every entry before 373 where the
+// game's file has it, and serves a sample of the other entries as the game's bytes.
+static void CheckRealAvtOverlay(const fs::path& game) {
+  const std::shared_ptr<doa4::afs::FileSource> original = doa4::afs::FileSource::Open(game / "avt.afs");
+  CHECK(original != nullptr);
+  if (!original) return;
+  std::string why;
+  const std::optional<doa4::afs::Toc> toc = doa4::afs::ReadToc(*original, &why);
+  CHECK(toc && toc->count == 700 && toc->offsets[0] == 0x1800);
+  if (!toc || toc->count != 700) return;
+  FakeGuest g;
+  const std::vector<uint8_t> colour = Content(71, 3758080);
+  std::string error;
+  const auto overlays = BuildOverlays(ImportStatus{}, game, g.guest, &error, {{"avt.afs", {{373, Bytes(colour)}}}});
+  CHECK(error.empty() && overlays.size() == 1 && overlays.count("avt.afs") == 1);
+  if (!overlays.count("avt.afs")) return;
+  const doa4::afs::Overlay& o = *overlays.at("avt.afs");
+  CHECK(o.original_size() == original->size());
+  CHECK(o.entry_offset(0) == 0x1800 && EntryHolds(overlays, "avt.afs", 373, colour));
+  size_t moved = 0;
+  for (uint32_t i = 0; i < 373; ++i) moved += o.entry_offset(i) == toc->offsets[i] ? 0 : 1;
+  CHECK(moved == 0);
+  for (const uint32_t i : {0u, 1u, 372u, 374u, 379u, 699u}) {
+    std::vector<uint8_t> want(toc->sizes[i]);
+    CHECK(original->Read(toc->offsets[i], want.data(), want.size()));
+    CHECK(EntryHolds(overlays, "avt.afs", i, want));
+  }
+  std::printf("real avt.afs: %u entries, entry 0 at %#x, entry 373 overlaid (%llu bytes)\n", toc->count, toc->offsets[0],
+              static_cast<unsigned long long>(o.entry_size(373)));
+}
+
 // Optional: the same checks against the REAL archives (DOA4_SUITS_GAME_DIR=<the DOA4 folder with
 // chrone.afs, chrtwo.afs and chrthree.afs>, opened read-only). The fake archives above say the
 // image's file table points at 16-byte placeholders of 0x77; this says the game's own archives
@@ -1569,6 +1755,7 @@ static void TestRealGameFolder() {
   }
   CheckRealPicks(game, g.guest);
   CheckRealMarks(game);
+  CheckRealAvtOverlay(game);
   wchar_t import_dir[1024];
   const DWORD import_len = GetEnvironmentVariableW(L"DOA4_SUITS_IMPORT_DIR", import_dir, DWORD(std::size(import_dir)));
   if (import_len == 0 || import_len >= std::size(import_dir)) {
@@ -1802,6 +1989,7 @@ int main() {
   TestPicksTable();
   TestPicksAgainstRealManifest();
   TestImportChecksum();
+  TestBuildOverlaysExtraOnly();  // no suits: needs no tables
   std::string why;
   if (const std::optional<doa4_test::CostumeImage> image = doa4_test::LoadCostumeImage(&why)) {
     g_image = &*image;
@@ -1826,6 +2014,8 @@ int main() {
     TestBuildOverlays();
     TestThreeArchives();
     TestBuildOverlaysEdges();
+    TestBuildOverlaysExtraAndSuits();
+    TestBuildOverlaysExtraCollides();
     TestOverlayRecheck();
     TestFailDropsSuits();
     TestFileHeldOpen();
