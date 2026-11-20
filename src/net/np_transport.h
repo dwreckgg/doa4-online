@@ -140,7 +140,11 @@ class Transport {
   // A payload the I/O thread drains while no peer is set, or one too long for a datagram, is discarded.
   bool PushGekko(std::vector<uint8_t> payload);
   bool PopGekko(std::vector<uint8_t>* payload);
+#if defined(_WIN32)
   void* gekko_arrived() const;                   // HANDLE of an auto-reset event, set when PopGekko has data
+#else
+  int gekko_arrived() const;                     // eventfd, readable when PopGekko has data (posix::Consume resets it)
+#endif
 
   Stats stats() const;  // any thread (atomics / a snapshot under a mutex)
 

@@ -14,6 +14,14 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <sys/socket.h>
+#include <sys/un.h>
+
+#include <cerrno>
+#include <cstring>
+
+#include "net/np_posix.h"  // GetCurrentProcessId
 #endif
 
 namespace doa4::discord {
@@ -83,6 +91,75 @@ class Pipe {
   int index_ = -1;
   std::string in_;
 };
+#else
+// Discord's IPC outside Windows: a Unix socket "<dir>/discord-ipc-<n>", <dir> the first of $XDG_RUNTIME_DIR, $TMPDIR,
+// $TMP, $TEMP that is set, else /tmp, as Discord's own discord-rpc looks for it (src/connection_unix.cpp, MIT).
+class Pipe {
+ public:
+  ~Pipe() { Close(); }
+  bool Open() {
+    const char* dir = nullptr;
+    for (const char* name : {"XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"}) {
+      if ((dir = std::getenv(name)) && *dir) break;
+      dir = nullptr;
+    }
+    for (int n = 0; n < 10; ++n) {
+      sockaddr_un addr{};
+      addr.sun_family = AF_UNIX;
+      std::snprintf(addr.sun_path, sizeof addr.sun_path, "%s/discord-ipc-%d", dir ? dir : "/tmp", n);
+      const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+      if (fd < 0) return false;
+      if (connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) == 0) {
+        fd_ = fd;
+        index_ = n;
+        in_.clear();
+        return true;
+      }
+      close(fd);
+    }
+    return false;
+  }
+  bool IsOpen() const { return fd_ >= 0; }
+  int index() const { return index_; }
+  void Close() {
+    if (fd_ >= 0) close(fd_);
+    fd_ = -1;
+    in_.clear();
+  }
+  bool Write(uint32_t opcode, std::string_view payload) {
+    const std::string frame = EncodeFrame(opcode, payload);
+    return send(fd_, frame.data(), frame.size(), MSG_NOSIGNAL) == ssize_t(frame.size());
+  }
+  // Reads whatever Discord has sent, without waiting; false when the socket is broken. Each whole frame goes to `on_frame`.
+  template <typename F>
+  bool Drain(F&& on_frame) {
+    char chunk[4096];
+    for (;;) {
+      const ssize_t got = recv(fd_, chunk, sizeof chunk, MSG_DONTWAIT);
+      if (got > 0) {
+        in_.append(chunk, size_t(got));
+        continue;
+      }
+      if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+      if (got < 0 && errno == EINTR) continue;
+      return false;  // 0: Discord closed the socket; otherwise an error
+    }
+    uint32_t opcode = 0;
+    std::string payload;
+    size_t size = 0;
+    while (DecodeFrame(in_, &opcode, &payload, &size)) {
+      in_.erase(0, size);
+      if (!on_frame(opcode, payload)) return false;
+    }
+    return true;
+  }
+
+ private:
+  int fd_ = -1;
+  int index_ = -1;
+  std::string in_;
+};
+#endif
 
 void Run(int64_t start_unix) {
   const uint32_t pid = GetCurrentProcessId();
@@ -132,14 +209,12 @@ bool HarnessRun() {
   }
   return false;
 }
-#endif
 
 }  // namespace
 
 bool Available() { return !kAppId.empty(); }
 
 void Start() {
-#if defined(_WIN32)
   if (!Available()) {
     REXLOG_INFO("[doa4][DISCORD] no Discord application id in this build: status off");
     return;
@@ -152,7 +227,6 @@ void Start() {
   g_enabled.store(rex::cvar::Query<bool>("doa4_discord_status"), std::memory_order_release);
   const int64_t start_unix = int64_t(std::time(nullptr));
   g_thread = new std::thread([start_unix] { Run(start_unix); });
-#endif
 }
 
 void SetEnabled(bool on) { g_enabled.store(on, std::memory_order_release); }

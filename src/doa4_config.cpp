@@ -100,6 +100,10 @@ std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
                         std::string_view value_literal) {
   std::string text;
   {
+    // A folder in the file's place: libstdc++ opens it and its read throws (Windows refuses the open), so it is
+    // refused here first, the same answer on both.
+    std::error_code dir_ec;
+    if (std::filesystem::is_directory(path, dir_ec)) return "cannot read " + Utf8(path);
     std::ifstream in(path, std::ios::binary);
     if (in) {
       text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());

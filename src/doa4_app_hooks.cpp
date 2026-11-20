@@ -258,10 +258,19 @@ REX_HOOK_RAW(sub_828980E0) {
 // exactly the cooperative-scheduling model we want.
 // ===========================================================================
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <poll.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include <rex/thread/fiber.h>
+#endif
 
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 
 extern "C" {
@@ -271,7 +280,7 @@ REX_EXTERN(__imp__sub_82793F80);  // original swap (unhooked alias)
 namespace {
 
 struct GuestFiber {
-  void* host_fiber = nullptr;  // Win32 fiber handle
+  void* host_fiber = nullptr;  // host fiber handle (HostFiberCurrent etc.)
   uint32_t buf = 0;            // guest save-buffer address (= map key)
   uint8_t* base = nullptr;     // captured for GuestFiberProc
   bool is_initial = false;     // true if this represents the host thread's
@@ -300,12 +309,57 @@ extern "C" void doa4_record_fiber_swap_in(uint32_t dst_buf, uint32_t lr, uint32_
 
 namespace {
 
-// Per-host-thread: the Win32 fiber handle obtained from ConvertThreadToFiber
+// Per-host-thread: the fiber handle obtained from ConvertThreadToFiber
 // on first entry to the swap hook. Represents the "initial" fiber — the
 // scheduler / first guest fiber whose stack is the OS thread's original.
 thread_local void* tls_initial_fiber = nullptr;
 
-static void WINAPI GuestFiberProc(void* param);
+#if defined(_WIN32)
+#define DOA4_FIBER_PROC WINAPI
+#else
+#define DOA4_FIBER_PROC
+#endif
+static void DOA4_FIBER_PROC GuestFiberProc(void* param);
+
+// Host fiber primitives. Windows keeps its Win32 fibers; elsewhere the SDK's
+// rex::thread::Fiber (ucontext), which XThread already uses to convert every
+// guest thread, so Fiber::Current() is set when the swap hook first runs.
+#if defined(_WIN32)
+// 64 KiB host stack — fibers in DOA4 don't recurse deeply on the host side.
+// (The commit size: the reserve is the exe's default stack reserve.)
+constexpr size_t kHostFiberStack = 64 * 1024;
+void* HostFiberCreate(GuestFiber* fs) { return CreateFiber(kHostFiberStack, &GuestFiberProc, fs); }
+void HostFiberDelete(void* fiber) { DeleteFiber(fiber); }
+void* HostFiberCurrent() { return GetCurrentFiber(); }
+void HostFiberSwitch(void* fiber) { SwitchToFiber(fiber); }
+void* HostFiberConvertThread() {
+  void* fiber = ConvertThreadToFiber(nullptr);
+  if (fiber) return fiber;
+  DWORD err = GetLastError();
+  if (err == ERROR_ALREADY_FIBER /* 1280 */) {
+    // Host thread was already converted to a fiber by XThread::Execute().
+    // Use the existing current fiber handle as our initial fiber.
+    return GetCurrentFiber();
+  }
+  REXLOG_ERROR("[doa4][Fiber] ConvertThreadToFiber FAILED on tid={} err={}", Tid(), err);
+  return nullptr;
+}
+#else
+// A ucontext stack does not grow like a Win32 fiber's reserve, so it gets the
+// 1 MiB a Windows fiber can grow to (the exe's default stack reserve).
+constexpr size_t kHostFiberStack = 1024 * 1024;
+void* HostFiberCreate(GuestFiber* fs) { return rex::thread::Fiber::Create(kHostFiberStack, &GuestFiberProc, fs); }
+void HostFiberDelete(void* fiber) { static_cast<rex::thread::Fiber*>(fiber)->Destroy(); }
+void* HostFiberCurrent() { return rex::thread::Fiber::Current(); }
+void HostFiberSwitch(void* fiber) { rex::thread::Fiber::SwitchTo(static_cast<rex::thread::Fiber*>(fiber)); }
+void* HostFiberConvertThread() {
+  // Normally set by XThread::Execute(); a thread it did not start is converted here.
+  if (void* fiber = rex::thread::Fiber::Current()) return fiber;
+  void* fiber = rex::thread::Fiber::ConvertCurrentThread();
+  if (!fiber) REXLOG_ERROR("[doa4][Fiber] ConvertCurrentThread FAILED on tid={}", Tid());
+  return fiber;
+}
+#endif
 
 GuestFiber* GetOrCreateFiber(uint32_t buf, uint8_t* base) {
   std::lock_guard<std::mutex> lk(g_fiber_mu);
@@ -314,8 +368,7 @@ GuestFiber* GetOrCreateFiber(uint32_t buf, uint8_t* base) {
   auto p = std::make_unique<GuestFiber>();
   p->buf = buf;
   p->base = base;
-  // 64 KiB host stack — fibers in DOA4 don't recurse deeply on the host side.
-  p->host_fiber = CreateFiber(64 * 1024, &GuestFiberProc, p.get());
+  p->host_fiber = HostFiberCreate(p.get());
   if (!p->host_fiber) {
     REXLOG_ERROR("[doa4][Fiber] CreateFiber FAILED for buf={:#x}", buf);
   }
@@ -338,14 +391,14 @@ GuestFiber* GetOrCreateFiber(uint32_t buf, uint8_t* base) {
 void RecreateHostFiber(GuestFiber* fs) {
   std::lock_guard<std::mutex> lk(g_fiber_mu);
   void* old = fs->host_fiber;
-  void* fresh = CreateFiber(64 * 1024, &GuestFiberProc, fs);
+  void* fresh = HostFiberCreate(fs);
   if (!fresh) {
     REXLOG_ERROR("[doa4][Fiber][FIX7] CreateFiber FAILED recreating buf={:#x}; keeping old", fs->buf);
     return;
   }
   fs->host_fiber = fresh;
   fs->dispatched = false;
-  if (old) DeleteFiber(old);  // old is parked (not current/running) -> safe
+  if (old) HostFiberDelete(old);  // old is parked (not current/running) -> safe
   static std::atomic<uint64_t> s_n{0};
   uint64_t n = s_n.fetch_add(1, std::memory_order_relaxed);
   if (n < 40 || (n % 200) == 0) {
@@ -356,18 +409,8 @@ void RecreateHostFiber(GuestFiber* fs) {
 
 void EnsureInitialFiber(uint32_t out_buf, uint8_t* base) {
   if (tls_initial_fiber) return;
-  tls_initial_fiber = ConvertThreadToFiber(nullptr);
-  if (!tls_initial_fiber) {
-    DWORD err = GetLastError();
-    if (err == ERROR_ALREADY_FIBER /* 1280 */) {
-      // Host thread was already converted to a fiber by XThread::Execute().
-      // Use the existing current fiber handle as our initial fiber.
-      tls_initial_fiber = GetCurrentFiber();
-    } else {
-      REXLOG_ERROR("[doa4][Fiber] ConvertThreadToFiber FAILED on tid={} err={}", Tid(), err);
-      return;
-    }
-  }
+  tls_initial_fiber = HostFiberConvertThread();
+  if (!tls_initial_fiber) return;
   REXLOG_DEBUG("[doa4][Fiber] host tid={} converted to fiber={:p}, initial buf={:#x}",
                Tid(), tls_initial_fiber, out_buf);
   if (out_buf) {
@@ -420,22 +463,22 @@ void DoFiberSwap(PPCContext& ctx, uint8_t* base) {
   // would run the old chain with the new stack pointer -> corruption. Recreate
   // a clean host fiber so GuestFiberProc runs the new entry from scratch.
   if ((uint32_t)ctx.lr == 0x82793F70u && dst->dispatched && !dst->is_initial &&
-      dst->host_fiber != GetCurrentFiber()) {
+      dst->host_fiber != HostFiberCurrent()) {
     RecreateHostFiber(dst);
   }
 
   // If destination is the fiber we're already running, nothing to do.
-  if (!dst->host_fiber || dst->host_fiber == GetCurrentFiber()) {
+  if (!dst->host_fiber || dst->host_fiber == HostFiberCurrent()) {
     return;
   }
 
   // Actually transfer host execution to the destination fiber's stack.
   // When some other fiber later switches back to us, SwitchToFiber resumes
   // here with ctx already loaded by that swapper to our state.
-  SwitchToFiber(dst->host_fiber);
+  HostFiberSwitch(dst->host_fiber);
 }
 
-static void WINAPI GuestFiberProc(void* param) {
+static void DOA4_FIBER_PROC GuestFiberProc(void* param) {
   GuestFiber* fs = (GuestFiber*)param;
   PPCContext& ctx = *rex::runtime::current_ppc_context();
   uint8_t* base = fs->base;
@@ -473,10 +516,10 @@ static void WINAPI GuestFiberProc(void* param) {
   // Fibers MUST NOT let their proc return. Park forever, yielding to the
   // initial fiber so the rest of the title can keep running.
   while (true) {
-    if (tls_initial_fiber && tls_initial_fiber != GetCurrentFiber()) {
-      SwitchToFiber(tls_initial_fiber);
+    if (tls_initial_fiber && tls_initial_fiber != HostFiberCurrent()) {
+      HostFiberSwitch(tls_initial_fiber);
     } else {
-      Sleep(1000);
+      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
   }
 }
@@ -897,6 +940,7 @@ REX_HOOK_RAW(sub_823FC5A0) {
 // DOA4_WAIT_PID = the old one's pid. The new instance waits here (OnPreSetup,
 // before its window, save data and shader cache) until the old one has exited,
 // up to 15 s (the old one's shutdown watchdog ends it after 5 s).
+#if defined(_WIN32)
 extern "C" void doa4_wait_for_previous_instance() {
   char text[32];
   DWORD length = GetEnvironmentVariableA("DOA4_WAIT_PID", text, sizeof(text));
@@ -910,6 +954,21 @@ extern "C" void doa4_wait_for_previous_instance() {
   REXLOG_INFO("[doa4][LIFE] previous instance {} {}", pid,
               result == WAIT_OBJECT_0 ? "has exited" : "still running after 15 s; starting anyway");
 }
+#else
+extern "C" void doa4_wait_for_previous_instance() {
+  const char* text = std::getenv("DOA4_WAIT_PID");
+  if (!text) return;
+  const pid_t pid = static_cast<pid_t>(std::strtoul(text, nullptr, 10));
+  unsetenv("DOA4_WAIT_PID");  // not for our own children
+  const int process = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+  if (process < 0) return;  // already gone
+  pollfd exited{process, POLLIN, 0};
+  const int result = poll(&exited, 1, 15000);
+  close(process);
+  REXLOG_INFO("[doa4][LIFE] previous instance {} {}", pid,
+              result > 0 ? "has exited" : "still running after 15 s; starting anyway");
+}
+#endif
 
 // Shutdown watchdog. ReXGlue's teardown sometimes deadlocks in SDL audio
 // shutdown (SDL_DestroyAudioStream waits for the SDL audio thread, which,
@@ -920,6 +979,7 @@ extern "C" void doa4_wait_for_previous_instance() {
 // (TerminateProcess: ExitProcess would need the same loader lock).
 extern "C" void doa4_arm_shutdown_watchdog() {
   REXLOG_INFO("[doa4][LIFE] shutdown watchdog armed (5 s)");
+#if defined(_WIN32)
   HANDLE thread = CreateThread(
       nullptr, 0,
       [](LPVOID) -> DWORD {
@@ -929,4 +989,10 @@ extern "C" void doa4_arm_shutdown_watchdog() {
       },
       nullptr, 0, nullptr);
   if (thread) CloseHandle(thread);
+#else
+  std::thread([] {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    _exit(0);
+  }).detach();
+#endif
 }

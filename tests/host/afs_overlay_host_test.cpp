@@ -17,7 +17,11 @@
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 static int g_failures = 0;
 #define CHECK(cond)                                               \
@@ -204,7 +208,11 @@ static fs::path WriteTemp(const std::string& name, const std::vector<uint8_t>& b
 }
 
 // Temp file names carry this run's process id, so two runs at once never share a file.
+#if defined(_WIN32)
 static std::string RunTag() { return "doa4_afs_test_" + std::to_string(GetCurrentProcessId()) + "_"; }
+#else
+static std::string RunTag() { return "doa4_afs_test_" + std::to_string(getpid()) + "_"; }
+#endif
 
 // Deletes its file when it goes out of scope. Declared before the sources that hold the file open,
 // so those close first: FileSource shares for read only, by design, and a delete fails while one
@@ -461,6 +469,7 @@ static void TestSources() {
   CHECK(src != nullptr);
   if (!src) return;
   CheckSourceContract(*src, content);
+#if defined(_WIN32)  // the share mode is Windows': POSIX has no mandatory open lock
   const auto can_open = [&](DWORD access) {
     HANDLE h = CreateFileW(path.c_str(), access,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
@@ -475,6 +484,7 @@ static void TestSources() {
   src.reset();
   CHECK(can_open(GENERIC_WRITE));
   CHECK(can_open(DELETE));
+#endif
 }
 
 // Byte-for-byte against afs_rebuild.py's output, when a config is given.

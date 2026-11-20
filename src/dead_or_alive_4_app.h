@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <bit>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -32,7 +33,13 @@
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/graphics_system.h>
 #include <rex/ui/presenter.h>
+#if defined(_WIN32)
 #include <rex/ui/window_win.h>
+#else
+#include <rex/ui/window_sdl.h>
+
+#include "net/np_posix.h"  // GetCurrentProcessId
+#endif
 #include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/rex_app.h>
@@ -178,9 +185,16 @@ class DeadOrAlive4App : public rex::ReXApp {
   // The app owns the import flow and the one worker thread its run_async uses. Both die on the UI thread, in this order: the
   // flow (its destructor cancels a running import once), then the worker (joined; never from the worker itself). That happens
   // when the section ends (ResumeFromSetup) and at shutdown (OnShutdown), whichever comes first.
-  void* SetupHwnd() {
+  // The game window's handle for the dialogs it owns and the display it is on: the HWND on Windows, the SDL_Window
+  // elsewhere (what doa4_photo_win.h and doa4_setup_win.h take as their owner).
+  void* OwnerWindow() {
+#if defined(_WIN32)
     auto* win32 = dynamic_cast<rex::ui::Win32Window*>(window());
     return win32 ? win32->hwnd() : nullptr;
+#else
+    auto* sdl = dynamic_cast<rex::ui::WindowSDL*>(window());
+    return sdl ? sdl->sdl_window() : nullptr;
+#endif
   }
 
   void BeginStartupSuits(doa4::suits_import::Mode mode) {
@@ -190,11 +204,11 @@ class DeadOrAlive4App : public rex::ReXApp {
     doa4::suits_import::Effects fx;
     fx.pick_iso = [this, script](const std::filesystem::path& start) -> std::optional<std::filesystem::path> {
       if (script.doax2) return script.doax2;
-      return doa4::setup::PickIsoFile(SetupHwnd(), start);
+      return doa4::setup::PickIsoFile(OwnerWindow(), start);
     };
     fx.pick_folder = [this, script](const std::filesystem::path& start) -> std::optional<std::filesystem::path> {
       if (script.doax2) return script.doax2;
-      return doa4::photo::PickFolder(SetupHwnd(), start, L"Dead or Alive 4 - choose the extracted DOAX2 folder");
+      return doa4::photo::PickFolder(OwnerWindow(), start, L"Dead or Alive 4 - choose the extracted DOAX2 folder");
     };
     fx.start = [](doa4::suitconv::ImportRequest request) {
       return doa4::suits_import::StartJobRunner(std::move(request));
@@ -232,11 +246,11 @@ class DeadOrAlive4App : public rex::ReXApp {
     doa4::suits_import::Effects fx;
     fx.pick_iso = [this](const std::filesystem::path& start) -> std::optional<std::filesystem::path> {
       if (const auto t = test_source()) return t;
-      return doa4::setup::PickIsoFile(SetupHwnd(), start);
+      return doa4::setup::PickIsoFile(OwnerWindow(), start);
     };
     fx.pick_folder = [this](const std::filesystem::path& start) -> std::optional<std::filesystem::path> {
       if (const auto t = test_source()) return t;
-      return doa4::photo::PickFolder(SetupHwnd(), start, L"Dead or Alive 4 - choose the extracted DOAX2 folder");
+      return doa4::photo::PickFolder(OwnerWindow(), start, L"Dead or Alive 4 - choose the extracted DOAX2 folder");
     };
     fx.start = [](doa4::suitconv::ImportRequest request) {
       return doa4::suits_import::StartJobRunner(std::move(request));
@@ -402,8 +416,7 @@ class DeadOrAlive4App : public rex::ReXApp {
                  std::function<std::string(const std::filesystem::path&)> done) {
     doa4::SetupHost host;
     host.mode = mode;
-    auto* win32 = dynamic_cast<rex::ui::Win32Window*>(window());
-    host.hwnd = win32 ? win32->hwnd() : nullptr;
+    host.hwnd = OwnerWindow();
     host.reason = std::move(reason);
     host.current = game_files_;
     host.defer = [this](std::function<void()> fn) {
@@ -495,6 +508,7 @@ class DeadOrAlive4App : public rex::ReXApp {
         }
       }
     }
+#if defined(_WIN32)
     // Task 10 review I4 (carry 2k): how this process was asked to show its window (a relaunch passes it on).
     {
       STARTUPINFOW si{};
@@ -502,6 +516,7 @@ class DeadOrAlive4App : public rex::ReXApp {
       GetStartupInfoW(&si);
       REXLOG_INFO("[doa4][LIFE] started show_window={}", (si.dwFlags & STARTF_USESHOWWINDOW) ? int(si.wShowWindow) : -1);
     }
+#endif
     NetplayAtStart();
   }
 
@@ -526,7 +541,11 @@ class DeadOrAlive4App : public rex::ReXApp {
     }
     if (const char* t = std::getenv("DOA4_NP_TEST_DIR"); t && *t) test_dir_ = doa4::PathFromUtf8(t);
     bool had_handoff = false;
+#if defined(_WIN32)
     if (const wchar_t* h = _wgetenv(L"DOA4_NP_HANDOFF"); h && *h) {
+#else
+    if (const char* h = std::getenv("DOA4_NP_HANDOFF"); h && *h) {
+#endif
       had_handoff = true;
       {  // carry 2b: the config file as it was before any host setting is applied
         std::error_code ec;
@@ -535,8 +554,12 @@ class DeadOrAlive4App : public rex::ReXApp {
         toml_had_ = bool(f) || std::filesystem::exists(ConfigPath(), ec);
       }
       const std::filesystem::path path(h);
+#if defined(_WIN32)
       SetEnvironmentVariableW(L"DOA4_NP_HANDOFF", nullptr);  // the offline relaunch at the end must not inherit it
       _wputenv(L"DOA4_NP_HANDOFF=");
+#else
+      unsetenv("DOA4_NP_HANDOFF");  // the offline relaunch at the end must not inherit it
+#endif
       ReadHandoff(path);
     }
     doa4::np::SetSwitchContext(session_.has_value(), !test_dir_.empty());
@@ -552,8 +575,12 @@ class DeadOrAlive4App : public rex::ReXApp {
           << '\n';
     }
     // fix round M2: like DOA4_WAIT_PID, the marker is for this process only (its own relaunches start clean)
+#if defined(_WIN32)
     SetEnvironmentVariableW(L"DOA4_NP_AFTER_SESSION", nullptr);
     _wputenv(L"DOA4_NP_AFTER_SESSION=");
+#else
+    unsetenv("DOA4_NP_AFTER_SESSION");
+#endif
   }
 
   // Fix round I1/I2: a session start that fails once a host-imposed value was applied (or once the redirect is known
@@ -579,6 +606,7 @@ class DeadOrAlive4App : public rex::ReXApp {
   void ReadHandoff(const std::filesystem::path& path) {
     std::vector<uint8_t> bytes;
     {
+#if defined(_WIN32)
       HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (h != INVALID_HANDLE_VALUE) {
@@ -588,6 +616,12 @@ class DeadOrAlive4App : public rex::ReXApp {
         CloseHandle(h);
       }
       DeleteFileW(path.c_str());
+#else
+      std::ifstream in(path, std::ios::binary);
+      bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+#endif
     }
     if (bytes.empty()) {
       doa4::np::EarlyLog(fmt::format("[doa4][NET] hand-off {} unreadable: starting offline", doa4::Utf8Generic(path)));
@@ -1169,7 +1203,12 @@ class DeadOrAlive4App : public rex::ReXApp {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         f << text;
       }
+#if defined(_WIN32)
       MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+      std::error_code ec;
+      std::filesystem::rename(tmp, dst, ec);  // rename(2) replaces in one step
+#endif
     }
     lobby_watch_ = std::thread([this] {
       using namespace std::chrono_literals;
@@ -1458,7 +1497,11 @@ class DeadOrAlive4App : public rex::ReXApp {
     if (launch_refused_) {  // fix round I2: the guest never runs on the wrong user data (the module is not launched)
       REXLOG_WARN("[doa4][NET] module launch refused: the session start was aborted; this process ends now");
       if (auto l = ::rex::GetLogger()) l->flush();
+#if defined(_WIN32)
       TerminateProcess(GetCurrentProcess(), 0);
+#else
+      _exit(0);
+#endif
     }
     REXLOG_INFO("[doa4][LIFE] OnPreLaunchModule: about to spawn main guest thread");
     // The latency trace (DOA4_LAG_TRACE=1, doa4_lagtrace.h): on before the guest's first VdSwap.
@@ -1617,14 +1660,17 @@ class DeadOrAlive4App : public rex::ReXApp {
     doa4::photo::Service::Hooks hooks;
     hooks.capture = [this](doa4::photo::Image* image) { return CaptureFrame(image); };
     hooks.monitor = [this] {
-      auto* win32 = dynamic_cast<rex::ui::Win32Window*>(window());
-      return doa4::photo::MonitorSize(win32 ? win32->hwnd() : nullptr);
+      return doa4::photo::MonitorSize(OwnerWindow());
     };
     hooks.settings = [this] { return PhotoSettings(); };
     hooks.now = [] {
       const std::time_t now = std::time(nullptr);
       std::tm local{};
+#if defined(_WIN32)
       localtime_s(&local, &now);
+#else
+      localtime_r(&now, &local);
+#endif
       return local;
     };
     hooks.on_result = [this](const doa4::photo::Result& result) {
@@ -1816,6 +1862,7 @@ class DeadOrAlive4App : public rex::ReXApp {
     if (!drawer_ || !window()) return;
     doa4::MenuHost host;
     host.window = window();
+    host.dialog_owner = OwnerWindow();
     host.config_path = rex::filesystem::GetExecutableFolder() / (GetName() + ".toml");
     host.running_scale = running_scale_;
     host.saved_scale = &saved_scale_;
@@ -1942,7 +1989,11 @@ class DeadOrAlive4App : public rex::ReXApp {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         out << toml_snapshot_;
       }
+#if defined(_WIN32)
       MoveFileExW(tmp.c_str(), ConfigPath().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+#else
+      std::filesystem::rename(tmp, ConfigPath(), ec);  // rename(2) replaces in one step
+#endif
     } else {
       std::filesystem::remove(ConfigPath(), ec);
     }
@@ -2272,7 +2323,7 @@ class DeadOrAlive4App : public rex::ReXApp {
       *memory->TranslateVirtual<uint8_t*>(address) = value;
     };
     guest_.write_be32 = [memory](uint32_t address, uint32_t value) {
-      *memory->TranslateVirtual<uint32_t*>(address) = _byteswap_ulong(value);
+      *memory->TranslateVirtual<uint32_t*>(address) = std::byteswap(value);
     };
     protect_ = [memory](uint32_t address, uint32_t size, bool writable) {
       rex::memory::BaseHeap* heap = memory->LookupHeap(address);

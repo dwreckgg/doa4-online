@@ -60,11 +60,11 @@ REX_EXTERN(__imp__sub_824F1360);
 REX_EXTERN(__imp__sub_824F0C60);
 REX_EXTERN(__imp__sub_8275AAA8);
 // SDK netplay exports (sdk-np0 src/audio/audio_system.cpp, src/system/xnotifylistener.cpp).
-__declspec(dllimport) void rex_audio_lockstep(int on);
-__declspec(dllimport) int rex_audio_advance(uint32_t n, int timeout_ms);
-__declspec(dllimport) uint32_t rex_audio_registrations();
-__declspec(dllimport) void rex_notify_frame();
-__declspec(dllimport) uint32_t rex_notify_delivered();
+REX_DLL_IMPORT void rex_audio_lockstep(int on);
+REX_DLL_IMPORT int rex_audio_advance(uint32_t n, int timeout_ms);
+REX_DLL_IMPORT uint32_t rex_audio_registrations();
+REX_DLL_IMPORT void rex_notify_frame();
+REX_DLL_IMPORT uint32_t rex_notify_delivered();
 }
 
 namespace doa4::np::det {

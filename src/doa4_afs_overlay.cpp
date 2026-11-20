@@ -5,9 +5,17 @@
 #include <algorithm>
 #include <cstring>
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cerrno>
+#endif
 
 namespace doa4::afs {
 
@@ -31,6 +39,7 @@ bool MemorySource::Read(uint64_t offset, void* dst, size_t n) const {
   return true;
 }
 
+#if defined(_WIN32)
 std::shared_ptr<FileSource> FileSource::Open(const std::filesystem::path& path) {
   HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -63,6 +72,34 @@ bool FileSource::Read(uint64_t offset, void* dst, size_t n) const {
   }
   return true;
 }
+#else
+std::shared_ptr<FileSource> FileSource::Open(const std::filesystem::path& path) {
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return nullptr;
+  struct stat st;
+  if (fstat(fd, &st) != 0) {
+    close(fd);
+    return nullptr;
+  }
+  return std::shared_ptr<FileSource>(new FileSource(fd, uint64_t(st.st_size)));
+}
+
+FileSource::~FileSource() { close(fd_); }
+
+bool FileSource::Read(uint64_t offset, void* dst, size_t n) const {
+  if (offset > size_ || n > size_ - offset) return false;
+  auto* out = static_cast<uint8_t*>(dst);
+  while (n > 0) {
+    const ssize_t got = pread(fd_, out, n, off_t(offset));
+    if (got < 0 && errno == EINTR) continue;
+    if (got <= 0) return false;
+    out += got;
+    offset += uint64_t(got);
+    n -= size_t(got);
+  }
+  return true;
+}
+#endif
 
 std::optional<Toc> ReadToc(const Source& archive, std::string* error) {
   auto fail = [&](const std::string& why) -> std::optional<Toc> {

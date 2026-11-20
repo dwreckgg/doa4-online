@@ -7,9 +7,11 @@
 // built with DOA4_UPNP_NO_MINIUPNPC (the host test) there is no miniupnpc router.
 #include "np_upnp.h"
 
+#if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -233,8 +235,10 @@ void Renew(Shared& s) {
 }
 
 void Worker() {
+#if defined(_WIN32)
   WSADATA w;
   const bool wsa = WSAStartup(MAKEWORD(2, 2), &w) == 0;
+#endif
   Shared& s = S();
   for (;;) {
     int job = -1;  // -1 = renew, 0 = unmap, else map that port
@@ -272,7 +276,9 @@ void Worker() {
       Renew(s);
     }
   }
+#if defined(_WIN32)
   if (wsa) WSACleanup();
+#endif
 }
 
 void Enqueue(uint16_t job) {
