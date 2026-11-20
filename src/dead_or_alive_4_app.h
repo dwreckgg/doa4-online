@@ -56,6 +56,7 @@
 #include "doa4_lagtrace.h"
 #include "doa4_language.h"
 #include "doa4_lowmem.h"
+#include "doa4_alpha_colours.h"
 #include "doa4_alpha_select.h"
 #include "doa4_move_guard.h"
 #include "doa4_net_overlay.h"
@@ -2257,6 +2258,17 @@ class DeadOrAlive4App : public rex::ReXApp {
           REXLOG_INFO("[doa4][SUITS] {}: charId {:#x} costume #{} = model {}", a.label, a.character,
                       a.costume, a.model);
         }
+      }
+      // Alpha's colour rows per model (doa4_alpha_colours.h): only her applied colour extras get one (ruling T7-R3), and
+      // only when the colour entries are installed; her draws then write each fighter's own row and put it back.
+      if (colours_installed) {
+        const doa4::alpha_colours::RowMap rows = doa4::alpha_colours::RowsByModel(applied.applied);
+        doa4::alpha_colours::Install(rows.by_model, rows.names);
+        std::string listed;
+        for (uint32_t model = 0; model < rows.by_model.size(); ++model) {
+          if (rows.by_model[model]) listed += (listed.empty() ? "" : ", ") + rows.names[model] + " = model " + std::to_string(model);
+        }
+        REXLOG_INFO("[doa4][COLOURS] Alpha-152's colour rows installed: {}", listed.empty() ? std::string("none") : listed);
       }
       // The boxes can be toggled from the menu later: each state of her box holds her suits too, and her appended colour
       // costumes; a replacing one adds no costume, so it is not carried (plan F19: costumes::AppendedModels).
