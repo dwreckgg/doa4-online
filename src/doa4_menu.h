@@ -1,9 +1,9 @@
 // In-game menu, opened and closed with Escape (bind_doa4_menu).
 //
 // Tabs: Game (display mode, picture, speakers, language, where the game files are), Controls (per-slot controller
-// remap, keyboard binds), Photo, Extras (unlocks, game tweaks) and Online (hosting and joining a friend). Every setting is
-// applied to its cvar and saved to dead_or_alive_4.toml with doa4::SaveTomlKey; the Extras tab's "Age:" box and
-// slider are saved together with doa4::SaveTomlKeys (SaveBustSetting). The game keeps running while
+// remap, keyboard binds), Photo, Extras (unlocks, game tweaks, physics) and Online (hosting and joining a friend).
+// Every setting is applied to its cvar and saved to dead_or_alive_4.toml with doa4::SaveTomlKey; the Extras tab's
+// "Age:" box and slider are saved together with doa4::SaveTomlKeys (SaveBustSetting). The game keeps running while
 // the menu is open; its input is blocked (DeadOrAlive4App::OnBlocksGuestInput),
 // so the game sees an untouched controller and keyboard.
 //
@@ -231,6 +231,9 @@ class MenuDialog : public rex::ui::ImGuiDialog, public rex::ui::WindowInputListe
   bool pad_connected_ = false;  // last non-busy GetRawState answer for slot_
   double next_save_poll_ = 0.0;  // ImGui time of the next "has the game saved?" check
   bool wipe_armed_ = false;      // the first press of "Wipe unlocks..." happened
+  // The Physics block's np::SessionBust(), asked once per opening (the dialog is per opening): the session's values
+  // are fixed once it starts, and SessionBust logs a malformed value at every call. Unset until the Extras tab draws.
+  std::optional<std::optional<suits::bust::AgeSetting>> session_bust_;
   display::ExclusiveModesCache own_exclusive_modes_;  // used only without host_.exclusive_modes
   bool exclusive_modes_first_frame_ = true;  // this opening's first drawn frame is still to come (the dialog is per opening)
   // A build was started in this opening (queued on host_.defer; whatever its outcome, the only one this opening: a failed

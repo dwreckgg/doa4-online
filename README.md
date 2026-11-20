@@ -142,8 +142,8 @@ straight away on any save.
   Host and Join stay off until you restart.
 - **Costumes:** importing also unlocks all the DOA4 costumes for the nine girls who have them. Your save
   isn't changed.
-- **Full DOAX2 breast movement** (Extras tab) uses DOAX2's up-and-down range instead of the character's
-  DOA4 range. It takes effect at once.
+- **Age:** (Extras tab, Physics) sets the breast movement for every costume. Off is retail DOA4; on, the
+  slider goes from 1 to 99, and 18 is retail. It takes effect at once. Online, the host's setting is used.
 
 **Online with swimsuits:**
 

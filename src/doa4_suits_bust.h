@@ -85,8 +85,8 @@ struct AgeSetting {
 
 // The saved settings to what the menu shows: raw doa4_bust_age, box doa4_bust_age_on (never saved reads as false),
 // legacy_full the old doa4_suits_full_bust (Part A's rule; on 0.3.7's line it is retired: LineSetting passes false).
-// Until the first save (raw below 1) the old toggle on shows the box ON at
-// 99; a save writes both keys, so after it the box alone decides.
+// Until the first save (raw below 1) the old toggle on shows the box ON at 99; a save writes both keys, so after it the
+// box alone decides.
 inline AgeSetting EffectiveSetting(int32_t raw_age, bool box, bool legacy_full) {
   const bool on = raw_age < kAgeMin ? box || legacy_full : box;
   return {on, EffectiveAge(raw_age, legacy_full)};
