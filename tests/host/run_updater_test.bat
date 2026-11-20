@@ -1,7 +1,7 @@
 @echo off
 rem Builds and runs the in-game updater host test with clang-cl (no CMake): doa4_updater.cpp over np_rules.cpp and
 rem np_wire.cpp (Choose reads the release list with rules::PickRelease), linked with winhttp and bcrypt.
-rem No network: the test never calls CheckAndUpdate or Start; every file it writes is under %%TEMP%%\doa4_updater_<pid>\.
+rem No network: the test calls CheckAndUpdate and Start only with a fake HTTP source and never calls GameEnv (WinHTTP); every file it writes is under %%TEMP%%\doa4_updater_<pid>\.
 rem DOA4_UPDATER_HOST_TEST gives the release identity CMake passes to the game a fixed stand-in.
 rem DOA4_VSDEVCMD and DOA4_LLVM_BIN (optional) name the Visual Studio environment script and the LLVM bin folder;
 rem UPDATER_OUT (optional) names the output folder, so that mutation probes never share one.

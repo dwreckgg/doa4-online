@@ -32,8 +32,9 @@
 #include "net/np_rules.h"
 
 #ifdef DOA4_UPDATER_HOST_TEST
-// tests/host/run_updater_test.bat: the release identity CMake gives the game target, as a stand-in (the test never
-// calls GameEnv, so it never uses them)
+// tests/host/run_updater_test.bat and run_updater_refusal_test.bat: the release identity CMake gives the game target, as
+// a stand-in (updater_host_test never calls GameEnv; updater_refusal_host_test calls GameEnv() and reads only its
+// may_install, so neither uses them)
 #define DOA4_RELEASE_TAG "dev"
 #define DOA4_RELEASE_REPO "none/none"
 #define DOA4_RELEASE_CHANNEL "alpha"
@@ -499,7 +500,8 @@ void DeleteOldFiles(const fs::path& dir) {
   }
 }
 
-void CleanUpAtStart(const fs::path& dir) {
+void CleanUpAtStart(const fs::path& dir, bool may_install) {
+  if (!may_install) return;
   if (dir.empty() || !dir.is_absolute()) return;
   DeleteOldFiles(dir);
   std::error_code ec;
@@ -597,6 +599,7 @@ static bool ListAndChoose(const Env& env, Choice* c, Result* r) {
 
 Result CheckAndUpdate(const Request& request, const Env& env) {
   Result r;
+  if (!env.may_install) { r.message = kNoInstallText; return r; }
   {
     std::lock_guard<std::mutex> lock(g_mu);
     if (!g_installed.empty()) {
