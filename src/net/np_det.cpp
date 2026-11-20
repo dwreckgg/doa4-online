@@ -86,6 +86,14 @@
 #include "np_det_lanes.h"
 #include "np_session.h"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 extern "C" {
 REX_EXTERN(__imp__sub_82334C60);
 REX_EXTERN(__imp__sub_82790138);
@@ -429,7 +437,11 @@ REX_HOOK_RAW(sub_82793B68) {
     if (const char* v = doa4::np::TestSwitch("DOA4_NP_FORCE_LOADER_RACE")) {
       const unsigned long ms = std::strtoul(v, nullptr, 10);
       REXLOG_INFO("[doa4][NET] forced loader race: the creator sleeps {} ms before the critical section init", ms);
+#if defined(_WIN32)
+      Sleep(DWORD(ms));
+#else
       std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+#endif
     }
   }
   if (!doa4::np::Active()) return;
