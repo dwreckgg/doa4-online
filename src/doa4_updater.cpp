@@ -226,7 +226,7 @@ bool WinHttpGet(const std::string& url_text, bool api, const Sink& sink, std::st
 #else
 // No HTTPS client is linked into the Linux build yet: the check reports that instead of reaching GitHub.
 bool LinuxHttpGet(const std::string&, bool, const Sink&, std::string* error) {
-  *error = "Check for Updates is not available in the Linux build yet; download the newest release from GitHub";
+  *error = "Check for Updates is not available in the Linux build; build the new version from source";
   return false;
 }
 #endif

@@ -45,7 +45,8 @@ inline constexpr uint64_t kMaxListBytes = uint64_t(16) << 20;
 
 // What the release list said (Task 15: the start-up notice's memory follows it). kNewer: the channel's highest release
 // is newer than the running tag (every release, for a self-built game); kUpToDate: it is not; kFailed: no answer, an
-// error, no release of the channel, or nothing asked (a swap already done in this process, the game closing).
+// error, no release of the channel, or nothing asked (a swap already done in this process, the game closing, or a
+// CheckAndUpdate on a build that may not install: refused first, message kNoInstallText, found left at kFailed).
 enum class Found { kFailed, kUpToDate, kNewer };
 
 struct Result {

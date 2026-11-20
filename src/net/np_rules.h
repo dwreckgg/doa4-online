@@ -95,7 +95,9 @@ bool PickRelease(std::string_view json, std::string_view channel, std::span<cons
                  ReleasePick* out);
 // Who is older, who updates, where. `theirs` may be "" (a game that sent no release tag); a tag that is not a
 // version ("dev", a local build) is a self-built game. Tags of two channels (alpha-v0.3.0 / netplay-v1.0.9): the one on
-// the retired "netplay" channel is the older game whatever its numbers, and both full tags are shown.
+// the retired "netplay" channel is the older game whatever its numbers, and both full tags are shown. The self-built and
+// the same-version texts also name the Windows / native Linux pair, which never shares a build id (text only; neither
+// side knows the other's platform).
 std::string MismatchAdvice(std::string_view mine, std::string_view theirs);
 
 // ---- Handshake verdict (host side) ----

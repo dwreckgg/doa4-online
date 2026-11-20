@@ -371,7 +371,12 @@ int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::error_code ec;
   const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
-  g_root = fs::temp_directory_path(ec) / ("doa4_updater_refusal_" + std::to_string(stamp));
+  const fs::path temp = fs::temp_directory_path(ec);
+  if (ec || temp.empty()) {  // never fall back to a relative root in the working directory
+    std::printf("FAILED: no temp folder (%s); nothing was created\n", ec ? ec.message().c_str() : "an empty path");
+    return 1;
+  }
+  g_root = temp / ("doa4_updater_refusal_" + std::to_string(stamp));
   fs::create_directories(g_root, ec);
   CHECK(!ec && Exists(g_root));
   TestValues();
