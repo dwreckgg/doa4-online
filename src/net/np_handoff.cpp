@@ -51,15 +51,22 @@ constexpr const char* kSdkSettings[] = {
     "audio_maxqframes",
 };
 
-// The port's own carried settings beyond the tweaks. doa4_suits_full_bust: its rescale writes guest memory, so both players run
-// one value. Two things write the cvar on a player's PC: the Extras tab, locked in a session, and the SDK's F4 settings overlay,
-// which is not. So in a session the reader (FullBustWanted, doa4_suits_hooks.cpp) takes the hand-off's value once and never the
-// cvar again: a toggle cannot end a match.
-// doa4_language and doa4_subtitles (update G1): the saved text and subtitles language, written into guest memory at boot, so in a
-// session both PCs boot with the host's. The same rule: the reader (doa4::language::SavedForThisRun) takes the hand-off's
-// values once, never the cvars, and a joiner applies only a valid id (anything else is the game's own, logged). No value is
-// checked here: like every carried integer, a value the joiner's cvar cannot hold is refused when it is applied.
-constexpr const char* kPortSettings[] = {"doa4_suits_full_bust", "doa4_language", "doa4_subtitles"};
+// The port's own carried settings beyond the tweaks, five names in this order:
+// - doa4_suits_full_bust: the old full-bust setting, no longer read (the "Age:" box replaced it), kept carried so an old
+//   recording or hand-off, which holds its line, still applies (an unknown name fails ApplyGuestSettings).
+// - doa4_bust_age_on and doa4_bust_age: the Extras tab's "Age:" box and age. Their rescale writes guest memory, so both
+//   players run the host's box and age. Two things write the cvars on a player's PC: the Extras tab, locked in a session,
+//   and the SDK's F4 settings overlay, which is not. So in a session the reader (AgeWanted, doa4_suits_hooks.cpp, through
+//   np::SessionBust) takes the hand-off's values once and never the cvars again: a change cannot end a match. Any text
+//   reaches the joiner's setter (no value is checked here); the reader runs anything but a whole number and true/false
+//   as the box off at 18 (doa4::suits::bust::SettingFromText).
+// - doa4_language and doa4_subtitles (update G1), last: the saved text and subtitles language, written into guest memory
+//   at boot, so in a session both PCs boot with the host's. The same rule: the reader (doa4::language::SavedForThisRun)
+//   takes the hand-off's values once, never the cvars, and a joiner applies only a valid id (anything else is the game's
+//   own, logged). No value is checked here: like every carried integer, a value the joiner's cvar cannot hold is refused
+//   when it is applied.
+constexpr const char* kPortSettings[] = {"doa4_suits_full_bust", "doa4_bust_age_on", "doa4_bust_age", "doa4_language",
+                                         "doa4_subtitles"};
 
 // The TRUST class: carried settings whose NON-DEFAULT value weakens a boundary of the PC that applies it.
 // They are forced to their default on both sides of a session:

@@ -42,6 +42,7 @@
 
 #include "../doa4_guest.h"
 #include "../doa4_photo.h"
+#include "../doa4_suits_bust.h"
 #include "np_handoff.h"
 #include "np_live.h"
 #include "np_wire.h"
@@ -136,9 +137,11 @@ bool Replaying();
 // guest text (meta guest=, ';'-joined, "(none)" for none) in a replay, nothing otherwise; nothing too for a name the
 // text lacks (a recording made before the name was carried). Fixed once Start has run, before any guest code.
 std::optional<std::string> SessionGuestValue(std::string_view name);
-// The hand-off's doa4_suits_full_bust in a session ("true" reads true), nothing outside one (a replay included). Fixed
-// when the session starts.
-std::optional<bool> SessionFullBust();
+// The session's "Age:" box and age (Part B, ruling A35): in an online session the hand-off's doa4_bust_age and
+// doa4_bust_age_on, in a replay the recording's (D5: a replay runs the recording's values, not this PC's), through
+// doa4::suits::bust::SettingFromText (a missing line, as in a 0.3.7 recording, is the box off at 18; a malformed value
+// too, logged once per call). Nothing offline. Never the local cvars. The hook reads it once and latches it.
+std::optional<doa4::suits::bust::AgeSetting> SessionBust();
 // True in an online session whose hand-off says mixed. Costume code acts on it; nothing else does.
 bool SessionSuitsMixed();
 // An online session whose swimsuit state is mixed: the hand-off's suit_holders (bit 0 the host = player 0, bit 1 the joiner =

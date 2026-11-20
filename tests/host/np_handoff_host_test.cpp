@@ -37,10 +37,12 @@
 #include <vector>
 
 #include "../../src/doa4_language.h"
+#include "../../src/doa4_suits_bust.h"
 #include "../../src/doa4_tweaks.h"
 
 namespace ho = doa4::np::handoff;
 namespace lang = doa4::language;
+namespace bust = doa4::suits::bust;
 namespace rules = doa4::np::rules;
 using Bytes = std::vector<uint8_t>;
 
@@ -302,7 +304,9 @@ static const NotCarried kSdkNotCarried[] = {
 };
 // (Task 9 adds the Online tab's netplay_* settings: each player's own network preferences; the input delay a session
 // uses travels in the hand-off itself, not as a guest setting.)
-// doa4_suits_full_bust is carried (Task 5, kPortCarried): its rescale writes guest memory, so the two players must agree on it.
+// doa4_suits_full_bust is carried (Task 5, kPortCarried): no longer read since the "Age:" box (Part B), but kept so old
+// recordings and hand-offs, which hold its line, still apply. doa4_bust_age_on and doa4_bust_age are carried (Part B,
+// ruling A35): their rescale writes guest memory, so both PCs run the host's box and age.
 // doa4_suits_import_pending: a player's own start-up state; never carried into a session.
 // doa4_skip_intro (update G6, Task 14, ruling R50): not carried; a session skips every movie on both PCs (kMovie), and the
 // intro rule never applies in a session (doa4_intro_skip.h), so both sides are equal by construction.
@@ -348,8 +352,11 @@ static constexpr size_t kSdkTotal = 206;  // the distinct cvar names the SDK's s
 
 // The expected names: the carried list, then the Extras tweak cvars of the tweaks module.
 // The port's own carried settings beyond the tweaks: they change guest memory and are no trust matter (np_handoff.cpp
-// kPortSettings). doa4_language and doa4_subtitles (update G1): in a session both PCs boot with the host's language and subtitles.
-static const char* const kPortCarried[] = {"doa4_suits_full_bust", "doa4_language", "doa4_subtitles"};
+// kPortSettings). doa4_bust_age_on and doa4_bust_age (Part B): both PCs run the host's "Age:" box and age; the old
+// doa4_suits_full_bust stays carried so a recording that holds its line still applies. doa4_language and doa4_subtitles
+// (update G1): in a session both PCs boot with the host's language and subtitles; the pair stays last.
+static const char* const kPortCarried[] = {"doa4_suits_full_bust", "doa4_bust_age_on", "doa4_bust_age", "doa4_language",
+                                           "doa4_subtitles"};
 static constexpr size_t kPortCarriedCount = sizeof(kPortCarried) / sizeof(kPortCarried[0]);
 
 static std::vector<std::string> ExpectedNames() {
@@ -1672,14 +1679,17 @@ static void TestGuestNames() {
   CHECK(uniq.count("async_shader_compilation"));  // fix round 1: a draw skipped while its pipeline is built drops readback work
   for (const doa4::tweaks::Tweak& t : doa4::tweaks::AllTweaks()) CHECK(uniq.count(t.cvar));
 
-  Group("guest settings: the list ends with the port's three, the language pair last; neither language name is in the trust class");
-  CHECK(names.size() >= 3);
-  if (names.size() >= 3) {
-    CHECK(names[names.size() - 3] == "doa4_suits_full_bust");
+  Group("guest settings: the list ends with the port's five (old full bust, the Age box, the age, the language pair last); none is in the trust class");
+  CHECK(kPortCarriedCount == 5);
+  CHECK(names.size() >= 5);
+  if (names.size() >= 5) {
+    CHECK(names[names.size() - 5] == "doa4_suits_full_bust");
+    CHECK(names[names.size() - 4] == "doa4_bust_age_on");
+    CHECK(names[names.size() - 3] == "doa4_bust_age");
     CHECK(names[names.size() - 2] == "doa4_language");
     CHECK(names[names.size() - 1] == "doa4_subtitles");
   }
-  for (const char* n : {"doa4_language", "doa4_subtitles"}) {
+  for (const char* n : {"doa4_bust_age_on", "doa4_bust_age", "doa4_language", "doa4_subtitles"}) {
     g_ctx = n;
     CHECK(!IsTrusted(n));
     bool in_module_class = false;
@@ -1703,7 +1713,9 @@ static void TestAlphaCarried() {
   CHECK(std::string(doa4::tweaks::AllTweaks()[doa4::tweaks::kAlpha152].cvar) == alpha);
   const size_t at = kSdkCount + doa4::tweaks::kAlpha152;
   CHECK(at < names.size() && names[at < names.size() ? at : 0] == alpha);
-  CHECK(names.size() >= 4 && names[names.size() >= 4 ? names.size() - 4 : 0] == alpha);  // the last tweak: right before the port's three
+  // the last tweak: right before the port's own names, located by name (the first port name), not by a count from the end
+  const size_t port_first = size_t(std::find(names.begin(), names.end(), std::string("doa4_suits_full_bust")) - names.begin());
+  CHECK(port_first >= 1 && port_first < names.size() && names[port_first >= 1 && port_first < names.size() ? port_first - 1 : 0] == alpha);
   CHECK(!IsTrusted(alpha));
   bool in_module_class = false;
   for (const ho::TrustedSetting& t : ho::TrustedSettings()) in_module_class = in_module_class || t.name == alpha;
@@ -1751,7 +1763,7 @@ static void TestAlphaCarried() {
   }
 }
 
-// The reader of a session's bust setting (np::SessionFullBust) takes it from the hand-off's text. T2.2: the likeliest wrong
+// The reader of a session's bust setting (np::SessionBust) takes it from the hand-off's text. T2.2: the likeliest wrong
 // versions are a prefix match, the first line whatever its name, and a value cut at the next '='.
 static void TestGuestSettingValue() {
   Group("guest setting value: the exact name's value, whole, from any line");
@@ -1805,7 +1817,8 @@ static void TestHostileLanguage() {
   for (const char* bad : {"42", "abc"}) {
     Group(std::string_view(bad) == "42" ? "hostile host: 42 passes the hand-off as in another carried integer, and resolves to the game's own"
                                         : "hostile host: abc passes the hand-off as in another carried integer, and resolves to the game's own");
-    for (const char* name : {"doa4_language", "doa4_subtitles", "video_mode_width"}) {
+    // Part B PB4: the Age box and age travel the same way (names and lines are checked, never values)
+    for (const char* name : {"doa4_language", "doa4_subtitles", "video_mode_width", "doa4_bust_age", "doa4_bust_age_on"}) {
       g_ctx = std::string(name) + "=" + bad;
       ho::Handoff h = Full();
       h.guest_settings = TextWith(name, bad);
@@ -1829,6 +1842,33 @@ static void TestHostileLanguage() {
     CHECK(note.find(std::string("subtitles ") + bad) != std::string::npos);
   }
   g_ctx.clear();
+  // Part B PB4: a hostile "maybe" box and "abc" age pass the hand-off unchanged too; the joiner's reader of the session
+  // value (np::SessionBust over doa4::suits::bust::SettingFromText) then runs the box off at 18 and names the value. The
+  // joiner's refusal (the SDK's bool and int parsers in SetFlagByName, ApplyGuestText's read-back, np_session.cpp) is
+  // not reachable here.
+  Group("hostile host: a maybe box and an abc age pass the hand-off unchanged; the session reader runs the box off at 18, naming them");
+  {
+    ho::Handoff h = Full();
+    std::map<std::string, std::string> m = Store();
+    m["doa4_bust_age_on"] = "maybe";
+    m["doa4_bust_age"] = "abc";
+    h.guest_settings = ExpectedText(m);
+    const Bytes b = ho::Pack(h);
+    ho::Handoff out;
+    CHECK(!b.empty());
+    CHECK(ho::Unpack(S(b), &out).empty());
+    std::map<std::string, std::string> given;
+    CHECK(ho::ApplyGuestSettings(out.guest_settings, [&](const std::string& n, const std::string& v) {
+            given[n] = v;
+            return true;
+          }).empty());
+    CHECK(Val(given, "doa4_bust_age_on") == "maybe" && Val(given, "doa4_bust_age") == "abc");
+    std::string note = "stale";
+    const bust::AgeSetting s = bust::SettingFromText(ho::GuestSettingValue(out.guest_settings, "doa4_bust_age"),
+                                                     ho::GuestSettingValue(out.guest_settings, "doa4_bust_age_on"), &note);
+    CHECK(s == (bust::AgeSetting{false, 18}));
+    CHECK(note.find("doa4_bust_age \"abc\"") != std::string::npos && note.find("doa4_bust_age_on \"maybe\"") != std::string::npos);
+  }
   Group("hostile host: a valid pair from a hand-off resolves to itself; a missing line is the game's own, silently");
   {
     std::string note = "stale";
@@ -1921,17 +1961,30 @@ static void TestReplayDefaults() {
     CHECK(filled == Filled({{"doa4_suits_full_bust", "<default of doa4_suits_full_bust>"}}));
     CHECK(ho::ApplyGuestSettings(done, record).empty());
   }
+  Group("replay defaults: a recording made before the Age box (0.3.7) gets doa4_bust_age_on and doa4_bust_age at their defaults, in list order, and applies");
+  {
+    Filled filled = {{"stale", "x"}};
+    const std::string before_age = Without(full, {"doa4_bust_age_on", "doa4_bust_age"});
+    CHECK(before_age.size() < full.size() && before_age.find("doa4_suits_full_bust=") != std::string::npos);
+    const std::string done = ho::CompleteGuestText(before_age, ho::TextSource::kReplay, default_of, &filled);
+    CHECK(filled == Filled({{"doa4_bust_age_on", "<default of doa4_bust_age_on>"}, {"doa4_bust_age", "<default of doa4_bust_age>"}}));
+    set.clear();
+    CHECK(ho::ApplyGuestSettings(done, record).empty());
+    CHECK(Val(set, "doa4_bust_age_on") == "<default of doa4_bust_age_on>" && Val(set, "doa4_bust_age") == "<default of doa4_bust_age>");
+    CHECK(Val(set, "doa4_suits_full_bust") == Val(Store(), "doa4_suits_full_bust"));  // the old line still applies as recorded
+  }
   Group("replay defaults: a replay text without a final newline is completed on new lines; its last line keeps its value");
   {
     std::string cut = old_text;
     CHECK(!cut.empty() && cut.back() == '\n');
-    cut.pop_back();  // the last recorded line (doa4_suits_full_bust) now has no newline
-    CHECK(cut.substr(cut.rfind('\n') + 1).rfind("doa4_suits_full_bust=", 0) == 0);
+    cut.pop_back();  // the last recorded line (doa4_bust_age, the last port name before the language pair) now has no newline
+    CHECK(cut.substr(cut.rfind('\n') + 1).rfind("doa4_bust_age=", 0) == 0);
     Filled filled;
     const std::string done = ho::CompleteGuestText(cut, ho::TextSource::kReplay, default_of, &filled);
     CHECK(filled.size() == 2);
     set.clear();
-    CHECK(ho::ApplyGuestSettings(done, record).empty());  // NOT "doa4_language: missing" (merged into the bust line)
+    CHECK(ho::ApplyGuestSettings(done, record).empty());  // NOT "doa4_language: missing" (merged into the age line)
+    CHECK(Val(set, "doa4_bust_age") == Val(Store(), "doa4_bust_age"));  // the unterminated last line keeps its value
     CHECK(Val(set, "doa4_suits_full_bust") == Val(Store(), "doa4_suits_full_bust"));
     CHECK(Val(set, "doa4_language") == "<default of doa4_language>");
     // nothing to fill: the text is left as it is, and its unterminated last line is refused as before
@@ -2550,8 +2603,20 @@ static void TestSdkNames(const std::string& sdk_src, const std::string& port_src
   for (const doa4::tweaks::Tweak& t : doa4::tweaks::AllTweaks()) CHECK(port_expected.insert(t.cvar).second);
   for (const char* n : kPortCarried) CHECK(port_expected.insert(n).second);
   CHECK(port_expected.size() == kPortNotCarriedCount + doa4::tweaks::AllTweaks().size() + kPortCarriedCount);
-  CHECK(kPortCarriedCount == 3);
+  CHECK(kPortCarriedCount == 5);
   for (const char* n : kPortCarried) CHECK(!IsTrusted(n));  // carried at the host's value, not forced: no boundary of the PC
+  // Part B: a 0.3.7 recording (no Age lines) replays with the box and the age at their cvar defaults: the fill takes the
+  // default the registry prints, and the port defines them as false and 0 (box off, never saved: retail DOA4).
+  {
+    const auto def = [&](const std::string& n) { auto it = port.find(n); return it == port.end() ? std::string("<missing>") : it->second.default_token; };
+    CHECK(def("doa4_bust_age_on") == "false" && def("doa4_bust_age") == "0");
+    CHECK(def("doa4_language") == "-1");  // a positive control of the extraction on the port's integers
+    std::vector<std::pair<std::string, std::string>> filled;
+    const std::string done =
+        ho::CompleteGuestText(Without(GoodText(), {"doa4_bust_age_on", "doa4_bust_age"}), ho::TextSource::kReplay, def, &filled);
+    CHECK(done.find("\ndoa4_bust_age_on=false\n") != std::string::npos && done.find("\ndoa4_bust_age=0\n") != std::string::npos);
+    CHECK(filled.size() == 2);
+  }
   for (const auto& d : port) {
     g_ctx = d.first;
     CHECK(port_expected.count(d.first) == 1);
@@ -2563,12 +2628,13 @@ static void TestSdkNames(const std::string& sdk_src, const std::string& port_src
   g_ctx.clear();
   CHECK(port.size() == port_expected.size());
 
-  // Task 5: every test switch named DOA4_SUITS_* in the port is classified. One that changes guest state goes through
-  // np::TestSwitch, so in a session it counts only with DOA4_NP_TEST_DIR set: a player's environment cannot fork one peer. One read
-  // by a bare getenv must be on the list of switches that only log or take a picture.
+  // Task 5: every test switch named DOA4_SUITS_* or DOA4_BUST_* (Part B) in the port is classified. One that changes guest
+  // state goes through np::TestSwitch, so in a session it counts only with DOA4_NP_TEST_DIR set: a player's environment cannot
+  // fork one peer. One read by a bare getenv must be on the list of switches that only log or take a picture.
   {
     static const std::set<std::string> kGuarded = {"DOA4_SUITS_NATIVE_CLOTH_BUDGET", "DOA4_SUITS_NO_FUR_GUARD", "DOA4_SUITS_SCENE",
-                                                   "DOA4_SUITS_BUST_FLIP_S", "DOA4_SUITS_IMPORT_TEST"};
+                                                   "DOA4_SUITS_BUST_FLIP_S", "DOA4_SUITS_IMPORT_TEST",
+                                                   "DOA4_BUST_AGE_MAX"};  // the retail strongest ratio: the poses it writes are guest state
     static const std::set<std::string> kHarmless = {"DOA4_SUITS_COUNT_TRACE", "DOA4_SUITS_LABEL_TRACE", "DOA4_SUITS_TATAMI_TRACE",
                                                     "DOA4_SUITS_COMPLETE_TRACE", "DOA4_SUITS_PIN_TRACE", "DOA4_SUITS_CLOTH_TRACE",
                                                     "DOA4_SUITS_PHOTOS"};
@@ -2583,10 +2649,12 @@ static void TestSdkNames(const std::string& sdk_src, const std::string& port_src
       std::ifstream in(it->path(), std::ios::binary);
       const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
       const auto collect = [&](const std::string& call, std::set<std::string>* into) {
-        const std::string key = call + "(\"DOA4_SUITS_";
-        for (size_t at = text.find(key); at != std::string::npos; at = text.find(key, at + 1)) {
-          const size_t name = at + call.size() + 2;
-          into->insert(text.substr(name, text.find('"', name) - name));
+        for (const char* prefix : {"DOA4_SUITS_", "DOA4_BUST_"}) {
+          const std::string key = call + "(\"" + prefix;
+          for (size_t at = text.find(key); at != std::string::npos; at = text.find(key, at + 1)) {
+            const size_t name = at + call.size() + 2;
+            into->insert(text.substr(name, text.find('"', name) - name));
+          }
         }
       };
       collect("getenv", &bare);

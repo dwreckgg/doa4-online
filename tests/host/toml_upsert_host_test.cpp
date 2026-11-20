@@ -1,4 +1,4 @@
-// Host test for src/doa4_config.cpp (UpsertTomlKey, TomlString, SaveTomlKey).
+// Host test for src/doa4_config.cpp (UpsertTomlKey, TomlString, SaveTomlKey, SaveTomlKeys).
 // Built and run by run_toml_upsert_test.bat.
 
 #include "../../src/doa4_config.h"
@@ -123,6 +123,94 @@ static void TestSaveKeepsFileLoadable() {
   std::filesystem::remove_all(dir);
 }
 
+// The "Age:" box and the age are saved together: one read, both keys upserted into the same text, each key checked
+// against the final text, one write. A refusal of either key leaves the file's bytes as they were.
+static void TestSaveTwoKeys() {
+  auto dir = std::filesystem::temp_directory_path() / "doa4_toml_two_keys_test_data";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  auto path = dir / "dead_or_alive_4.toml";
+  auto tmp = path;
+  tmp += ".tmp";
+  const auto parse = [&](toml::table& table) {
+    try {
+      table = toml::parse_file(path.u8string());
+      return true;
+    } catch (const toml::parse_error& e) {
+      std::printf("FAIL toml++ rejected the two-key file: %s\n", e.what());
+      ++g_failures;
+      return false;
+    }
+  };
+  const auto put_file = [&](const std::string& before) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << before;
+  };
+  toml::table table;
+
+  // (a) No file: both keys land, in list order, each upserted into the text the previous one produced.
+  CHECK(doa4::SaveTomlKeys(path, {{"doa4_bust_age_on", "true"}, {"doa4_bust_age", "42"}}).empty());
+  if (parse(table)) {
+    CHECK(table["doa4_bust_age_on"].value<bool>() == true);
+    CHECK(table["doa4_bust_age"].value<int64_t>() == 42);
+  }
+  CHECK(ReadAll(path) == "doa4_bust_age_on = true\ndoa4_bust_age = 42\n");
+
+  // (b) A CRLF file stays CRLF; the other key is kept.
+  put_file("fullscreen = true\r\ndoa4_bust_age = 18\r\n");
+  CHECK(doa4::SaveTomlKeys(path, {{"doa4_bust_age_on", "false"}, {"doa4_bust_age", "60"}}).empty());
+  if (parse(table)) {
+    CHECK(table["fullscreen"].value<bool>() == true);
+    CHECK(table["doa4_bust_age_on"].value<bool>() == false);
+    CHECK(table["doa4_bust_age"].value<int64_t>() == 60);
+  }
+  {
+    const std::string text = ReadAll(path);
+    bool crlf = true;
+    for (size_t i = 0; i < text.size(); ++i) {
+      if (text[i] == '\n' && (i == 0 || text[i - 1] != '\r')) crlf = false;
+    }
+    CHECK(crlf);
+  }
+
+  // (c) The SECOND key refused: the editor rewrites the line inside the multi-line string, the file still parses and
+  // the real key keeps 5, so only the per-key check can refuse. Nothing is written, the box included.
+  // The error names the refused key; the closing parenthesis keeps doa4_bust_age apart from doa4_bust_age_on.
+  const std::string second_refused = "note = \"\"\"\ndoa4_bust_age = 1\n\"\"\"\ndoa4_bust_age = 5\n";
+  put_file(second_refused);
+  const std::string second_error =
+      doa4::SaveTomlKeys(path, {{"doa4_bust_age_on", "true"}, {"doa4_bust_age", "60"}});
+  CHECK(!second_error.empty());
+  CHECK(second_error.find("(doa4_bust_age)") != std::string::npos);
+  CHECK(ReadAll(path) == second_refused);
+
+  // (d) The FIRST key refused the same way.
+  const std::string first_refused = "note = \"\"\"\ndoa4_bust_age_on = 1\n\"\"\"\ndoa4_bust_age_on = false\n";
+  put_file(first_refused);
+  const std::string first_error =
+      doa4::SaveTomlKeys(path, {{"doa4_bust_age_on", "true"}, {"doa4_bust_age", "60"}});
+  CHECK(!first_error.empty());
+  CHECK(first_error.find("(doa4_bust_age_on)") != std::string::npos);
+  CHECK(ReadAll(path) == first_refused);
+
+  // (e) An empty list is an error and creates no file.
+  auto empty_path = dir / "empty.toml";
+  CHECK(!doa4::SaveTomlKeys(empty_path, {}).empty());
+  CHECK(!std::filesystem::exists(empty_path));
+
+  // (f) Every later save: both lines replaced in place, box line first, no third line. doa4_bust_age is a prefix of
+  // doa4_bust_age_on; the whole trimmed key is compared.
+  put_file("doa4_bust_age_on = true\ndoa4_bust_age = 7\n");
+  CHECK(doa4::SaveTomlKeys(path, {{"doa4_bust_age_on", "false"}, {"doa4_bust_age", "60"}}).empty());
+  CHECK(ReadAll(path) == "doa4_bust_age_on = false\ndoa4_bust_age = 60\n");
+
+  CHECK(!std::filesystem::exists(tmp));
+  auto empty_tmp = empty_path;
+  empty_tmp += ".tmp";
+  CHECK(!std::filesystem::exists(empty_tmp));
+  std::filesystem::remove_all(dir);
+}
+
 // The game-files folder saved by the first-run setup: written with
 // TomlString(Utf8(path)), read back by toml++ (as the SDK does) and turned
 // into a path with PathFromUtf8 - the same folder, backslashes and non-ANSI
@@ -190,6 +278,7 @@ int main() {
   try {
     TestSave();
     TestSaveKeepsFileLoadable();
+    TestSaveTwoKeys();
     TestGameFilesPathRoundTrip();
     TestGameFilesSurvivesTheSdkWriter();
   } catch (const std::exception& e) {

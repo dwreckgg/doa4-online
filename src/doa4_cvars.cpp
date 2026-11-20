@@ -93,6 +93,14 @@ REXCVAR_DEFINE_INT32(doa4_language, -1, "DOA4",
 REXCVAR_DEFINE_INT32(doa4_subtitles, -1, "DOA4",
                      "Game subtitles language (Language > Subtitles in the game's options): -1 the game's own, 0-7 as the "
                      "text language, 8 off/default");
-// Extras tab: DOAX2 swimsuits (doa4_suits_bust.h).
+// Extras tab, Physics: the "Age:" box and, below it, the slider for breast movement (doa4_suits_bust.h
+// LineSetting, WantedAge). Box off: retail DOA4 (age 18) for every costume. The menu saves both keys together.
+// Carried into a session (np_handoff kPortSettings): both PCs run the host's box and age.
+REXCVAR_DEFINE_BOOL(doa4_bust_age_on, false, "DOA4",
+                    "Extras tab Age: box; false = retail DOA4 breast movement for every costume (the slider is not applied)");
+REXCVAR_DEFINE_INT32(doa4_bust_age, 0, "DOA4",
+                     "Extras tab Age: slider, 1-99, applied while doa4_bust_age_on is true; 0 = never saved");
+// The old full-bust checkbox's setting, retired on this line (ruling B1): nothing reads or writes it. It stays defined
+// and carried (np_handoff kPortSettings) so a recording or hand-off that holds its line still applies.
 REXCVAR_DEFINE_BOOL(doa4_suits_full_bust, false, "DOA4",
-                    "DOAX2 swimsuits: full DOAX2 up and down breast movement");
+                    "Old setting from 0.3.7, no longer read (kept so old recordings and hand-offs still apply)");

@@ -47,6 +47,7 @@
 #include "doa4_photo_win.h"
 #include "doa4_suits_import_view.h"
 #include "doa4_speakers.h"
+#include "doa4_suits_bust.h"
 #include "doa4_utf8.h"
 #include "net/np_session.h"
 #include "doa4_unlocks.h"
@@ -192,8 +193,7 @@ constexpr float kTableFirstColumnWidth = 140.0f;
 constexpr float kExtrasButtonWidth = 220.0f;
 constexpr const char* kLoadProfileNote = "Load a profile first (reach the main menu).";
 constexpr const char* kWipeQuestion = "Lock everything again, as in a new save?";
-constexpr const char* kBustLabel = "Full DOAX2 breast movement";
-constexpr const char* kBustNote = "Up and down range of DOAX2 instead of the character's DOA4 range. Takes effect at once.";
+constexpr float kBustAgeSliderWidth = 260.0f;  // the "Age:" slider, as wide as the Volume slider
 // Under Alpha-152's box while the saved setting differs from the running game (the game copies her select cell at boot, so
 // the box only saves): `running` = she is in the running game.
 constexpr const char* AlphaRestartNote(bool running) {
@@ -471,8 +471,8 @@ float MenuDialog::WidestRow() {
   w.push_back(text("Waiting for the game to save..."));
   for (const tweaks::Tweak& t : tweaks::AllTweaks()) w.push_back(toggle(t.label));
   for (const bool running : {false, true}) w.push_back(text(AlphaRestartNote(running)));  // the "Restart now" button: above
-  w.push_back(toggle(kBustLabel));
-  w.push_back(text(kBustNote));
+  w.push_back(toggle("Age:"));
+  w.push_back(display::MenuPx(kBustAgeSliderWidth, ImGui::GetFontSize()));  // "##bust_age": its label draws no text
   for (const std::string& note : host_.suits_notes) w.push_back(text(note));
   // Online
   online_view::In in;
@@ -884,17 +884,34 @@ void MenuDialog::DrawExtrasTab() {
     }
   }
 
+  ImGui::SeparatorText("Physics");
+  // The "Age:" box on its own line, the slider below it. Box off: retail DOA4 for every costume, the slider greyed.
+  // Shown (display only; the hook latches its own): in a session (online, or a replay) the session's box and age
+  // (np::SessionBust), offline this PC's saved ones through this line's rule. Locked in a session like the rest of the
+  // tab (its lock note above covers it), and whenever the session's values are shown, so they are never saved here.
+  if (!session_bust_) session_bust_.emplace(np::SessionBust());  // engaged even when SessionBust has nothing
+  const bool session_shown = session_bust_->has_value();
+  suits::bust::AgeSetting s =
+      session_shown ? **session_bust_
+                    : suits::bust::LineSetting(rex::cvar::Query<int32_t>("doa4_bust_age"),
+                                               rex::cvar::Query<bool>("doa4_bust_age_on"));
+  ImGui::BeginDisabled(extras_locked || session_shown);
+  if (ImGui::Checkbox("Age:", &s.on)) SaveBustSetting(s);
+  ImGui::BeginDisabled(!s.on);
+  ImGui::SetNextItemWidth(display::MenuPx(kBustAgeSliderWidth, ImGui::GetFontSize()));
+  if (ImGui::SliderInt("##bust_age", &s.age, 1, 99, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+    SetBustSetting(s);  // live while dragging; the toml is saved once, on release
+  }
+  if (ImGui::IsItemDeactivatedAfterEdit()) SaveBustSetting(s);
+  ImGui::EndDisabled();
+  ImGui::EndDisabled();
+  // After EndDisabled, so the tooltip is drawn at full strength (EndDisabled keeps the last item, the slider).
+  ImGui::SetItemTooltip("Breast movement. 18 is the default amount of physics in retail DOA4.");
+
   ImGui::SeparatorText("DOAX2 swimsuits");
   ImGui::TextWrapped("%s", host_.suits_summary.empty() ? "DOAX2 swimsuits: none imported" : host_.suits_summary.c_str());
   for (const std::string& note : host_.suits_notes) ImGui::TextColored(kErrorColor, "%s", note.c_str());
   ImGui::TextWrapped("Imported suits come after each character's own and extra costumes.");
-  bool full_bust = rex::cvar::Query<bool>("doa4_suits_full_bust");
-  ImGui::BeginDisabled(extras_locked);  // its rescale writes guest memory
-  if (ImGui::Checkbox(kBustLabel, &full_bust)) {
-    SaveThenSet("doa4_suits_full_bust", full_bust ? "true" : "false", false);
-  }
-  ImGui::EndDisabled();
-  ImGui::TextDisabled("%s", kBustNote);
   DrawSuitsImport();
 }
 
@@ -1527,6 +1544,35 @@ bool MenuDialog::SaveThenSet(std::string_view name, std::string_view value, bool
   }
   REXLOG_INFO("[doa4][UI] {} = {} saved", name, value);
   return true;
+}
+
+void MenuDialog::SetBustSetting(suits::bust::AgeSetting s) {
+  // Box first, then the age: the hook reads the age, then the box (doa4_suits_hooks.cpp AgeWanted), so no frame sees
+  // the new age with the old box. On this line the old full-bust setting is never read (ruling B1).
+  const char* box = s.on ? "true" : "false";
+  if (!rex::cvar::SetFlagByName("doa4_bust_age_on", box)) {
+    status_ = fmt::format("Could not set {} to {}.", "doa4_bust_age_on", box);
+    return;  // never the new age with the old box
+  }
+  const std::string age = std::to_string(s.age);
+  if (!rex::cvar::SetFlagByName("doa4_bust_age", age)) {
+    status_ = fmt::format("Could not set {} to {}.", "doa4_bust_age", age);
+  }
+}
+
+void MenuDialog::SaveBustSetting(suits::bust::AgeSetting s) {
+  // Both keys in one write, so the toml never holds one key without the other. Saved first: when the
+  // save fails nothing is set (a box click shows its old state next frame; a drag keeps its live age, ruling A6).
+  const std::string age_text = std::to_string(s.age);
+  const std::string error =
+      SaveTomlKeys(host_.config_path, {{"doa4_bust_age_on", s.on ? "true" : "false"}, {"doa4_bust_age", age_text}});
+  if (!error.empty()) {
+    status_ = "Could not save settings: " + error;
+    return;
+  }
+  status_.clear();
+  SetBustSetting(s);
+  REXLOG_INFO("[doa4][UI] doa4_bust_age_on = {}, doa4_bust_age = {} saved", s.on, s.age);
 }
 
 void MenuDialog::SetAndSave(std::string_view name, std::string_view value, bool quote) {

@@ -534,9 +534,33 @@ REX_HOOK_RAW(sub_823FE150) {
 }
 
 // The morph dispatcher (r3 = a morph state, +0 = its bound MPP block) runs for every morph of every fighter each frame,
-// before the appliers write the pose into the vertices. A converted suit's bust block is marked by the converter; moving
-// its poses here makes the Extras checkbox take effect at once. Vanilla blocks fail the marker check and are not touched.
-// Test switch DOA4_SUITS_BUST_FLIP_S=<seconds>: alternates the setting on that period, read once.
+// before the appliers write the pose into the vertices. The Extras tab's "Age:" box (doa4_bust_age_on) and slider
+// (doa4_bust_age, 1-99, 18 = the file's own strength) give the wanted age (doa4_suits_bust.h LineSetting, WantedAge;
+// the old doa4_suits_full_bust is retired on this line and never read), applied here, so a change takes effect at once
+// offline. In a session or a replay AgeWanted runs the host's (the recording's) box and age instead, from the hand-off
+// text, read once and latched (np::SessionBust; np_handoff.cpp kPortSettings):
+// - a converted suit's bust block (marked "DX2B" by the converter) is moved to the age's ratio, and its chest cloth's
+//   pins follow;
+// - a retail bust block on one of the four channel-4 morph states is tagged ("D4AG") the first time a frame wants an age
+//   other than 18, then moved. At 18 nothing is written to an unmarked block: a default-age player never runs the
+//   write path. Face and hand blocks (other states, or another shape) are never touched.
+// Box off = age 18 for every block: an untagged block is never written, a block tagged earlier this session goes back
+// to 18 and a converted suit to its file's strength. The reads stay (the decision table: marked, tagged and candidate
+// blocks still ask AgeWanted every frame). Cost: each bust block the pre-filter passes takes two registry-lock cvar
+// queries a frame offline (the age, then the box) and none in a session or a replay (the latched value). M2 (per-frame
+// cvar lock) was decided in Part A ledger E26: kept as is, about 1 us a frame.
+// A read-only pre-filter outside the lock (IsMarked || IsTagged || IsRetailBustCandidate, from memory, then the cvars
+// only on a hit) only skips work; ApplyAge re-checks everything under g_bust_mutex before any write. The poses are
+// written by this hook on the four morph worker threads (create sites generated/default/dead_or_alive_4_recomp.5.cpp:
+// 17494, :17580, :17666, :17752, loop sub_82374990) and the direct caller at recomp.3.cpp:10080, serialised by
+// g_bust_mutex; the game's appliers read the poses outside the lock, so a one-frame tear while the slider moves is
+// accepted (as for marked suits before). Also accepted (ruling A6): a failed toml save when the slider is released
+// leaves the live age changed while the toml keeps the old value, and a drag ended by closing the menu may not save.
+// A failed save of the box changes nothing live.
+// A retail block's strongest ratio (its age-99 ratio) is one value for every girl (route G3), 2.0; test switch
+// DOA4_BUST_AGE_MAX=<float> overrides it, read once. Test switch DOA4_SUITS_BUST_FLIP_S=<seconds>: alternates ages 18
+// and 99 on that period, read once, ahead of the session value and the cvars. Both switches change guest state, so both
+// go through np::TestSwitch (in a session they count only with DOA4_NP_TEST_DIR set).
 namespace {
 
 struct GuestMem {
@@ -546,25 +570,87 @@ struct GuestMem {
 };
 
 std::mutex g_bust_mutex;
-std::atomic<int> g_bust_logs{0};
+std::atomic<int> g_bust_logs{0};      // rescale lines, at most 40
+std::atomic<int> g_tag_logs{0};       // tag lines, at most 40
+std::atomic<int> g_wanted_logs{0};    // wanted-age changes, at most 40
+std::atomic<int> g_last_wanted{-1};
 
-bool FullBustWanted() {
+// At most 8 addresses, lock-free: Add is true the first time an address is added, false when seen or full.
+struct SeenOnce {
+  std::atomic<uint32_t> slots[8] = {};
+  bool Add(uint32_t a) {
+    for (std::atomic<uint32_t>& s : slots) {
+      uint32_t v = s.load(std::memory_order_relaxed);
+      if (v == a) return false;
+      if (v == 0) {
+        if (s.compare_exchange_strong(v, a, std::memory_order_relaxed)) return true;
+        if (v == a) return false;
+      }
+    }
+    return false;
+  }
+};
+SeenOnce g_seen_states;      // channel-4 morph states (4 exist)
+SeenOnce g_seen_at_18;       // candidate blocks first seen at 18
+SeenOnce g_seen_refused;     // refused candidates (one WARN each, 8 in total)
+
+float RetailFull() {
+  static const float full = [] {
+    const char* env = doa4::np::TestSwitch("DOA4_BUST_AGE_MAX");  // changes guest state: not a player's to set online
+    const doa4::suits::bust::StrongestTable t = doa4::suits::bust::ParseStrongest(
+        env ? std::string_view(env) : std::string_view(), doa4::suits::bust::kRetailStrongest);
+    if (t.dropped) {
+      REXLOG_WARN("[doa4][SUITS] test: DOA4_BUST_AGE_MAX=\"{}\" is not a number of at least {}; strongest stays {}",
+                  env, doa4::suits::bust::kMinStrongest, t.strongest);
+    } else if (env && *env) {
+      REXLOG_WARN("[doa4][SUITS] test: retail strongest ratio {} (DOA4_BUST_AGE_MAX)", t.strongest);
+    }
+    return t.strongest;
+  }();
+  return full;
+}
+
+int AgeWanted() {
+  namespace bust = doa4::suits::bust;
+  // 1. The flip switch (a TestSwitch: in a session only with DOA4_NP_TEST_DIR), read once; it decides alone.
   static const int flip = [] {
     const char* env = doa4::np::TestSwitch("DOA4_SUITS_BUST_FLIP_S");  // changes guest state: not a player's to set online
     return env ? std::atoi(env) : 0;
   }();
+  bust::AgeSetting s{false, bust::kAgeRetail};
+  bool from_session = false;
   if (flip > 0) {
     using namespace std::chrono;
-    return (duration_cast<seconds>(steady_clock::now().time_since_epoch()).count() / flip) % 2 != 0;
+    const bool high = (duration_cast<seconds>(steady_clock::now().time_since_epoch()).count() / flip) % 2 != 0;
+    s = high ? bust::AgeSetting{true, bust::kAgeMax} : bust::AgeSetting{false, bust::kAgeRetail};
+  } else {
+    // 2. In a session or a replay: the host's (the recording's) box and age, read once and latched, never the cvars.
+    // The SDK's F4 overlay writes the cvars on one PC at any moment (the Extras lock does not reach it), and a rescale
+    // writes guest memory (np_handoff.h, GuestSettingNames). A function-local static: this runs on the morph worker
+    // threads before g_bust_mutex is taken, and its first call initialises it once.
+    static const std::optional<bust::AgeSetting> session = [] {
+      const std::optional<bust::AgeSetting> value = doa4::np::SessionBust();
+      if (value) REXLOG_INFO("[doa4][SUITS] session: bust age box {} age {}", value->on, value->age);
+      return value;
+    }();
+    if (session) {
+      s = *session;
+      from_session = true;
+    } else {
+      // 3. Offline: the cvars, live, so the Extras box and slider act at once. Read order: the age, then the box (the
+      // menu writes the box, then the age; Review Focus 1).
+      const int32_t raw = rex::cvar::Query<int32_t>("doa4_bust_age");
+      const bool box = rex::cvar::Query<bool>("doa4_bust_age_on");
+      s = bust::LineSetting(raw, box);
+    }
   }
-  // In a session: the hand-off's value, taken once, never the cvar. The SDK's F4 overlay writes the cvar on one PC at any moment
-  // (Extras' lock does not reach it), and a rescale writes guest memory. Offline: the cvar, so the ESC toggle acts at once.
-  static const std::optional<bool> session = [] {
-    const std::optional<bool> value = doa4::np::SessionFullBust();
-    if (value) REXLOG_INFO("[doa4][SUITS] session: full bust is {} for this session, from the hand-off", *value);
-    return value;
-  }();
-  return session ? *session : rex::cvar::Query<bool>("doa4_suits_full_bust");
+  const int age = bust::WantedAge(s);
+  if (g_last_wanted.exchange(age, std::memory_order_relaxed) != age &&
+      g_wanted_logs.fetch_add(1, std::memory_order_relaxed) < 40) {
+    REXLOG_INFO("[doa4][SUITS] bust age: wanted {} (age {}, box {}, session {}, flip {})", age, s.age, s.on,
+                from_session, flip);
+  }
+  return age;
 }
 
 }  // namespace
@@ -572,24 +658,46 @@ bool FullBustWanted() {
 REX_HOOK_RAW(sub_82373E50) {
   const uint32_t state = ctx.r3.u32;
   const uint32_t mpp = state ? Be32(base, state) : 0;
+  namespace bust = doa4::suits::bust;
+  const bool bust_state = bust::IsBustState(state);
+  if (bust_state && g_seen_states.Add(state)) REXLOG_INFO("[doa4][SUITS] bust age: ch4 state {:#x}", state);
   if (mpp >= 0x10000000 && mpp < 0xC0000000) {
     GuestMem mem{base};
-    namespace bust = doa4::suits::bust;
-    if (bust::IsMarked(mem, mpp)) {
-      const bool full = FullBustWanted();
-      std::lock_guard<std::mutex> lock(g_bust_mutex);
-      if (bust::Rescale(mem, mpp, full) && g_bust_logs.fetch_add(1, std::memory_order_relaxed) < 40) {
-        REXLOG_INFO("[doa4][SUITS] bust strength: block {:#x} now {}", mpp, full ? "full DOAX2 range" : "the file's own");
-      }
-      const bust::Blend blend = bust::ReadBlend(mem, state);
-      bust::FollowPins(mem, mpp, blend);
-      static const bool trace = std::getenv("DOA4_SUITS_PIN_TRACE") != nullptr;
-      static std::atomic<uint64_t> calls{0};
-      if (trace) {
-        const uint64_t n = calls.fetch_add(1, std::memory_order_relaxed);
-        if (n % 600 == 0) {
-          REXLOG_INFO("[doa4][SUITS] pins: block {:#x} count {} poses {} {} {} weights {} {} {} list {} -> down {} up {}", mpp, mem.ReadU32(mpp + 0x44), int32_t(mem.ReadU32(state + 12)), int32_t(mem.ReadU32(state + 16)), int32_t(mem.ReadU32(state + 20)),
-                      std::bit_cast<float>(mem.ReadU32(state + 44)), std::bit_cast<float>(mem.ReadU32(state + 48)), std::bit_cast<float>(mem.ReadU32(state + 52)), mem.ReadU32(state + 76), blend.down, blend.up);
+    const bool marked = bust::IsMarked(mem, mpp);
+    const bool tagged = !marked && bust::IsTagged(mem, mpp);
+    if (marked || tagged || bust::IsRetailBustCandidate(mem, mpp, bust_state)) {
+      const int age = AgeWanted();
+      if (!marked && !tagged && age == bust::kAgeRetail) {
+        if (g_seen_at_18.Add(mpp)) {
+          REXLOG_INFO("[doa4][SUITS] bust age: candidate block {:#x} seen at 18, not tagged", mpp);
+        }
+      } else {
+        const float retail_full = RetailFull();
+        std::lock_guard<std::mutex> lock(g_bust_mutex);
+        const bool was_tagged = bust::IsTagged(mem, mpp);
+        const bust::AgeStep step = bust::ApplyAge(mem, mpp, bust_state, age, retail_full);
+        if (!was_tagged && bust::IsTagged(mem, mpp) && g_tag_logs.fetch_add(1, std::memory_order_relaxed) < 40) {
+          REXLOG_INFO("[doa4][SUITS] bust age: tagged block {:#x}, {} records, state {:#x}, strongest {}", mpp,
+                      mem.ReadU32(mpp + 0x2C) >> 8, state, retail_full);
+        }
+        if (step.wrote && g_bust_logs.fetch_add(1, std::memory_order_relaxed) < 40) {
+          REXLOG_INFO("[doa4][SUITS] bust age: block {:#x} now age {}", mpp, age);
+        }
+        if (step.refused != bust::Refusal::kNone && g_seen_refused.Add(mpp)) {
+          REXLOG_WARN("[doa4][SUITS] bust age: candidate {:#x} refused ({})", mpp, bust::RefusalName(step.refused));
+        }
+        if (step.follow_pins) {
+          const bust::Blend blend = bust::ReadBlend(mem, state);
+          bust::FollowPins(mem, mpp, blend);
+          static const bool trace = std::getenv("DOA4_SUITS_PIN_TRACE") != nullptr;
+          static std::atomic<uint64_t> calls{0};
+          if (trace) {
+            const uint64_t n = calls.fetch_add(1, std::memory_order_relaxed);
+            if (n % 600 == 0) {
+              REXLOG_INFO("[doa4][SUITS] pins: block {:#x} count {} poses {} {} {} weights {} {} {} list {} -> down {} up {}", mpp, mem.ReadU32(mpp + 0x44), int32_t(mem.ReadU32(state + 12)), int32_t(mem.ReadU32(state + 16)), int32_t(mem.ReadU32(state + 20)),
+                          std::bit_cast<float>(mem.ReadU32(state + 44)), std::bit_cast<float>(mem.ReadU32(state + 48)), std::bit_cast<float>(mem.ReadU32(state + 52)), mem.ReadU32(state + 76), blend.down, blend.up);
+            }
+          }
         }
       }
     }

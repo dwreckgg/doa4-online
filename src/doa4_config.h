@@ -1,4 +1,4 @@
-// Writes single settings into dead_or_alive_4.toml (the config the SDK loads
+// Writes settings into dead_or_alive_4.toml (the config the SDK loads
 // at start-up) without touching the rest of the file. rex::cvar::SaveConfig is
 // not used: it writes every non-default cvar, including the launcher's
 // --game_data_root / --user_data_root.
@@ -6,6 +6,7 @@
 #pragma once
 
 #include <filesystem>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 
@@ -23,9 +24,21 @@ std::string UpsertTomlKey(std::string_view text, std::string_view key,
 // A TOML basic string: "..." with \ and " escaped.
 std::string TomlString(std::string_view value);
 
-// UpsertTomlKey on the file at `path` (created if missing), written to
-// `path` + ".tmp" and renamed over `path`. Returns "" on success, else a
-// description of the failure.
+// One `key = value_literal` line for SaveTomlKeys.
+struct TomlKey {
+  std::string_view key;
+  std::string_view value_literal;
+};
+
+// The file at `path` (created if missing) read once, every key upserted with
+// UpsertTomlKey in list order into the same text, every key checked against
+// the final text, then written once to `path` + ".tmp" and renamed over
+// `path`. Returns "" on success, else a description of the failure, with the
+// file untouched. An empty list is an error.
+std::string SaveTomlKeys(const std::filesystem::path& path,
+                         std::initializer_list<TomlKey> keys);
+
+// SaveTomlKeys with the one key.
 std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
                         std::string_view value_literal);
 
