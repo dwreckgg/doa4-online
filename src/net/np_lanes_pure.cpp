@@ -578,9 +578,11 @@ std::string LanesLine(uint64_t frames, uint64_t frames_2plus, int most_at_once, 
          std::to_string(lanes_beside_main) + ", stalls " + std::to_string(stalls) + ", end requests " + std::to_string(end_requests);
 }
 
-std::string CpuLine(uint64_t fight_frames, const WaitHistogram& wait, uint64_t cycles_main, uint64_t cycles_workers) {
+std::string CpuLine(uint64_t fight_frames, const WaitHistogram& wait, uint64_t cycles_main, uint64_t cycles_workers,
+                    std::string_view unit) {
   return "cpu: fight frames " + std::to_string(fight_frames) + ", wait p50 " + Ms(wait.P50Us()) + " ms p99 " + Ms(wait.P99Us()) +
-         " ms max " + Ms(wait.MaxUs()) + " ms, cycles main " + std::to_string(cycles_main) + " workers " + std::to_string(cycles_workers);
+         " ms max " + Ms(wait.MaxUs()) + " ms, " + std::string(unit) + " main " + std::to_string(cycles_main) + " workers " +
+         std::to_string(cycles_workers);
 }
 
 std::string StallLine(int32_t frame, int waiter, int waited_for) {

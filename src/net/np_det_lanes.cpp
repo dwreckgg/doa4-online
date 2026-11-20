@@ -25,11 +25,15 @@
 #include "np_session.h"
 #include "np_vsm_pure.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <time.h>
+#endif
 
 namespace doa4::np::det::eng {
 namespace {
@@ -101,11 +105,24 @@ thread_local bool t_in_section = false;
 
 std::atomic<bool> g_stall_done{false};
 
+#if defined(_WIN32)
+constexpr const char kCpuUnit[] = "cycles";  // the cpu: line's word for what ThreadCycles counts
+
 uint64_t ThreadCycles() {
   ULONG64 c = 0;
   QueryThreadCycleTime(GetCurrentThread(), &c);
   return uint64_t(c);
 }
+#else
+constexpr const char kCpuUnit[] = "thread ns";  // the cpu: line's word for what ThreadCycles counts
+
+// The calling thread's CPU time in nanoseconds (0 if it cannot be read). Its readers take differences and sums only.
+uint64_t ThreadCycles() {
+  timespec ts{};
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+  return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+}
+#endif
 
 int LaneOf(int w) {
   for (int l = 0; l < lanes::kLanes; ++l) {
@@ -193,7 +210,7 @@ std::vector<std::string> SessionLines(int mode) {
   }
   if (mode == 3 || mode == 4) {
     std::lock_guard lk(g_cpu_mu);
-    out.push_back(lanes::CpuLine(g_fight_frames, g_wait, g_cycles_main, g_cycles_workers));
+    out.push_back(lanes::CpuLine(g_fight_frames, g_wait, g_cycles_main, g_cycles_workers, kCpuUnit));
   }
   return out;
 }
