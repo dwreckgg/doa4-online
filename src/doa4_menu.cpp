@@ -1547,7 +1547,8 @@ bool MenuDialog::SaveThenSet(std::string_view name, std::string_view value, bool
 }
 
 void MenuDialog::SetBustSetting(suits::bust::AgeSetting s) {
-  // Box first, then the age (Review Focus 1): an old full-bust player dragging before the first save keeps the box on.
+  // Box first, then the age: the hook reads the age, then the box (doa4_suits_hooks.cpp AgeWanted), so no frame sees
+  // the new age with the old box. On this line the old full-bust setting is never read (ruling B1).
   const char* box = s.on ? "true" : "false";
   if (!rex::cvar::SetFlagByName("doa4_bust_age_on", box)) {
     status_ = fmt::format("Could not set {} to {}.", "doa4_bust_age_on", box);
@@ -1560,7 +1561,7 @@ void MenuDialog::SetBustSetting(suits::bust::AgeSetting s) {
 }
 
 void MenuDialog::SaveBustSetting(suits::bust::AgeSetting s) {
-  // Both keys in one write, so the old full-bust setting is read only until the first save. Saved first: when the
+  // Both keys in one write, so the toml never holds one key without the other. Saved first: when the
   // save fails nothing is set (a box click shows its old state next frame; a drag keeps its live age, ruling A6).
   const std::string age_text = std::to_string(s.age);
   const std::string error =

@@ -546,9 +546,9 @@ REX_HOOK_RAW(sub_823FE150) {
 //   write path. Face and hand blocks (other states, or another shape) are never touched.
 // Box off = age 18 for every block: an untagged block is never written, a block tagged earlier this session goes back
 // to 18 and a converted suit to its file's strength. The reads stay (the decision table: marked, tagged and candidate
-// blocks still ask AgeWanted every frame). Cost accepted for now (ruling A36, PA12): each bust block the pre-filter
-// passes takes three registry-lock cvar queries a frame instead of two; the deferred minor M2 (per-frame cvar lock) is
-// decided in Task 4's review.
+// blocks still ask AgeWanted every frame). Cost: each bust block the pre-filter passes takes two registry-lock cvar
+// queries a frame offline (the age, then the box) and none in a session or a replay (the latched value). M2 (per-frame
+// cvar lock) was decided in Part A ledger E26: kept as is, about 1 us a frame.
 // A read-only pre-filter outside the lock (IsMarked || IsTagged || IsRetailBustCandidate, from memory, then the cvars
 // only on a hit) only skips work; ApplyAge re-checks everything under g_bust_mutex before any write. The poses are
 // written by this hook on the four morph worker threads (create sites generated/default/dead_or_alive_4_recomp.5.cpp:
