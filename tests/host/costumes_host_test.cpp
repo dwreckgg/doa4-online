@@ -1637,6 +1637,14 @@ static void TestReplaceRefusals() {
     CHECK(r.guard.records[16] == 3);
     CHECK(ListOf(g, 16) == std::vector<uint8_t>({0x21, 0x22, 0x23, 0x24, 2}));
   }
+  {  // replaces = max is refused by the costume range itself, even where the bytes past her variants and list would let
+     // the variant and index checks pass (poked: var [1, 1, 1] with max 2, list of 3).
+    FakeGuest g;
+    PokeTables(g, 16, {1, 1, 1}, {0x21, 0x22, 0x23});
+    g.bytes[kMaxTable + 16] = 2;
+    const ApplyResult r = Apply(g.guest, g.alloc, {MakeExtra(16, 921, 922, 2, "at max")}, {});
+    CHECK(r.refused.size() == 1 && r.refused.count("at max") == 1 && r.applied.empty() && g.written.empty());
+  }
   {  // The index past her list (a table whose length is short of its variants): refused, nothing written past the list.
     FakeGuest g;
     PokeTables(g, 16, {1, 1}, {0x21});
