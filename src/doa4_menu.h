@@ -2,7 +2,8 @@
 //
 // Tabs: Game (display mode, picture, speakers, language, where the game files are), Controls (per-slot controller
 // remap, keyboard binds), Photo, Extras (unlocks, game tweaks) and Online (hosting and joining a friend). Every setting is
-// applied to its cvar and saved to dead_or_alive_4.toml with doa4::SaveTomlKey. The game keeps running while
+// applied to its cvar and saved to dead_or_alive_4.toml with doa4::SaveTomlKey; the Extras tab's "Age:" box and
+// slider are saved together with doa4::SaveTomlKeys (SaveBustSetting). The game keeps running while
 // the menu is open; its input is blocked (DeadOrAlive4App::OnBlocksGuestInput),
 // so the game sees an untouched controller and keyboard.
 //
@@ -30,6 +31,7 @@
 #include "doa4_online_view.h"
 #include "doa4_photo_service.h"
 #include "doa4_suits_import_flow.h"
+#include "doa4_suits_bust.h"
 #include "doa4_tweaks.h"
 
 namespace rex::input {
@@ -201,6 +203,13 @@ class MenuDialog : public rex::ui::ImGuiDialog, public rex::ui::WindowInputListe
   // Saves `name` first; only on success sets the cvar. Failures go to
   // status_ and leave the running game as it was. Returns whether it saved.
   bool SaveThenSet(std::string_view name, std::string_view value, bool quote);
+  // The Extras tab's "Age:" box and slider, the menu's only writers of doa4_bust_age_on and doa4_bust_age.
+  // SetBustSetting sets doa4_bust_age_on, then doa4_bust_age, live (the hook reads the age, then the box, so no frame
+  // sees the new age with the old box). A refused set goes to status_.
+  void SetBustSetting(suits::bust::AgeSetting s);
+  // Saves both keys in one write (SaveTomlKeys); only on success calls SetBustSetting. A failed save goes to status_
+  // and sets nothing.
+  void SaveBustSetting(suits::bust::AgeSetting s);
   void StartPadListen(size_t row, const rex::input::X_INPUT_GAMEPAD* pad);
   void PollPadListen(const rex::input::X_INPUT_GAMEPAD& pad);
   void AssignPad(size_t target, size_t source);

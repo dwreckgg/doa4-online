@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iterator>
 #include <system_error>
+#include <utility>
 
 #include <toml++/toml.hpp>
 
@@ -96,8 +97,9 @@ std::string TomlString(std::string_view value) {
   return out;
 }
 
-std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
-                        std::string_view value_literal) {
+std::string SaveTomlKeys(const std::filesystem::path& path,
+                         std::initializer_list<TomlKey> keys) {
+  if (keys.size() == 0) return "no setting to save; dead_or_alive_4.toml was left unchanged";
   std::string text;
   {
     std::ifstream in(path, std::ios::binary);
@@ -107,9 +109,14 @@ std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
       return "cannot read " + Utf8(path);
     }
   }
-  std::string updated = UpsertTomlKey(text, key, value_literal);
-  if (std::string error = CheckLoadable(updated, key, value_literal); !error.empty()) {
-    return error + "; dead_or_alive_4.toml was left unchanged";
+  // Each key goes into the text the previous one produced, and every key is
+  // checked against the final text, the one that is written.
+  std::string updated = std::move(text);
+  for (const TomlKey& k : keys) updated = UpsertTomlKey(updated, k.key, k.value_literal);
+  for (const TomlKey& k : keys) {
+    if (std::string error = CheckLoadable(updated, k.key, k.value_literal); !error.empty()) {
+      return error + "; dead_or_alive_4.toml was left unchanged";
+    }
   }
   std::filesystem::path tmp = path;
   tmp += ".tmp";
@@ -128,6 +135,11 @@ std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
     return error;
   }
   return {};
+}
+
+std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
+                        std::string_view value_literal) {
+  return SaveTomlKeys(path, {{key, value_literal}});
 }
 
 }  // namespace doa4

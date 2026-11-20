@@ -1292,7 +1292,7 @@ static void TestMpvHeaderMarks() {
   const uint32_t words_at = mpp_off + 0x50;
   for (size_t i = 0; i < want.size(); ++i) CKF(Be32(mpv, words_at + 4 * i) == want[i].word, "word %zu", i);
   CK(Be32(mpv, words_at + 4 * want.size()) == 0xFFFFFFFFu);
-  // Bind as the game does (+8 = 1, absolute pose addresses), then rescale to the full DOAX2 range with the reader.
+  // Bind as the game does (+8 = 1, +0x18 and the pose addresses absolute), then rescale to the full DOAX2 range with the reader.
   uint32_t pose_at[3];
   for (int i = 0; i < 3; ++i) {
     pose_at[i] = mpp + Be32(mpv, mpp_off + 28 + 4 * i);
@@ -1300,8 +1300,9 @@ static void TestMpvHeaderMarks() {
     m.WriteU32(mpp + 0x1C + 4 * i, pose_at[i]);
   }
   m.WriteU32(mpp + 0x08, 1);
+  m.WriteU32(mpp + 0x18, mpp + Be32(mpv, mpp_off + 0x18));
   const std::vector<uint8_t> before = m.bytes;
-  CK(rdr::Rescale(m, mpp, true));
+  CK(rdr::Rescale(m, mpp, 99));
   CK(m.F(mpp + 0x30) == float(fd) && m.F(mpp + 0x38) == float(fu));
   int scaled_down = 0, scaled_up = 0;
   for (size_t i = 0; i < want.size(); ++i)
@@ -1327,7 +1328,7 @@ static void TestMpvHeaderMarks() {
     if (!in_down && !in_up && !ratio) ++changed_outside;
   }
   CKF(changed_outside == 0, "%zu bytes changed outside the two poses and their ratios", changed_outside);
-  CK(rdr::Rescale(m, mpp, false));  // back to the file's strength
+  CK(rdr::Rescale(m, mpp, 18));  // back to the file's strength
   CK(m.F(mpp + 0x30) == 1.0f && m.F(mpp + 0x38) == 1.0f);
 
   // extra channels and pins, in the same function: sorted channel slots, the pin block after the poses.
