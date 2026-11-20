@@ -2323,7 +2323,11 @@ class DeadOrAlive4App : public rex::ReXApp {
       *memory->TranslateVirtual<uint8_t*>(address) = value;
     };
     guest_.write_be32 = [memory](uint32_t address, uint32_t value) {
+#if defined(_WIN32)
+      *memory->TranslateVirtual<uint32_t*>(address) = _byteswap_ulong(value);
+#else
       *memory->TranslateVirtual<uint32_t*>(address) = std::byteswap(value);
+#endif
     };
     protect_ = [memory](uint32_t address, uint32_t size, bool writable) {
       rex::memory::BaseHeap* heap = memory->LookupHeap(address);
