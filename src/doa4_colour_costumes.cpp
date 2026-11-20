@@ -6,6 +6,7 @@
 #include <fstream>
 
 #include "doa4_gamefiles.h"
+#include "doa4_suits_manifest.h"
 #include "doa4_utf8.h"
 
 namespace doa4::colour_costumes {
@@ -74,9 +75,27 @@ std::vector<std::string> Words(std::string_view line) {
   return words;
 }
 
-bool NamesAPath(const std::string& file) {
-  return file.find('/') != std::string::npos || file.find('\\') != std::string::npos ||
-         file.find(':') != std::string::npos || file.find("..") != std::string::npos;
+// A plain file name inside the folder: the suits' allow-list (letters, digits, '_', '.', '-'; not starting with '.'; at
+// most 64 bytes), so no path, drive, stream or byte that does not convert to a path, and no ".." anywhere.
+bool PlainFileName(const std::string& file) {
+  return suits::SafeFileName(file) && file.find("..") == std::string::npos;
+}
+
+// The name for a note: bytes outside printable ASCII as \xNN, so a log line never carries them raw.
+std::string Printable(const std::string& text) {
+  static const char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  for (char c : text) {
+    const uint8_t b = uint8_t(c);
+    if (b >= 0x20 && b < 0x7F) {
+      out += c;
+    } else {
+      out += "\\x";
+      out += kHex[b >> 4];
+      out += kHex[b & 15];
+    }
+  }
+  return out;
 }
 
 // The manifest's file name per slot index (empty: no usable line); notes for the lines it ignores and the names it
@@ -117,10 +136,10 @@ Parsed ParseManifest(const SlotTable& slots, std::string text, std::vector<std::
       continue;
     }
     seen_at[slot] = number;
-    if (NamesAPath(words[1])) {
+    if (!PlainFileName(words[1])) {
       p.refused[slot] = true;
-      notes->push_back(std::string(slots[slot].name) + ": the file name " + words[1] +
-                       " names a path (only a file in the folder); stand-in");
+      notes->push_back(std::string(slots[slot].name) + ": the file name " + Printable(words[1]) +
+                       " is not a plain file name in the folder (letters, digits, '_', '.', '-'); stand-in");
       continue;
     }
     p.file[slot] = words[1];
@@ -158,7 +177,7 @@ bool Enabled(bool session, std::string_view np_mode) { return !session && (np_mo
 
 std::string Status::Summary() const {
   if (slots.empty()) return "colour costumes: off";
-  if (!usable) return "colour costumes: not installed (a stand-in could not be read)";
+  if (!usable) return "colour costumes: not installed (see the notes)";
   size_t stand_ins = 0;
   for (const LoadedSlot& l : slots) stand_ins += l.stand_in ? 1 : 0;
   return "colour costumes: " + std::to_string(slots.size()) + " slots, " + std::to_string(slots.size() - stand_ins) +
@@ -173,6 +192,16 @@ Status Load(const SlotTable& slots, const std::filesystem::path& folder, const s
             const GuestBytes& guest) {
   Status status;
   for (const SlotDef& d : slots) status.slots.push_back(LoadedSlot{&d, nullptr, true});
+
+  // Every slot's entry must have a place to be overlaid: a record naming an entry that is not overlaid would load another
+  // character's file, so one without a place installs nothing.
+  for (const SlotDef& d : slots) {
+    if (!costumes::FileLocation(guest, d.tpr_file)) {
+      status.notes.push_back(std::string(d.name) + ": its file " + std::to_string(d.tpr_file) +
+                             " has no place in the game's file table; no colour slot is installed");
+      return status;  // usable stays false
+    }
+  }
 
   // The files: every slot whose file passes is served from it; the others keep stand_in = true.
   std::error_code ec;

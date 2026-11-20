@@ -13,7 +13,9 @@
 //
 // Manifest (manifest.txt in the folder): one line per slot, "<slot name> <file name>", the two separated by spaces or
 // tabs. Lines end in LF or CR LF; a UTF-8 byte-order mark at the start is skipped; blank lines and lines starting with '#'
-// are skipped. A slot with no line, or whose file name holds '/', '\', ':' or "..", gets its stand-in (one note each). A
+// are skipped. A slot with no line, or whose file name is not a plain name (suits::SafeFileName: letters, digits, '_', '.',
+// '-', not starting with '.', at most 64 bytes; and no ".."), gets its stand-in (one note each). A slot whose tpr_file has
+// no place in the game's file table installs nothing (usable false, one note). A
 // line that is not two words, names an unknown slot, or repeats a slot is ignored (one note each; a repeat keeps the
 // first line).
 

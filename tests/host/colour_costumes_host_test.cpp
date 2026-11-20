@@ -27,7 +27,10 @@
 #include "../../src/doa4_costumes.h"
 #include "../../src/doa4_gamefiles.h"
 #include "../../src/doa4_tweaks.h"
+#include "../../src/doa4_utf8.h"
 #include "doa4_test_image.h"
+
+#include <exception>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -765,6 +768,62 @@ static void TestManifestGrains() {
     for (size_t i = 0; i < 5; ++i) CHECK(NotesNaming(s, Slots()[i].name) == 1);
     CheckSlots(s, {0, 1, 2, 3, 4});
   }
+  {
+    // Names that are not plain file names (letters, digits, '_', '.', '-'): a byte that is not UTF-8 (Load must not throw
+    // on it), a UTF-8 letter outside ASCII (its file exists with the right bytes, so only the name rule refuses it), and
+    // ".." inside a name the character rule alone would pass (its file exists too). Each slot: stand-in, one note.
+    World w;
+    const std::string e9(1, char(0xE9));
+    const std::string c3a9 = std::string(1, char(0xC3)) + std::string(1, char(0xA9));
+    std::vector<std::string> lines = GoodLines();
+    lines[0] = "alpha_red caf" + e9 + ".tpr";
+    lines[1] = "alpha_blue caf" + c3a9 + ".tpr";
+    Write(w.colours / doa4::PathFromUtf8("caf" + c3a9 + ".tpr"), ColourBytes(1));
+    lines[5] = "spartan_h2_orange spartan..h2_orange.tpr";
+    Write(w.colours / "spartan..h2_orange.tpr", ColourBytes(5));
+    WriteText(w.colours / "manifest.txt", ManifestOf(lines, "\n"));
+    CHECK(ReadAll(w.colours / doa4::PathFromUtf8("caf" + c3a9 + ".tpr")) == ColourBytes(1));  // precondition
+    CHECK(ReadAll(w.colours / "spartan..h2_orange.tpr") == ColourBytes(5));                     // precondition
+    Status s;
+    std::string threw;
+    try {
+      s = Load(TestSlots(), w.colours, w.game, g.guest);
+    } catch (const std::exception& e) {
+      threw = e.what();
+    } catch (...) {
+      threw = "(not a std::exception)";
+    }
+    if (!threw.empty()) std::printf("  grains names: Load threw: %s\n", threw.c_str());
+    CHECK(threw.empty());
+    PrintNotes("grains names", s);
+    CHECK(s.usable && s.notes.size() == 3);
+    CHECK(NotesNaming(s, "alpha_red") == 1);
+    CHECK(NotesNaming(s, "alpha_blue") == 1);
+    CHECK(NotesNaming(s, "spartan_h2_orange") == 1);
+    CheckSlots(s, {0, 1, 5});
+  }
+}
+
+// A slot whose tpr_file has no place in the file table: its entry could never be overlaid, so nothing is installed (no
+// record may name an entry that is not overlaid).
+static void TestTprWithoutPlace() {
+  World w;
+  FakeGuest g = PlantedGuest();
+  SlotTable t = TestSlots();
+  t[3].tpr_file = 1700;  // past the file table (kFileCount 1640): FileLocation gives nothing
+  CHECK(!costumes::FileLocation(g.guest, 1700).has_value());  // precondition
+  const Status s = Load(t, w.colours, w.game, g.guest);
+  PrintNotes("TestTprWithoutPlace", s);
+  CHECK(!s.usable);
+  CHECK(s.notes.size() == 1);
+  CHECK(NotesNaming(s, "spartan_h3_red") == 1);
+  CHECK(TableExtras(s).empty());
+  CHECK(Replacements(s, g.guest).empty());
+  CHECK(EntryLabels(s, g.guest).empty());
+  CHECK(Contains(s.Summary(), "not installed"));
+  // Control: the same folder with the real file number installs.
+  const Status ok = Load(TestSlots(), w.colours, w.game, g.guest);
+  CHECK(ok.usable && ok.notes.empty() && TableExtras(ok).size() == kSlotCount);
 }
 
 static void TestSummaryOff() {
@@ -836,6 +895,7 @@ int main() {
   TestReplacementsByArchive();
   TestEntryLabels();
   TestManifestGrains();
+  TestTprWithoutPlace();
 
   if (image) {
     g_image = &*image;
