@@ -1376,6 +1376,320 @@ static void TestRaiseCountRowFollowsBox() {
   CHECK(g.Get(kCountCopy + 10) == 11);  // the box off: 7 and 4
 }
 
+// ---- Colour costumes (plan 2026-11-20, Task 4): extras before the suits, in one pass; FileLocation takes avt.afs ----
+
+// The file table as the image holds it (read with Python from the decrypted image, 2026-11-20): archive 0 = avt.afs is files
+// 914-1613 (entries 0-699, file = 914 + entry), file 913 is archive 8 entry 200, file 1614 is archive 2 entry 0.
+static void TestFileLocationAvt() {
+  FakeGuest g;
+  // Fixture preconditions, read from the raw table: the rows below sit on the archive edges they claim.
+  const auto raw = [&](uint32_t file) { return std::pair<uint32_t, uint32_t>{g.Get(kFileTable + 4 * file), g.Be16(kFileTable + 4 * file + 2)}; };
+  CHECK(raw(913) == std::make_pair(8u, 200u));
+  CHECK(raw(914) == std::make_pair(0u, 0u));
+  CHECK(raw(1287) == std::make_pair(0u, 373u));
+  CHECK(raw(1613) == std::make_pair(0u, 699u));
+  CHECK(raw(1614) == std::make_pair(2u, 0u));
+  ExpectFile(g, 914, "avt.afs", 0);
+  ExpectFile(g, 1287, "avt.afs", 373);  // Alpha red (Task 2's entry 373)
+  ExpectFile(g, 1293, "avt.afs", 379);
+  ExpectFile(g, 1613, "avt.afs", 699);  // the last avt file
+  ExpectNoFile(g, 1614);                // the next archive's first entry (archive 2): not avt.afs
+  ExpectNoFile(g, 913);                 // the archive before (8): not avt.afs
+  // The character archives as before.
+  ExpectFile(g, 269, "chrone.afs", 65);
+  // A suit naming an avt file stays refused (only the character archives hold suits), body or head part.
+  ExpectCheck(MakeSuit(16, -1, 1287, 428, kNoPart, kNoPart, "avtbody"), "files 1287/428 are not character archive files");
+  ExpectCheck(MakeSuit(16, -1, 427, 1287, kNoPart, kNoPart, "avtcat"), "files 427/1287 are not character archive files");
+  ExpectCheck(MakeSuit(5, -1, 349, 350, 1287, 510, "avtpart"), "head part files 1287/510 are not character archive files");
+  ExpectCheck(MakeSuit(5, -1, 349, 350, 509, 1287, "avtpcat"), "head part files 509/1287 are not character archive files");
+}
+
+// A synthetic costume table for character c: her list and variant pointers moved to free image bytes holding `var` and
+// `list`, her maximum and length set to match. Her records stay the image's.
+static void PokeTables(FakeGuest& g, uint32_t c, const std::vector<uint8_t>& var, const std::vector<uint8_t>& list) {
+  const uint32_t var_at = 0x82F00000, list_at = 0x82F00100;
+  for (size_t i = 0; i < var.size(); ++i) g.bytes[var_at + uint32_t(i)] = var[i];
+  for (size_t i = 0; i < list.size(); ++i) g.bytes[list_at + uint32_t(i)] = list[i];
+  PokeBe32(g, kVarTable + 4 * c, var_at);
+  PokeBe32(g, kListTable + 4 * c, list_at);
+  g.bytes[kMaxTable + c] = uint8_t(var.size());
+  g.bytes[kLenTable + c] = uint8_t(list.size());
+  g.written.clear();
+}
+
+static Extra MakeExtra(uint8_t c, uint16_t tpr, uint16_t cat, int replaces, const char* label) {
+  Extra e;
+  e.character = c;
+  e.body_tpr = tpr;
+  e.body_cat = cat;
+  e.replaces = replaces;
+  e.label = label;
+  return e;
+}
+
+static std::vector<uint8_t> ListOf(const FakeGuest& g, uint32_t c) {
+  std::vector<uint8_t> out;
+  const uint32_t list = g.Be32(kListTable + 4 * c);
+  for (uint32_t i = 0; i < g.Get(kLenTable + c); ++i) out.push_back(g.Get(list + i));
+  return out;
+}
+
+static std::vector<uint8_t> VariantsOf(const FakeGuest& g, uint32_t c) {
+  std::vector<uint8_t> out;
+  const uint32_t var = g.Be32(kVarTable + 4 * c);
+  for (uint32_t i = 0; i < g.Get(kMaxTable + c); ++i) out.push_back(g.Get(var + i));
+  return out;
+}
+
+static bool RecordIs(const FakeGuest& g, uint32_t c, uint32_t m, uint16_t tpr, uint16_t cat, uint16_t ptpr, uint16_t pcat) {
+  const uint32_t r = g.Be32(kModelTable + 8 * c + 4) + 8 * m;
+  return g.Be16(r) == tpr && g.Be16(r + 2) == cat && g.Be16(r + 4) == ptpr && g.Be16(r + 6) == pcat;
+}
+
+static bool AppliedIs(const ApplyResult& r, size_t i, uint8_t c, uint32_t model, uint32_t costume, bool replaced,
+                      const std::string& label) {
+  if (i >= r.applied.size()) return false;
+  const Applied& a = r.applied[i];
+  return a.character == c && a.model == model && a.costume == costume && a.replaced == replaced && a.label == label;
+}
+
+// Alpha-152 (charId 16): red replaces COS. 2 (her retail duplicate of model 1), blue and lilac are appended.
+static std::vector<Extra> AlphaExtras() {
+  return {MakeExtra(16, 901, 902, 1, "alpha red"), MakeExtra(16, 903, 904, -1, "alpha blue"),
+          MakeExtra(16, 905, 906, -1, "alpha lilac")};
+}
+
+static void TestExtrasAlpha() {
+  FakeGuest g;
+  const FakeGuest before;
+  CHECK(g.Get(kMaxTable + 16) == 2 && g.Get(kLenTable + 16) == 2);  // before
+  CHECK(ListOf(g, 16) == std::vector<uint8_t>({1, 1}));
+  CHECK(RecordCount(g.guest, 16) == 2);
+  const ApplyResult r = Apply(g.guest, g.alloc, AlphaExtras(), {});
+  CHECK(r.errors.empty() && r.refused.empty());
+  CHECK(ListOf(g, 16) == std::vector<uint8_t>({1, 2, 3, 4}));  // vanilla, red, blue, lilac
+  CHECK(VariantsOf(g, 16) == std::vector<uint8_t>({1, 1, 1, 1}));
+  CHECK(g.Get(kMaxTable + 16) == 4 && g.Get(kLenTable + 16) == 4);  // NOT 5: the replacement adds no costume
+  CHECK(r.guard.records[16] == 5);
+  CHECK(RecordIs(g, 16, 0, 425, 426, 0xFFFF, 0xFFFF));
+  CHECK(RecordIs(g, 16, 1, 427, 428, 0xFFFF, 0xFFFF));  // vanilla's record is NOT overwritten by red
+  CHECK(RecordIs(g, 16, 2, 901, 902, 0xFFFF, 0xFFFF));
+  CHECK(RecordIs(g, 16, 3, 903, 904, 0xFFFF, 0xFFFF));
+  CHECK(RecordIs(g, 16, 4, 905, 906, 0xFFFF, 0xFFFF));
+  CHECK(r.applied.size() == 3);
+  CHECK(AppliedIs(r, 0, 16, 2, 1, true, "alpha red"));
+  CHECK(AppliedIs(r, 1, 16, 3, 2, false, "alpha blue"));
+  CHECK(AppliedIs(r, 2, 16, 4, 3, false, "alpha lilac"));
+  CHECK(CountSuits(r.applied)[16] == 2);  // the save's own maximum stays retail: 4 - 2 = 2
+  CHECK(GameLookup(g, 16, 0, 0) == 1 && GameLookup(g, 16, 1, 0) == 2 && GameLookup(g, 16, 3, 0) == 4);
+  // The image's blocks are left alone, and nobody else's tables move.
+  CHECK(ListOf(before, 16) == std::vector<uint8_t>({1, 1}) && g.Get(before.Be32(kListTable + 4 * 16) + 1) == 1);
+  bool others = true;
+  for (uint32_t c = 0; c < kCharCount; ++c) {
+    if (c == 16) continue;
+    others = others && g.Be32(kListTable + 4 * c) == before.Be32(kListTable + 4 * c) &&
+             g.Be32(kModelTable + 8 * c + 4) == before.Be32(kModelTable + 8 * c + 4) &&
+             g.Get(kMaxTable + c) == before.Get(kMaxTable + c);
+  }
+  CHECK(others);
+}
+
+// Spartan-458 (charId 18): four appended slots (COS. 8-11).
+static std::vector<Extra> SpartanExtras() {
+  return {MakeExtra(18, 911, 912, -1, "spartan h3 red"), MakeExtra(18, 913, 914, -1, "spartan h3 blue"),
+          MakeExtra(18, 915, 916, -1, "spartan h2 orange"), MakeExtra(18, 917, 918, -1, "spartan h2 cyan")};
+}
+
+static void TestExtrasSpartan() {
+  FakeGuest g;
+  const FakeGuest before;
+  const uint32_t old_records = g.Be32(kModelTable + 8 * 18 + 4);
+  CHECK(g.Get(kMaxTable + 18) == 7 && g.Get(kLenTable + 18) == 7 && RecordCount(g.guest, 18) == 8);  // before
+  const ApplyResult r = Apply(g.guest, g.alloc, SpartanExtras(), {});
+  CHECK(r.errors.empty() && r.refused.empty());
+  CHECK(ListOf(g, 18) == std::vector<uint8_t>({0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11}));
+  CHECK(g.Get(kMaxTable + 18) == 11 && g.Get(kLenTable + 18) == 11);
+  CHECK(r.guard.records[18] == 12);
+  const uint32_t records = g.Be32(kModelTable + 8 * 18 + 4);
+  bool same = records != old_records;
+  for (uint32_t i = 0; i < 8 * 8; ++i) same = same && g.Get(records + i) == before.Get(old_records + i);
+  CHECK(same);  // records 0-7 byte-equal to the image's
+  for (uint32_t j = 0; j < 4; ++j) {
+    CHECK(RecordIs(g, 18, 8 + j, uint16_t(911 + 2 * j), uint16_t(912 + 2 * j), 0xFFFF, 0xFFFF));
+    CHECK(AppliedIs(r, j, 18, 8 + j, 7 + j, false, SpartanExtras()[j].label));
+  }
+  CHECK(CountSuits(r.applied)[18] == 4);
+}
+
+static std::vector<Suit> SpartanSuits(int n) {
+  std::vector<Suit> out;
+  for (int j = 0; j < n; ++j) {
+    out.push_back(MakeSuit(18, -1, uint16_t(951 + 2 * j), uint16_t(952 + 2 * j), kNoPart, kNoPart,
+                           ("vsp_" + std::to_string(j)).c_str()));
+  }
+  return out;
+}
+
+// Extras first, then her suits, in the same pass: the suits come after the extras in the list and the costume numbers.
+static void TestExtrasThenSuits() {
+  FakeGuest g;
+  const ApplyResult r = Apply(g.guest, g.alloc, SpartanExtras(), SpartanSuits(3));
+  CHECK(r.errors.empty() && r.refused.empty());
+  CHECK(ListOf(g, 18) == std::vector<uint8_t>({0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14}));
+  CHECK(g.Get(kMaxTable + 18) == 14 && g.Get(kLenTable + 18) == 14 && r.guard.records[18] == 15);
+  CHECK(r.applied.size() == 7);
+  for (uint32_t j = 0; j < 3; ++j) {
+    CHECK(AppliedIs(r, 4 + j, 18, 12 + j, 11 + j, false, "vsp_" + std::to_string(j) + " c0"));  // costumes 11, 12, 13
+    CHECK(RecordIs(g, 18, 12 + j, uint16_t(951 + 2 * j), uint16_t(952 + 2 * j), kNoPart, kNoPart));
+  }
+  CHECK(AppliedIs(r, 0, 18, 8, 7, false, "spartan h3 red"));
+  CHECK(CountSuits(r.applied)[18] == 7);
+}
+
+// The limits count extras and suits together; a suit past one is refused by name and the extras stay.
+static void TestExtrasLimit() {
+  {  // 17 costumes: Spartan 7 + 4 extras + 7 suits = 18.
+    FakeGuest g;
+    const std::vector<Suit> suits = SpartanSuits(7);
+    CHECK(g.Get(kMaxTable + 18) + SpartanExtras().size() + suits.size() == 18);  // the fixture is past the limit by one
+    const ApplyResult r = Apply(g.guest, g.alloc, SpartanExtras(), suits);
+    CHECK(r.applied.size() == 10);
+    CHECK(r.refused.size() == 1 && r.refused.count("vsp_6 c0") == 1);  // the 7th suit
+    CHECK(r.errors.size() == 1 && r.errors[0].find("vsp_6 c0") != std::string::npos);
+    CHECK(g.Get(kMaxTable + 18) == 17 && g.Get(kLenTable + 18) == 17);
+    uint32_t extras_in = 0;
+    for (const Applied& a : r.applied) extras_in += a.label.rfind("spartan ", 0) == 0 ? 1u : 0u;
+    CHECK(extras_in == 4);  // every extra in
+    // The accept edge: 6 suits make exactly 17.
+    FakeGuest h;
+    const ApplyResult r6 = Apply(h.guest, h.alloc, SpartanExtras(), SpartanSuits(6));
+    CHECK(r6.applied.size() == 10 && r6.refused.empty() && h.Get(kMaxTable + 18) == 17);
+  }
+  {  // A replacement adds no costume, so it does not count toward 17: Alpha 2 + red (replaces) + 15 appended suits = 17.
+    FakeGuest g;
+    std::vector<Suit> suits;
+    for (int j = 0; j < 15; ++j) suits.push_back(MakeSuit(16, -1, uint16_t(951 + 2 * j), uint16_t(952 + 2 * j), kNoPart, kNoPart, "va"));
+    const ApplyResult r = Apply(g.guest, g.alloc, {AlphaExtras()[0]}, suits);
+    CHECK(r.applied.size() == 16 && r.refused.empty() && g.Get(kMaxTable + 16) == 17 && g.Get(kLenTable + 16) == 17);
+  }
+  {  // 255 records: every extra appends one, replacing or not. Char 24's block poked to 253 records.
+    FakeGuest g;
+    PokeBe32(g, kModelTable + 4, 0x82C5E720 + 8 * 253);  // char 0's block above char 24's (as TestApplyRefusals)
+    CHECK(RecordCount(g.guest, 24) == 253);              // precondition
+    const std::vector<Suit> suits = {MakeSuit(24, -1, 503, 504, kNoPart, kNoPart, "c24a"),
+                                     MakeSuit(24, -1, 503, 504, kNoPart, kNoPart, "c24b")};
+    const ApplyResult r = Apply(g.guest, g.alloc, {MakeExtra(24, 901, 902, 1, "c24 extra")}, suits);
+    CHECK(r.applied.size() == 2 && AppliedIs(r, 0, 24, 253, 1, true, "c24 extra") && AppliedIs(r, 1, 24, 254, 3, false, "c24a c0"));
+    CHECK(r.refused.size() == 1 && r.refused.count("c24b c0") == 1);  // m255 would mean "none"
+    CHECK(r.guard.records[24] == 255);
+  }
+}
+
+static void TestReplaceRefusals() {
+  {  // replaces = max (2 for Alpha, even after an earlier append in the same pass) and replaces = -2: refused by name.
+    FakeGuest g;
+    const std::vector<Extra> extras = {MakeExtra(16, 903, 904, -1, "blue"), MakeExtra(16, 921, 922, 2, "at max"),
+                                       MakeExtra(16, 923, 924, -2, "minus two"), MakeExtra(16, 905, 906, -1, "lilac")};
+    const ApplyResult r = Apply(g.guest, g.alloc, extras, {});
+    CHECK(r.refused.size() == 2 && r.refused.count("at max") == 1 && r.refused.count("minus two") == 1);
+    CHECK(r.errors.size() == 2);
+    CHECK(r.applied.size() == 2 && AppliedIs(r, 0, 16, 2, 2, false, "blue") && AppliedIs(r, 1, 16, 3, 3, false, "lilac"));
+    CHECK(r.guard.records[16] == 2 + 2);  // the refused ones add no record
+    CHECK(ListOf(g, 16) == std::vector<uint8_t>({1, 1, 2, 3}) && g.Get(kMaxTable + 16) == 4);
+  }
+  {  // A costume with 2 variants cannot be replaced (synthetic table: var [2, 1, 1], list [0x21, 0x22, 0x23, 0x24]).
+    FakeGuest g;
+    PokeTables(g, 16, {2, 1, 1}, {0x21, 0x22, 0x23, 0x24});
+    const ApplyResult r =
+        Apply(g.guest, g.alloc, {MakeExtra(16, 921, 922, 0, "two variants"), MakeExtra(16, 903, 904, -1, "blue")}, {});
+    CHECK(r.refused.size() == 1 && r.refused.count("two variants") == 1);
+    CHECK(r.applied.size() == 1 && AppliedIs(r, 0, 16, 2, 3, false, "blue"));
+    CHECK(r.guard.records[16] == 3);
+    CHECK(ListOf(g, 16) == std::vector<uint8_t>({0x21, 0x22, 0x23, 0x24, 2}));
+  }
+  {  // The index past her list (a table whose length is short of its variants): refused, nothing written past the list.
+    FakeGuest g;
+    PokeTables(g, 16, {1, 1}, {0x21});
+    const ApplyResult r = Apply(g.guest, g.alloc, {MakeExtra(16, 921, 922, 1, "past the list")}, {});
+    CHECK(r.refused.size() == 1 && r.refused.count("past the list") == 1 && r.applied.empty());
+    CHECK(g.written.empty());
+  }
+  {  // A second extra replacing the same costume in one pass is refused (the first keeps it).
+    FakeGuest g;
+    const ApplyResult r =
+        Apply(g.guest, g.alloc, {MakeExtra(16, 901, 902, 1, "red"), MakeExtra(16, 931, 932, 1, "red again")}, {});
+    CHECK(r.refused.size() == 1 && r.refused.count("red again") == 1);
+    CHECK(r.applied.size() == 1 && AppliedIs(r, 0, 16, 2, 1, true, "red"));
+    CHECK(ListOf(g, 16) == std::vector<uint8_t>({1, 2}) && r.guard.records[16] == 3 && g.Get(kMaxTable + 16) == 2);
+  }
+}
+
+// P1 F3: the replacement's list index is sum(var[0..replaces)), not `replaces`: on var [2, 1, 1] costume 1 starts at index 2.
+static void TestReplaceAfterMultiVariant() {
+  FakeGuest g;
+  PokeTables(g, 16, {2, 1, 1}, {0x21, 0x22, 0x23, 0x24});
+  CHECK(g.Get(kMaxTable + 16) == 3 && g.Get(kLenTable + 16) == 4);  // precondition
+  const ApplyResult r = Apply(g.guest, g.alloc, {MakeExtra(16, 901, 902, 1, "red")}, {});
+  CHECK(r.errors.empty() && AppliedIs(r, 0, 16, 2, 1, true, "red"));
+  const std::vector<uint8_t> list = ListOf(g, 16);
+  CHECK(list == std::vector<uint8_t>({0x21, 0x22, 2, 0x24}));     // index 2 = var[0]
+  CHECK(list != std::vector<uint8_t>({0x21, 2, 0x23, 0x24}));     // NOT index 1 = replaces
+  CHECK(VariantsOf(g, 16) == std::vector<uint8_t>({2, 1, 1}));
+  CHECK(g.Get(kMaxTable + 16) == 3 && g.Get(kLenTable + 16) == 4);
+  CHECK(GameLookup(g, 16, 1, 0) == 2 && GameLookup(g, 16, 0, 1) == 0x22);
+}
+
+// Models are numbered in the extras' input order, whether they replace or append.
+static void TestExtrasInputOrder() {
+  FakeGuest g;
+  const std::vector<Extra> extras = {AlphaExtras()[1], AlphaExtras()[0], AlphaExtras()[2]};  // blue, red, lilac
+  const ApplyResult r = Apply(g.guest, g.alloc, extras, {});
+  CHECK(r.errors.empty() && r.applied.size() == 3);
+  CHECK(AppliedIs(r, 0, 16, 2, 2, false, "alpha blue") && AppliedIs(r, 1, 16, 3, 1, true, "alpha red") &&
+        AppliedIs(r, 2, 16, 4, 3, false, "alpha lilac"));
+  CHECK(ListOf(g, 16) == std::vector<uint8_t>({1, 3, 2, 4}));
+  CHECK(RecordIs(g, 16, 2, 903, 904, 0xFFFF, 0xFFFF) && RecordIs(g, 16, 3, 901, 902, 0xFFFF, 0xFFFF));
+}
+
+// Design 5.4: after a block moved, RecordCount gives 0, so a second pass cannot append: one pass, extras first.
+static void TestOneApplyPass() {
+  FakeGuest g;
+  const ApplyResult first = Apply(g.guest, g.alloc, AlphaExtras(), {});
+  CHECK(first.applied.size() == 3 && RecordCount(g.guest, 16) == 0);  // precondition: her block moved
+  const uint32_t list = g.Be32(kListTable + 4 * 16), records = g.Be32(kModelTable + 8 * 16 + 4);
+  const int allocs = g.allocs;
+  const ApplyResult second = Apply(g.guest, g.alloc, {MakeExtra(16, 941, 942, -1, "again")}, {});
+  CHECK(second.applied.empty());
+  CHECK(second.errors.size() == 1 && second.errors[0].find("charId 16") != std::string::npos &&
+        second.errors[0].find("cannot be counted") != std::string::npos);
+  CHECK(g.allocs == allocs && g.Be32(kListTable + 4 * 16) == list && g.Be32(kModelTable + 8 * 16 + 4) == records);
+  CHECK(g.Get(kMaxTable + 16) == 4 && g.Get(kLenTable + 16) == 4);
+  const ApplyResult suit = Apply(g.guest, g.alloc, {MakeSuit(16, -1, 951, 952, kNoPart, kNoPart, "va")});
+  CHECK(suit.applied.empty() && suit.errors.size() == 1 && suit.errors[0].find("charId 16") != std::string::npos);
+}
+
+// Whichever of her blocks cannot be had, nothing of hers is written (extras and suits alike).
+static void TestExtrasAllocFailure() {
+  for (int fail = 0; fail < 3; ++fail) {
+    FakeGuest g;
+    g.fail_alloc_at = fail;
+    const ApplyResult r = Apply(g.guest, g.alloc, AlphaExtras(), {});
+    CHECK(r.applied.empty() && r.errors.size() == 1 && r.errors[0].find("no guest memory") != std::string::npos);
+    CHECK(g.written.empty() && r.guard.records[16] == 2);
+  }
+}
+
+// The old overload is the new one with no extras.
+static void TestOldOverloadNoExtras() {
+  FakeGuest g, h;
+  const ApplyResult a = Apply(g.guest, g.alloc, KasumiSuits());
+  const ApplyResult b = Apply(h.guest, h.alloc, {}, KasumiSuits());
+  CHECK(a.applied.size() == b.applied.size() && !a.applied.empty() && g.bytes == h.bytes);
+  bool none_replaced = true;
+  for (const Applied& x : a.applied) none_replaced = none_replaced && !x.replaced;
+  CHECK(none_replaced);
+}
+
 // ---- doa4_test_image.h itself: always run, with no image ----
 
 // A file of 0x300 bytes of a known pattern standing for an image: guest address 0x82000000 + n is file offset n.
@@ -1507,6 +1821,17 @@ int main() {
     TestCountSuits();
     TestRaiseCountRow();
     TestRaiseCountRowFollowsBox();
+    TestFileLocationAvt();
+    TestExtrasAlpha();
+    TestExtrasSpartan();
+    TestExtrasThenSuits();
+    TestExtrasLimit();
+    TestReplaceRefusals();
+    TestReplaceAfterMultiVariant();
+    TestExtrasInputOrder();
+    TestOneApplyPass();
+    TestExtrasAllocFailure();
+    TestOldOverloadNoExtras();
   } else if (doa4_test::ReportNoImage("costumes: the checks on the image's costume tables", image ? why_max : why)) {
     ++g_checks;
     ++g_failures;

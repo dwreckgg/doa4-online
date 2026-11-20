@@ -90,10 +90,12 @@ uint32_t RecordCount(const GuestBytes& guest, uint32_t character);
 GuardState ReadGuardState(const GuestBytes& guest);
 
 struct FileLoc {
-  const char* archive;  // "chrone.afs", "chrtwo.afs" or "chrthree.afs"
+  const char* archive;  // "chrone.afs", "chrtwo.afs", "chrthree.afs" or "avt.afs"
   uint32_t entry;
 };
-// Where a global file number lives, for the three character archives only.
+// Where a global file number lives, for the three character archives and avt.afs (archive 0: files 914-1613 are its entries
+// 0-699, file = 914 + entry; the colour costumes' files live there); nullopt for every other archive. CheckSuit still takes
+// only the character archives for a suit's files.
 std::optional<FileLoc> FileLocation(const GuestBytes& guest, uint32_t file);
 
 // Whether a suit fits this game's tables as they stand: after the Extras boxes, before Apply (a box has already moved her list
@@ -110,6 +112,14 @@ struct Applied {
   uint8_t character = 0;
   uint32_t model = 0;    // her model index for the suit
   uint32_t costume = 0;  // her costume number for the suit (the lookup's argument)
+  std::string label;
+  bool replaced = false;  // an Extra that took the list entry of costume `costume` (no costume was added)
+};
+// A colour costume put in by Apply before the suits (doa4_colour_costumes): its record is {body_tpr, body_cat, 0xFFFF, 0xFFFF}.
+struct Extra {
+  uint8_t character = 0;
+  uint16_t body_tpr = 0, body_cat = 0;  // the record is {body_tpr, body_cat, 0xFFFF, 0xFFFF}
+  int replaces = -1;                    // costume number whose list entry becomes the new model, or -1 to append
   std::string label;
 };
 struct ApplyResult {
@@ -133,6 +143,18 @@ using AllocFn = std::function<uint32_t(uint32_t size)>;
 // moved: the loader caches a pointer into it (slot + 32, sub_823FE150).
 // Afterwards the app hands her models to TweakPatcher::CarrySuits, so a box toggled later keeps them. The input's order, and
 // which suits it holds, are the caller's: the import's offline, the picks in a session (doa4_suits.h).
+//
+// With `extras` (the colour costumes): per character her extras go first, in input order, then her suits, in ONE record-block
+// copy and one list copy (after a block moved, RecordCount gives 0, so a second Apply cannot append to her: everything for
+// her goes in this one call). Every extra appends a record {body_tpr, body_cat, 0xFFFF, 0xFFFF}. An appending extra
+// (replaces -1) adds a costume like a suit. A replacing extra writes its model into her list at index sum(var[0..replaces)),
+// with max and len unchanged (it adds no costume); it needs 0 <= replaces < max as her tables stand before this call,
+// var[replaces] == 1, that index inside her list, and no earlier extra replacing the same costume; else it is refused by name
+// (`refused[label]`, adding no record) and the others go in. The 17-costume and 255-record limits count extras and suits
+// together: one past a limit is refused by name and the ones before it stay. `Applied::replaced` marks a replacing extra.
+ApplyResult Apply(const GuestBytes& guest, const AllocFn& alloc, const std::vector<Extra>& extras,
+                  const std::vector<suits::Suit>& suits);
+// The same with no extras (every caller before the colour costumes).
 ApplyResult Apply(const GuestBytes& guest, const AllocFn& alloc, const std::vector<suits::Suit>& suits);
 
 // Every byte of the costume tables as the game reads them, in a fixed order: per character her maximum, length, the list and
@@ -154,7 +176,9 @@ inline constexpr uint32_t kCountCopy = 0x83103000;
 inline constexpr uint32_t kCountCopyRow = kCharCount;
 inline constexpr uint32_t kCountCopyPlayers = 4;
 
-// How many suits each character has in the tables (from Apply's result); 0 for a girl without.
+// How many suits each character has in the tables (from Apply's result); 0 for a girl without. Only APPENDED costumes count
+// (`replaced` false: suits and appending extras), so the save's own maximum (unlocks::SetSuitCostumes) stays retail: Alpha
+// with red replacing COS. 2 and blue and lilac appended has maximum 4 and count 2.
 using SuitCounts = std::array<uint8_t, kCharCount>;
 SuitCounts CountSuits(const std::vector<Applied>& applied);
 
