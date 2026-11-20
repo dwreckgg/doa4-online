@@ -393,10 +393,11 @@ static void TestDeliveryAndFilters() {
   const auto arrived = p.b.gekko_arrived();
 #if defined(_WIN32)
   CHECK(arrived != nullptr);
+  CHECK(WaitForSingleObject(arrived, 0) == WAIT_TIMEOUT);
 #else
   CHECK(arrived >= 0);
-#endif
   CHECK(!WaitArrived(arrived, 0));
+#endif
   CHECK(p.a.PushGekko(Payload(0, 20)));
   CHECKF(WaitArrived(arrived, 1000), "gekko_arrived was not set within 1 s of the first payload");
   Bytes got;
