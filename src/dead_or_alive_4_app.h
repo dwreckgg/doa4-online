@@ -761,6 +761,12 @@ class DeadOrAlive4App : public rex::ReXApp {
     if (auto* rt = runtime()) host.game_data_root = std::filesystem::absolute(rt->game_data_root());
     if (host.game_data_root.empty()) host.game_data_root = game_files_;
     host.guest = guest_ready_ ? &guest_ : nullptr;  // the unlock of a session, and of a replay of one (R21)
+    // The colour costumes (doa4_colour_costumes.h): decided here, once, from the environment, because np::Start writes a
+    // record run's meta now and SetUpSuits (OnPostSetup) installs them later; both read this one decision (colours plan
+    // Task 6, P1 F2). A record run with them on marks its recording colours=1; a replay refuses such a recording.
+    const char* np_mode = std::getenv("DOA4_NP");
+    colours_on_ = doa4::colour_costumes::Enabled(session_.has_value(), np_mode ? np_mode : "");
+    host.colour_costumes = colours_on_;
     if (!session_) {
       doa4::np::Start(std::move(host));
       return;
@@ -2037,6 +2043,9 @@ class DeadOrAlive4App : public rex::ReXApp {
   std::atomic<int> running_alpha152_{-1};
   doa4::tweaks::TweakPatcher patcher_;
   doa4::suits::ImportStatus suits_status_;  // DOAX2 swimsuits (SetUpSuits)
+  // The local colour costumes are on in this process (colour_costumes::Enabled): set once by StartNetplaySession, before
+  // np::Start writes a record run's meta; read by SetUpSuits (OnPostSetup, later). False until then: nothing installed.
+  bool colours_on_ = false;
   // Set by the first-run setup screen (Task 5, OnFinalizePaths) before SetUpSuits runs.
   bool first_run_shown_ = false;
   // Why the finished import could not be put in place at this start ("" when it was, or there was none); Task 6 draws it in Extras.
@@ -2089,9 +2098,9 @@ class DeadOrAlive4App : public rex::ReXApp {
     const bool session = session_.has_value();
     // The colour costumes (doa4_colour_costumes.h, local offline build), read first: an offline feature (no session, DOA4_NP
     // "" or "record"). Their entries go into the swimsuits' overlays and their rows into the same Apply, before the suits.
-    // The line names the resolved folder, so a run can check the folder it really read (plan F17).
-    const char* np_mode = std::getenv("DOA4_NP");
-    const bool colours_on = doa4::colour_costumes::Enabled(session, np_mode ? np_mode : "");
+    // The line names the resolved folder, so a run can check the folder it really read (plan F17). The decision is the one
+    // StartNetplaySession made before np::Start (a record run's meta says colours=1 by it).
+    const bool colours_on = colours_on_;
     const std::filesystem::path colour_dir = doa4::colour_costumes::ColourFolder(
         UserData(), rex::cvar::Query<std::string>("doa4_colour_costumes_dir"));
     doa4::colour_costumes::Status colours;
@@ -2169,10 +2178,12 @@ class DeadOrAlive4App : public rex::ReXApp {
           retry_ok = !without_colours.empty() && retry_error.empty();
         }
       }
-      switch (doa4::colour_costumes::Decide(colours.usable, build_ok, install_ok, retry_ok)) {
+      const doa4::colour_costumes::InstallOutcome outcome =
+          doa4::colour_costumes::Decide(colours.usable, build_ok, install_ok, retry_ok);
+      colours_installed = doa4::colour_costumes::Installed(outcome);  // the gate TestNotInstalledNoExtras pins (M5-1)
+      switch (outcome) {
         case doa4::colour_costumes::InstallOutcome::kInstalled:
           installed = std::move(overlays);
-          colours_installed = true;
           REXLOG_INFO("[doa4][COLOURS] installed: {} colour entries overlaid, beside {} swimsuits", colour_entry_count,
                       suits_status_.suits.size());
           break;

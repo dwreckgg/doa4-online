@@ -289,6 +289,45 @@ static void TestMetaMismatch() {
   CHECK(MetaMismatch(meta("aa", "unreadable"), meta("aa", "unreadable")).find("build") == std::string::npos);
 }
 
+// Colour costumes plan Task 6 (P1 F2): a record run of the local offline build with the colour costumes on writes
+// "colours=1\n" into its recording's meta and nothing otherwise (the suits= precedent: never "colours=0"); "colours" is one
+// of MetaMismatch's keys, after suits. A replay never installs the colours and writes no key, so a marked recording is
+// refused through the existing path ("colours 1 vs (none)") and a keyless one replays as today. Ruling T6-R1: the refusal
+// gets one more line, keyed on the recording's colours=1.
+static void TestMetaColours() {
+  const std::string cur = "build=aa\ndata=dd\nfixes=all\nserial=default\nsweep=4\ntweaks=x=0\n";
+  // The writer: the key only when set. NOT "colours=0\n" when off: a replay writes no key, and "0 vs (none)" refuses.
+  CHECK(std::string(kColoursMetaKey) == "colours");
+  CHECK(ColoursMetaLine(true) == "colours=1\n");
+  CHECK(ColoursMetaLine(false).empty());
+  // F2's three: a marked recording against a replay's meta, the unchanged equal case, both suits= and colours= named.
+  CHECK(MetaMismatch(cur + "colours=1\n", cur) == "colours 1 vs (none)");
+  CHECK(MetaMismatch(cur, cur).empty());
+  CHECK(MetaMismatch(cur + "suits=same\ncolours=1\n", cur) == "suits same vs (none); colours 1 vs (none)");
+  // The writer's own output against a replay process's meta (which never carries the key).
+  CHECK(MetaMismatch(cur + ColoursMetaLine(true), cur + ColoursMetaLine(false)) == "colours 1 vs (none)");
+  CHECK(MetaMismatch(cur + ColoursMetaLine(false), cur).empty());
+  // Compared by value, not by presence; the line order in the text does not matter (the key list's order is the order named);
+  // a whole key name only; another mismatched key is named first.
+  CHECK(MetaMismatch(cur + "colours=1\n", cur + "colours=1\n").empty());
+  CHECK(MetaMismatch(cur, cur + "colours=1\n") == "colours (none) vs 1");
+  CHECK(MetaMismatch("colours=1\n" + cur + "suits=mixed\n", cur) == "suits mixed vs (none); colours 1 vs (none)");
+  CHECK(MetaMismatch(cur + "xcolours=1\ncolours2=1\ncolour=1\n", cur).empty());
+  CHECK(MetaMismatch("build=bb\n" + cur.substr(9) + "colours=1\n", cur) == "build bb vs aa; colours 1 vs (none)");
+
+  // Ruling T6-R1: the line logged after the refusal line, only for a recording whose meta says colours=1.
+  const std::string note = "this recording was made with the colour costumes; this build replays without them";
+  CHECK(ColoursRefusalNote(cur + "colours=1\n") == note);
+  CHECK(ColoursRefusalNote(cur + "suits=same\ncolours=1\n") == note);
+  CHECK(ColoursRefusalNote(ColoursMetaLine(true)) == note);
+  CHECK(ColoursRefusalNote(cur).empty());                  // keyless: made without the colours, or before the key
+  CHECK(ColoursRefusalNote(ColoursMetaLine(false)).empty());
+  CHECK(ColoursRefusalNote(cur + "suits=1\n").empty());    // another key's "1" (the gate is the key, not the value alone)
+  CHECK(ColoursRefusalNote(cur + "colours=0\n").empty());  // only "1" marks
+  CHECK(ColoursRefusalNote(cur + "colours=10\n").empty());
+  CHECK(ColoursRefusalNote(cur + "xcolours=1\n").empty());
+}
+
 // The meta keys Task 4 adds: "guest" (the captured guest-visible settings, newlines written as ';') and "unlock"
 // (1 when the session unlocked everything). Task 12 makes the session write them; until then every meta lacks both
 // on both sides and compares equal.
@@ -1279,6 +1318,7 @@ int main() {
   TestQueue();
   TestRecording();
   TestMetaMismatch();
+  TestMetaColours();
   TestMetaGuestUnlock();
   TestMaskedCopy();
   TestBlockMasks();

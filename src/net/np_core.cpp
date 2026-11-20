@@ -374,12 +374,21 @@ std::string MetaValue(std::string_view meta, std::string_view key) {
 
 std::string MetaMismatch(std::string_view recorded, std::string_view current) {
   std::string out;
-  for (std::string_view key : {"build", "data", "fixes", "serial", "sweep", "tweaks", "guest", "unlock", "suits"}) {
+  for (std::string_view key :
+       {"build", "data", "fixes", "serial", "sweep", "tweaks", "guest", "unlock", "suits", kColoursMetaKey}) {
     const std::string a = MetaValue(recorded, key), b = MetaValue(current, key);
     // (a value "unreadable" - the build or the game data could not be hashed - agrees with nothing)
     if (a != b || a == "unreadable") out += (out.empty() ? "" : "; ") + std::string(key) + " " + a + " vs " + b;
   }
   return out;
+}
+
+std::string ColoursMetaLine(bool colours) { return colours ? std::string(kColoursMetaKey) + "=1\n" : std::string(); }
+
+std::string ColoursRefusalNote(std::string_view recorded_meta) {
+  return MetaValue(recorded_meta, kColoursMetaKey) == "1"
+             ? "this recording was made with the colour costumes; this build replays without them"
+             : "";
 }
 
 uint32_t ParseFixSet(const char* text) {

@@ -1979,7 +1979,9 @@ void Start(Host host) {
         [](const std::string& name) { return rex::cvar::Query<std::string>(name); });
     s.guest_meta = GuestMeta(guest);
     s.unlock_meta = "0";
-    extra = "guest=" + s.guest_meta + "\nunlock=0\n";
+    // Colour costumes plan Task 6: colours=1 when this process has the local colour costumes on (the app's decision, made
+    // before Start; SetUpSuits installs them later), no key otherwise. A replay never installs them and writes no key.
+    extra = "guest=" + s.guest_meta + "\nunlock=0\n" + ColoursMetaLine(s.host.colour_costumes);
   } else {
     if (s.guest_meta != "(none)") extra += "guest=" + s.guest_meta + "\n";
     if (s.unlock_meta != "(none)") extra += "unlock=" + s.unlock_meta + "\n";
@@ -2019,6 +2021,7 @@ void Start(Host host) {
     if (const std::string why = MetaMismatch(s.replay.meta, meta); !why.empty()) {
       if (Env("DOA4_NP_ALLOW_MISMATCH") != "1") {
         Log("refused: the recording was made with a different " + why);
+        if (const std::string n = ColoursRefusalNote(s.replay.meta); !n.empty()) Log(n);  // ruling T6-R1
         s.mode = Mode::kOff;
         if (s.host.quit) s.host.quit();
         return;
@@ -2046,6 +2049,7 @@ void Start(Host host) {
     // the meta must show 0 here)
     Log("record: seed " + std::to_string(s.seed) + ", " + std::to_string(head.size() - kRecHeaderBytes) +
         " bytes of meta");
+    if (s.host.colour_costumes) Log("record: colours=1 in the meta (the local colour costumes are on; a replay refuses it)");
   }
   if (const std::string q = Env("DOA4_NP_QUIT"); !q.empty()) s.quit_frame = std::strtoul(q.c_str(), nullptr, 10);
   s.shot_frames = FrameList(Env("DOA4_NP_SHOTS"));

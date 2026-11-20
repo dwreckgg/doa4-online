@@ -11,7 +11,8 @@
 //   DOA4_NP_REC=<file>      recording to replay; the run quits after its last frame. A recording
 //                           made by another build, game data (default.xex), fix set, worker-order
 //                           switch (DOA4_NP_SERIAL), sweep setting or Extras tweak state is refused, and
-//                           so is one that cannot be read: np_log.txt gets a "refused: ..." or
+//                           so is one made with the local colour costumes (meta colours=1: a replay never
+//                           installs them) and one that cannot be read: np_log.txt gets a "refused: ..." or
 //                           "cannot replay ..." line and the host is asked to quit, with no session.
 //                           The worker order the recording ran (its workers= line) is the order the
 //                           replay runs; a recording without that line runs mode 3 with a WARN workers: line
@@ -70,6 +71,10 @@ struct Host {
   // The folder the game runs from (the one holding default.xex): the recording's meta holds a hash of
   // its default.xex, so a replay on another dump of the game is refused.
   std::filesystem::path game_data_root;
+  // The local colour costumes are on in this process (colour_costumes::Enabled, decided by the app from the environment
+  // before Start: SetUpSuits runs later and reads the same decision). A record run then writes colours=1 into its
+  // recording's meta (np_core.h ColoursMetaLine); every other mode ignores it.
+  bool colour_costumes = false;
 
   // ---- online (Task 12) ----
   std::optional<handoff::Handoff> online;            // set when this process was started for a session
