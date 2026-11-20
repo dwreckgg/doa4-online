@@ -490,8 +490,12 @@ void DeleteOldFiles(const fs::path& dir) {
   for (const char* name : kFiles) {
     const fs::path file = dir / name, old = dir / (std::string(name) + ".old");
     if (IsMissing(file)) continue;  // the .old may be the only copy left by an interrupted swap
+#if defined(_WIN32)
+    DeleteFileW(old.c_str());       // in use (an instance still running from it) or absent: left as it is
+#else
     std::error_code ec;
     fs::remove(old, ec);            // in use (an instance still running from it) or absent: left as it is
+#endif
   }
 }
 
