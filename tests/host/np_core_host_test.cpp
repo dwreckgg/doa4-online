@@ -651,6 +651,22 @@ static void TestFixSets() {
   CHECK(ParseFixSet("readers") == 0);
 }
 
+// The game's own port-1000 socket outside a session (issue #12, Proton): which outcomes of sub_82445178 leave an
+// open socket in the manager's field for the hook to close. 0x1F is what this SDK's failed socket(), bind and
+// ioctlsocket all leave as the last error; 0xF8000004 stands for a guest handle.
+static void TestPort1000LeftOpen() {
+  // The game's function succeeded: the socket is bound and non-blocking, and must stay ("an error OR a handle"
+  // would close every good socket).
+  CHECK(!Port1000LeftOpen(0, 0xF8000004u));
+  // socket() itself failed: the field already holds -1 and there is nothing to close ("any error" would hand -1 to
+  // closesocket).
+  CHECK(!Port1000LeftOpen(0x1F, kNoGuestSocket));
+  // bind or ioctlsocket failed: the open socket is still in the field.
+  CHECK(Port1000LeftOpen(0x1F, 0xF8000004u));
+  CHECK(Port1000LeftOpen(0x271D, 0x00000001u));  // any error value, any handle value
+  CHECK(!Port1000LeftOpen(0, kNoGuestSocket));
+}
+
 // fix-filetimes: the fixed file times are for an online session (two installs) and for a replay of an online
 // session's recording; a record run and its replays keep the real times, so the fix set they log and write into the
 // meta is the one every recording made before this fix holds (they stay replayable).
@@ -1289,6 +1305,7 @@ int main() {
   TestAudioClocks();
   TestMtSeeds();
   TestFixSets();
+  TestPort1000LeftOpen();
   TestSessionFixes();
   TestMetaFixSet();
   TestKeepAlive();

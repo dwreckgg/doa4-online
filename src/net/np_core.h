@@ -169,6 +169,17 @@ bool MetaFileTimes(std::string_view meta);
 // The one FILETIME a session's files report (2024-01-01 00:00 UTC: before the virtual clocks' kFileTimeBase).
 inline constexpr uint64_t kSessionFileTime = 0x01DA3C457689C000ull;
 
+// ---- The game's own port-1000 socket outside a session (np_det_online.cpp) ----
+// sub_82445178 returns 0 with the bound, non-blocking socket in the online manager's field, or an error. After a
+// failed socket() the field holds -1. After a failed bind or ioctlsocket the open, still blocking socket stays in the
+// field, and the recvfrom sub_82449EA8 makes on it every frame never returns on a host that refused the bind (Linux
+// refuses a normal user every port below 1024, so the Windows build under Proton froze at boot: issue #12).
+// True for that last case only: an error return with a handle left in the field.
+inline constexpr uint32_t kNoGuestSocket = 0xFFFFFFFFu;  // INVALID_SOCKET, what sub_82449EA8 tests before its loop
+constexpr bool Port1000LeftOpen(uint32_t result, uint32_t field_after) {
+  return result != 0 && field_after != kNoGuestSocket;
+}
+
 // ---- Digest regions ----
 // A guest region hashed every frame, minus masked byte ranges (host-timing
 // words), which are hashed as zero.
