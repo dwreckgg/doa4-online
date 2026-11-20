@@ -603,12 +603,19 @@ static void TestSlotTableValues() {
   }
   CHECK(names.size() == kSlotCount);
   // F19: no slot's character has a costume box (CarrySuits matches a box by its list-pointer patch kCostumeList + 4c).
+  std::set<int> box_characters;
   for (const doa4::tweaks::Tweak& tw : doa4::tweaks::AllTweaks()) {
-    for (const doa4::tweaks::CostumeAddition& a : tw.additions) CHECK(a.character != 16 && a.character != 18);
+    for (const doa4::tweaks::CostumeAddition& a : tw.additions) {
+      box_characters.insert(a.character);
+      CHECK(a.character != 16 && a.character != 18);
+    }
     for (const doa4::tweaks::Patch& p : tw.patches) {
       CHECK(p.address != doa4::tweaks::kCostumeList + 4 * 16 && p.address != doa4::tweaks::kCostumeList + 4 * 18);
     }
   }
+  // Positive control: the walk sees the three boxes (Helena, Kokoro, Christie), so an empty list cannot pass it.
+  std::printf("  costume boxes for %zu characters\n", box_characters.size());
+  CHECK(box_characters.size() == 3);
 }
 
 // On the image: where each file number lives, and that no record any character's costume list reaches names a slot's
