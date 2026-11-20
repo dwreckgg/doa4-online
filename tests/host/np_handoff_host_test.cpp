@@ -313,7 +313,10 @@ static const NotCarried kSdkNotCarried[] = {
 // doa4_idle_waits (issue #4, CPU heat): not carried, host-only; it changes only the host time between the guest's own checks
 // (the loader and fence waits sleep instead of spinning), never a guest-visible value: a fight recorded with it off and with
 // it on is equal on every digest frame, sweep block and progress counter (ou_runs/cpu det_off / det_on, 2026-11-11).
+// doa4_colour_costumes_dir (colour costumes, local offline build, plan D1): not carried, host-only; the colour costumes are
+// offline-only (colour_costumes::Enabled is false in a session, a replay and a hash process), so a session never reads it.
 static const char* const kPortNotCarried[] = {"doa4_game_files", "doa4_suits_import_pending", "doa4_show_fps", "doa4_skip_intro", "doa4_discord_status", "doa4_update_notice", "doa4_idle_waits", "doa4_photo_auto","doa4_photo_dir", "doa4_photo_format", "doa4_user_data",
+                                              "doa4_colour_costumes_dir",
                                               "netplay_port", "netplay_delay_auto", "netplay_delay", "netplay_last_join",
                                               "netplay_show_stats", "netplay_upnp",
                                               // lockstep port B3: the host's worker order; the hand-off carries its result as the
