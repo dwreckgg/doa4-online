@@ -351,11 +351,12 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## Libraries the Linux build links
+## Libraries the build links
 
 ### SDL3 (zlib)
 
-Simple DirectMedia Layer, Copyright (C) 1997-2026 Sam Lantinga. The Linux build's window, file dialogs and photo files
+Simple DirectMedia Layer, Copyright (C) 1997-2026 Sam Lantinga. Every build links it through the ReXGlue SDK (sound
+and controller input on Windows too). The Linux build's window, file dialogs and photo files
 (`src/doa4_photo_posix.cpp`, `src/doa4_sdl_dialog.cpp`) use it through the ReXGlue SDK, whose `thirdparty/sdl3` it is
 built from. Its licence (`thirdparty/sdl3/LICENSE.txt`), reproduced here:
 
