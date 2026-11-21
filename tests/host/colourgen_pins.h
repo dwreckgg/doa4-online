@@ -2,7 +2,7 @@
 // Do not edit. Synthetic inputs only: no game byte, no texture content, no hash of a game file. The values
 // come from ou_runs/colourgen/ref/port_model.py, shown equal there to the private tools (alp_recolour.py
 // recolour565 on all 65,536 inputs of each Alpha recipe; spartan_lib.py recolour_srgb8 on all 16,777,216
-// colours of each Spartan recipe; encode_dxt1 block for block on every family below).
+// colours of each Spartan recipe and of each test recipe; encode_dxt1 block for block on every family below).
 // SHA-1 values are lower-case hex.
 #pragma once
 
@@ -29,6 +29,54 @@ static const char* const kRepaintPin[4] = {
     "d917bae02def66e4b18041b09ee1e87effdd35bf",
 };
 
+// Repaint TEST recipes (synthetic numbers, no costume; the fields of doa4::colourgen::SpartanRecipe; doubles
+// as hex-float literals). The four shipping recipes all have amount 1, hue shift 0 and saturation 1, so their
+// output depends on max(r, g, b) only (256 distinct computations each) and the hue wrap's else branch never
+// runs. t1 and t2 exercise the general path; a1, a2 and a3 are t1 with a brightness aimed (aim.py) so that
+// a threshold falls between the right value and a wrong model's value on one input (see the R2 table).
+// kRepaintTestPin: the same byte order as kRepaintPin. Hue sum = (h + (hue_shift + 0.5)) + 0.5, below 2.0
+// on every input (asserted); the wrap is the sum minus 1.0 when >= 1.0, else the sum.
+struct RepaintTestRecipe { uint8_t colour[3]; double amount, hue_shift, saturation, brightness, vref; };
+static constexpr size_t kRepaintTestCount = 5;
+static const RepaintTestRecipe kRepaintTestRecipe[kRepaintTestCount] = {
+    // t1: wrap branches 16369023 sums >= 1.0, 408193 sums < 1.0; saturation clip fires on 0 colours; largest hue sum 0x1.bffff54bca118p+0 (0.250001 below 2.0)
+    {{0x3A, 0x9B, 0xDC}, 0x1.3333333333333p-1, -0x1.0000000000000p-2, 0x1.6666666666666p-1, 0x1.b333333333333p-1, 0x1.6666666666666p-2},
+    // t2: wrap branches 8238273 sums >= 1.0, 8538943 sums < 1.0; saturation clip fires on 12975498 colours; largest hue sum 0x1.8ccccc35fe233p+0 (0.45 below 2.0)
+    {{0xC0, 0x40, 0x20}, 0x1.6666666666666p-2, -0x1.ccccccccccccdp-2, 0x1.ccccccccccccdp+0, 0x1.3333333333333p+0, 0x1.70a3d70a3d70ap-3},
+    // a1: wrap branches 16369023 sums >= 1.0, 408193 sums < 1.0; saturation clip fires on 0 colours; largest hue sum 0x1.bffff54bca118p+0 (0.250001 below 2.0)
+    {{0x3A, 0x9B, 0xDC}, 0x1.3333333333333p-1, -0x1.0000000000000p-2, 0x1.6666666666666p-1, 0x1.b45ddba9adafep-1, 0x1.6666666666666p-2},
+    // a2: wrap branches 16369023 sums >= 1.0, 408193 sums < 1.0; saturation clip fires on 0 colours; largest hue sum 0x1.bffff54bca118p+0 (0.250001 below 2.0)
+    {{0x3A, 0x9B, 0xDC}, 0x1.3333333333333p-1, -0x1.0000000000000p-2, 0x1.6666666666666p-1, 0x1.b1bb4e1fea2cep-1, 0x1.6666666666666p-2},
+    // a3: wrap branches 16369023 sums >= 1.0, 408193 sums < 1.0; saturation clip fires on 0 colours; largest hue sum 0x1.bffff54bca118p+0 (0.250001 below 2.0)
+    {{0x3A, 0x9B, 0xDC}, 0x1.3333333333333p-1, -0x1.0000000000000p-2, 0x1.6666666666666p-1, 0x1.b6fd03e2bbc8cp-1, 0x1.6666666666666p-2},
+};
+static const char* const kRepaintTestPin[kRepaintTestCount] = {
+    "7ddec228a277c071a8366b83f909cc0abc2d1a22",  // t1
+    "f19d67d252aa0c1e5a3b81a4d75af94ee7cf3562",  // t2
+    "b3a60f73abc7e11c84cdfb0bbf3ed2c980358916",  // a1
+    "1efbcd4dc18936efc5929eca0ab5ceabe7d03dee",  // a2
+    "c697aad9acc3a006f9294d68cfbe8d07b62968e4",  // a3
+};
+
+// Repaint controls (asserted by the generator): wrong models run on all 16,777,216 colours of every recipe
+// (pink, orchid, orange, cyan, t1, t2, a1, a2, a3); the pins whose hash changes, with the colours that differ.
+//   curve hi * (hi * 0.8):                   a1 51984
+//   hue sum h + (shift + 1.0):               a2 1
+//   threshold count with <:                  a1 51984, a3 1
+//   wrap without its else branch:            t1 396594, t2 8504113, a1 396688, a2 396515, a3 396433
+//   wrap without its >= 1.0 branch:          a3 1
+//   m3 = m2 (amount ignored):                t1 16777115, t2 16776421, a1 16777120, a2 16777092, a3 16777117
+//   saturation clip dropped:                 t2 12440587
+//   thresholds one ulp up (not required):    a1 51984, a3 1
+//   (no wrong model changes a shipping recipe's pin.)
+
+// Alpha controls (Task 2 probe predictions): inputs of 65,536 on which a wrong model differs, per recipe.
+//   round half up:                       red 0, blue 2, lilac 123
+//   % 1.0 without the negative branch:   red 11382, blue 11393, lilac 11392
+//   % 1.0 without the >= 1.0 branch:     red 2, blue 0, lilac 0
+//   spread on h:                         red 65490, blue 65441, lilac 65457
+//   sat clamp dropped:                   red 16380, blue 17417, lilac 8212
+
 // Families: 256x256 RGB pictures from a 32-bit xorshift, x ^= x << 13; x ^= x >> 17; x ^= x << 5 (each
 // draw steps x first, then byte = x >> 24), x starting at the family seed. Draw order: block by block
 // row-major (64 x 64 blocks of 4x4 pixels, block n = by * 64 + bx), inside a block the base colour(s)
@@ -42,10 +90,14 @@ static const char* const kRepaintPin[4] = {
 //   F7 degenerate shapes: per block sel = draw % 4: 0 all black; 1 one colour (3 draws); 2 black and a colour (3 draws), each pixel one draw: black when (byte & 1) == 0; 3 near black, every channel draw % 3 (seed 0x0C010007)
 //   F8 per block colours A, B (6 draws), each pixel one draw w = byte % 4 and three draws e: channel = clamp((A * (3 - w) + B * w) / 3 + (e % 3) - 1) (seed 0x0C010008)
 //   F9 per block base (3 draws) and step d = (draw % 16) - 8 per channel (3 draws), each pixel one draw t = byte % 16: channel = clamp(base + d * (t - 8)) (seed 0x0C010009)
+//   F10 (shape "mix") per block colours A, B (6 draws), each pixel one draw w = byte % 16 and three draws e: channel = clamp((A * (15 - w) + B * w) / 15 + (e % 3) - 1) (integer division of a non-negative value) (seed 0x0C04005F)
+//   F11 the shape of F10 with another seed (seed 0x0C04090C)
 //   F7 was added by the generator: degenerate shapes held by no family: all_black.
 //   F8 was added by the generator: control not met on the families before it.
 //   F9 was added by the generator: control not met on the families before it.
-static constexpr size_t kFamilyCount = 9;
+//   F10 was added by the generator: search for a family on which the norm sum of squares fused alone changes bytes (ruling R3).
+//   F11 was added by the generator: search for a family on which the t dot fused alone changes bytes (ruling R3).
+static constexpr size_t kFamilyCount = 11;
 static constexpr uint32_t kFamilySeed[kFamilyCount] = {
     0x0C010001,
     0x0C010002,
@@ -56,6 +108,8 @@ static constexpr uint32_t kFamilySeed[kFamilyCount] = {
     0x0C010007,
     0x0C010008,
     0x0C010009,
+    0x0C04005F,
+    0x0C04090C,
 };
 // SHA-1 of the picture: row-major pixels (y outer), three bytes r, g, b each (196,608 bytes).
 static const char* const kFamilyInputPin[kFamilyCount] = {
@@ -68,6 +122,8 @@ static const char* const kFamilyInputPin[kFamilyCount] = {
     "b958b49b39eb94e75b83c9a14a33e0b84b0dd5fb",
     "6a250b4800521ab6bc0b80b72681acbf32e15796",
     "7dd019c977c173bf90c23cdd48796c81563c8715",
+    "bd000d7ef843c4f261184c90bb0a8ba03bab34d1",
+    "854c54893b16032f4878a676f719c8346ce832aa",
 };
 // SHA-1 of EncodeDxt1(picture): the 4,096 blocks row-major (untiled), 8 little-endian bytes each.
 static const char* const kEncodePin[kFamilyCount] = {
@@ -80,21 +136,28 @@ static const char* const kEncodePin[kFamilyCount] = {
     "6090bce90ed0542d911f9be4ad49006617762cf4",
     "8be4cda6690a474d8816e8bfd34ba8dc300365f6",
     "6aa5876bb1d2f27e532b93321a44df906a79ab76",
+    "e1f21e92e88a7302b0651b97f809dca5797ec47e",
+    "d36552dba658681addd882c3978a87e5b0a31625",
 };
 
 // Controls (asserted by the generator): does a wrong encoder hash differently from kEncodePin?
 //   LR refit = the refit's three scalar sums left to right instead of eight accumulators;
-//   fused dots = the matvec, norm and t dot products as fused multiply-adds (emulated through double).
-//   family  LR refit differs  fused dots differ  (blocks differing: LR, fused)
-//   F1      no                no                (0, 0)
-//   F2      yes               no                (2, 0)
-//   F3      no                no                (0, 0)
-//   F4      no                no                (0, 0)
-//   F5      no                no                (0, 0)
-//   F6      yes               no                (1, 0)
-//   F7      no                no                (0, 0)
-//   F8      no                no                (0, 0)
-//   F9      yes               yes               (1, 25)
+//   fused dots = the matvec, norm and t dot products as fused multiply-adds (emulated through double);
+//   matvec, norm, t dot = that one product fused alone; quant f64 = _quant565 in double precision.
+//   Blocks whose 8 bytes differ (0 = the hash equals the pin):
+//   family  LR refit  fused dots  matvec  norm  t dot  quant f64
+//   F1             0           0       0     0      0          0
+//   F2             2           0       0     0      0          0
+//   F3             0           0       0     0      0          0
+//   F4             0           0       0     0      0          0
+//   F5             0           0       0     0      0          0
+//   F6             1           0       0     0      0          0
+//   F7             0           0       0     0      0          0
+//   F8             0           0       0     0      0          0
+//   F9             1          25      25     0      0          0
+//   F10            0           0       0     1      0          0
+//   F11            1           1       0     0      1          0
+//   quant f64: not separated by any family (kQuantTies separates it: see below).
 
 // _quant565 at its ties: for each tie point (k + 0.5) * 255 / steps (k = 0..steps-1, steps 31 for red and
 // blue, 63 for green), the nearest float32 and the 4 float32 values on either side, with the 5- or 6-bit
