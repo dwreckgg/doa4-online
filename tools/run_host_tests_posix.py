@@ -1,6 +1,7 @@
 """Compiles and runs the host tests that need no Windows header, one after another, with a POSIX compiler line.
 
   python3 -I tools/run_host_tests_posix.py [--only NAME ...] [--cxx CXX] [--manifest PATH] [--timeout SECONDS]
+  python3 -I tools/run_host_tests_posix.py --check-names [--manifest PATH]
 
 The Linux job's runner (.github/workflows/linux-build.yml); tools/run_host_tests.py runs the same tests on Windows
 through their run_<name>_test.bat. Which tests run is written in tests/host/posix_manifest.txt, one entry a line:
@@ -29,6 +30,13 @@ error, a manifest with no run line, or an --only name that is not a run line giv
 --cxx is ONE program name or path (default c++), never split into words. --repo names another repository root and
 --exe-suffix the suffix of the program file the compiler is asked to write; both exist for this runner's own tests
 (tests/tools/test_release_tools.py), the Linux job passes neither.
+--check-names compiles and starts nothing and needs no compiler and no SDK: it reads the manifest as above (an error
+there gives the same lines and exit 1) and compares its names, run lines and left-out lines alike, with the files of
+tests/host whose whole name is run_<name>_test.bat. It prints one line for each runner that is on no line, then one for
+each line that has no runner (each list sorted by name), and as the last line
+  posix manifest names: <m> lines, <r> runners, <equal | NOT equal>
+Exit 0 only on "equal"; a folder with no runner at all gives one line and exit 1, and so does --check-names with --only.
+The Linux job runs it as its first step, so a new run_<name>_test.bat with no manifest line is seen there too.
 Two rules a run line must meet, checked by the same tests over the line's sources and the local #include "..." files
 they reach: windows_reach(), no Windows header outside a block that is compiled only on Windows; and msvc_calls(), no
 call spelled the Microsoft way (_name( or name_s() outside such a block. The second is a net over spellings, not a
@@ -132,6 +140,32 @@ def parse_manifest(text):
         else:
             runs.append(entry)
     return runs, left_out, errors
+
+
+RUNNER_BAT = re.compile(r"run_(\w+)_test\.bat")  # a Windows runner's whole file name; <name> is the group
+
+
+def check_names(repo, manifest, runs, left_out):
+    """--check-names: prints how the manifest's names (run lines and left-out lines) differ from the names of the
+    run_<name>_test.bat files in <repo>/tests/host, then the count line; the exit code, 0 only when the two sets are
+    equal and a runner was found."""
+    folder = os.path.join(repo, "tests", "host")
+    try:
+        files = os.listdir(folder)
+    except OSError:
+        files = []
+    runners = {m.group(1) for m in map(RUNNER_BAT.fullmatch, files) if m}
+    if not runners:
+        print(f"run_host_tests_posix: no run_<name>_test.bat in {folder}")
+        return 1
+    names = {name for name, _, _ in runs} | {name for name, _ in left_out}
+    for name in sorted(runners - names):
+        print(f"run_host_tests_posix: run_{name}_test.bat is on no line of {manifest}")
+    for name in sorted(names - runners):
+        print(f"run_host_tests_posix: {manifest} names {name}, and tests/host has no run_{name}_test.bat")
+    equal = runners == names
+    print(f"posix manifest names: {len(names)} lines, {len(runners)} runners, {'equal' if equal else 'NOT equal'}")
+    return 0 if equal else 1
 
 
 # ---- which sources reach a Windows header or call a Microsoft-only name -------------------------------------------------
@@ -398,7 +432,12 @@ def main(argv=None):
     ap.add_argument("--exe-suffix", default=".exe" if os.name == "nt" else "",
                     help="the suffix of the program file the compiler is asked to write and that is then started "
                          "(default .exe on Windows, none elsewhere); it exists for this runner's own tests")
+    ap.add_argument("--check-names", action="store_true",
+                    help="compile nothing: compare the manifest's names with the run_<name>_test.bat files of tests/host")
     a = ap.parse_args(argv)
+    if a.check_names and a.only:
+        print("run_host_tests_posix: --check-names takes no --only")
+        return 1
     repo = os.path.abspath(a.repo)
     manifest = a.manifest or os.path.join(repo, *MANIFEST.split("/"))
     try:
@@ -412,6 +451,8 @@ def main(argv=None):
         for e in errors:
             print(f"run_host_tests_posix: {manifest}: {e}")
         return 1
+    if a.check_names:
+        return check_names(repo, manifest, runs, left_out)
     names = [name for name, _, _ in runs]
     if a.only:
         unknown = [n for n in a.only if n not in names]

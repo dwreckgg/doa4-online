@@ -1398,6 +1398,12 @@ static std::filesystem::path WriteFakeImage(std::vector<uint8_t>* bytes) {
 static void SetImageVariable(const std::filesystem::path* value) {
 #ifdef _WIN32
   _wputenv_s(L"DOA4_TEST_IMAGE", value ? value->c_str() : L"");
+#else
+  if (value) {
+    setenv("DOA4_TEST_IMAGE", value->c_str(), 1);
+  } else {
+    unsetenv("DOA4_TEST_IMAGE");
+  }
 #endif
 }
 
@@ -1450,21 +1456,20 @@ static void TestImageReader() {
   CHECK(!ReadRangeFromFile(path, ImageRange{0x820002F8, 16, plain_pin.c_str()}, &why));
   CHECK(why == name + ": cannot read");
 
-  // Through the environment variable (Windows: read as UTF-16).
-#ifdef _WIN32
+  // Through the environment variable (Windows: set and read as UTF-16; elsewhere: setenv and getenv, the path's bytes).
   const std::optional<std::filesystem::path> before = ImagePath();
   SetImageVariable(nullptr);
   why.clear();
   CHECK(!ReadImageRange(ImageRange{0x82000040, 16, plain_pin.c_str()}, &why) && why == "DOA4_TEST_IMAGE unset");
   SetImageVariable(&path);
   CHECK(ReadImageRange(ImageRange{0x82000040, 16, plain_pin.c_str()}, &why) == plain);
-  const std::filesystem::path missing = path.wstring() + L".missing";
+  std::filesystem::path missing = path;
+  missing += ".missing";
   SetImageVariable(&missing);
   why.clear();
   CHECK(!ReadImageRange(ImageRange{0x82000040, 16, plain_pin.c_str()}, &why) && why == name + ".missing: cannot read");
   SetImageVariable(before ? &*before : nullptr);
   CHECK(ImagePath() == before);
-#endif
   std::error_code ec;
   std::filesystem::remove(path, ec);
 }

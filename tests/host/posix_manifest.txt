@@ -86,7 +86,7 @@ updater_refusal | tests/host/updater_refusal_host_test.cpp src/doa4_updater.cpp 
 !np_files | windows header: tests/host/np_files_host_test.cpp:21 windows.h
 !np_gekko | other: an include that is in no repo folder (third_party/GekkoNet/thirdparty/zpp/zpp_bits.h:32 zpp_throwing.h)
 !np_handoff | needs the SDK: %REXSDK_DIR%, ../rexglue-sdk/thirdparty/tomlplusplus/include
-!np_link | windows header: tests/host/np_link_host_test.cpp:26 winsock2.h
+!np_link | windows header: tests/host/np_link_host_test.cpp:30 winsock2.h
 !np_live | windows header: tests/host/np_live_host_test.cpp:32 windows.h
 !np_online | windows header: tests/host/np_online_host_test.cpp:10 winsock2.h
 !np_upnp | windows header: tests/host/np_upnp_host_test.cpp:4 windows.h

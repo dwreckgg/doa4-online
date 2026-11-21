@@ -19,6 +19,10 @@
 // Rounds (task 7c): the three runs and their results form a ROUND, repeated up to kMaxRounds = 3 times when only a
 // TIMING bound (the stall bound, the control's 50 ms gap) failed, since a busy PC can stall a pair; a STRUCTURAL failure
 // (any other check) is never repeated, and a third failing round stands. Decide() holds the rule and is self-tested first.
+// What the repeat rule costs: nothing measures that the PC was busy. A timing failure in rounds 1 and 2 followed by a
+// clean round 3 passes, and that includes a real stall of the pair that happens in some rounds and not in all. A pass
+// after a repeat prints the same kind of summary line as a first-round pass (a repeated round's checks are taken back
+// out of the count); it shows only in the test's own "info: round N of 3" line, one for each repeated round.
 // Test switch DOA4_NP_LINK_TEST_DISTURB=n: side 0 sleeps 80 ms at frame 60 of the control in each of the first n rounds.
 
 #define NOMINMAX

@@ -28,6 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { path: doa4-recomp, persist-credentials: false }   # the build never sees a token
+      - name: Manifest names
+        working-directory: doa4-recomp
+        # the names on the lines of tests/host/posix_manifest.txt against the run_<name>_test.bat files of tests/host,
+        # before anything is installed or built; the Windows release-tools suite compares what the lines hold
+        run: python3 -I tools/run_host_tests_posix.py --check-names
       - name: Runner size
         run: |
           nproc
@@ -49,9 +54,7 @@ jobs:
         run: |
           sudo apt-get update
           # clang 23 from apt.llvm.org, by its own script (the SDK's Linux job installs clang 20 the same way:
-          # rexglue-sdk .github/workflows/_build-platform.yaml:48-53). Round 1's fallback if apt.llvm.org has no 23
-          # for this image: the release archive of LLVM 23.1.4 for Linux, checked by its SHA-256, as the Windows job
-          # unpacks its own.
+          # rexglue-sdk .github/workflows/_build-platform.yaml:48-53).
           sudo apt-get install -y wget gnupg lsb-release
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh

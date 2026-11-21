@@ -2090,6 +2090,88 @@ def test_posix_runner_verdicts(root):
     check(not os.path.exists(os.path.join(TOOLS, "__pycache__")), "posix runner: running and loading it leaves no tools/__pycache__")
 
 
+def test_posix_check_names(root):
+    # --check-names: the manifest's names against the run_<name>_test.bat files of tests/host; nothing is compiled
+    repo, cxx, log = posix_setup(root)
+    host = os.path.join(repo, "tests", "host")
+    path = os.path.join(host, "posix_manifest.txt")
+    posix_source(repo, "src/a.cpp", "src/a.cpp", "print: PASSED: 1 checks, 0 failures")
+    three = "# the stand-in manifest\na | src/a.cpp |\nb | src/a.cpp | -DX=1\n!c | other: a reason\n"
+
+    def runners(*files):
+        for f in os.listdir(host):
+            if f != "posix_manifest.txt":
+                os.remove(os.path.join(host, f))
+        for f in files:
+            write(os.path.join(host, f), b"@echo off\r\n")
+
+    def names_run(manifest, *args):
+        code, text, rec = posix_run(repo, cxx, log, manifest, "--check-names", *args)
+        return code, text.rstrip("\n").split("\n"), rec
+
+    def no_line(name):
+        return f"run_host_tests_posix: run_{name}_test.bat is on no line of {path}"
+
+    def no_runner(name):
+        return f"run_host_tests_posix: {path} names {name}, and tests/host has no run_{name}_test.bat"
+
+    def last(m, r, equal):
+        return f"posix manifest names: {m} lines, {r} runners, {'equal' if equal else 'NOT equal'}"
+
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 0 and lines == [last(3, 3, True)] and rec == [],
+          f"check-names, 2 run lines + 1 left-out line and their 3 runners: exit 0, the one line, no compile: {code}, {lines}, {rec}")
+    # the recorder's control: the same folder without the option does compile, and prints no names line
+    code, text, rec = posix_run(repo, cxx, log, three, "--only", "a")
+    check(code == 0 and [r["what"] for r in rec] == ["compile", "program"] and "posix manifest names:" not in text,
+          f"check-names control: without the option the fake compiler is called and no names line is printed: {code}, {rec}\n{text}")
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", "run_d_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [no_line("d"), last(3, 4, False)] and rec == [],
+          f"check-names, a runner on no line: exit 1, its line, NOT equal: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_c_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [no_runner("b"), last(3, 2, False)] and rec == [],
+          f"check-names, a run line with no runner: exit 1, its line, NOT equal: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_b_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [no_runner("c"), last(3, 2, False)] and rec == [],
+          f"check-names, a left-out line with no runner: exit 1, its line, NOT equal: {code}, {lines}, {rec}")
+    # both at once, with as many lines as runners: runner lines first, each list sorted by name
+    runners("run_e_test.bat", "run_a_test.bat", "run_d_test.bat", "run_b_test.bat")
+    code, lines, rec = names_run(three + "z | src/a.cpp |\n")
+    check(code == 1 and lines == [no_line("d"), no_line("e"), no_runner("c"), no_runner("z"), last(4, 4, False)] and rec == [],
+          f"check-names, 4 lines and 4 runners that differ: exit 1, runner lines then manifest lines, sorted: {code}, {lines}, {rec}")
+    runners()
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [f"run_host_tests_posix: no run_<name>_test.bat in {host}"] and rec == [],
+          f"check-names, no runner in the folder: exit 1 and the one line, never 'equal': {code}, {lines}, {rec}")
+    # names that are not a runner's: a longer name, no middle part, a prefix
+    others = ("run_x_test.bat.bak", "run_test.bat", "xrun_a_test.bat")
+    runners(*others)
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [f"run_host_tests_posix: no run_<name>_test.bat in {host}"] and rec == [],
+          f"check-names, only files that are not runners: exit 1 and the no-runner line: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", *others)
+    code, lines, rec = names_run(three)
+    check(code == 0 and lines == [last(3, 3, True)] and rec == [],
+          f"check-names, {others} beside the 3 runners do not count: exit 0, the one line: {code}, {lines}, {rec}")
+    code, lines, rec = names_run("a | src/a.cpp\nb | src/a.cpp |\n!c | other: a reason\n")
+    check(code == 1 and lines == [f"run_host_tests_posix: {path}: line 1: a run line is '<name> | <sources> | <flags>' (both | are there): 'a | src/a.cpp'"]
+          and rec == [],
+          f"check-names, a manifest error: exit 1, the parser's line and no names line: {code}, {lines}, {rec}")
+    code, lines, rec = names_run(three, "--only", "a")
+    check(code == 1 and lines == ["run_host_tests_posix: --check-names takes no --only"] and rec == [],
+          f"check-names with --only: refused with one line, exit 1, no compile: {code}, {lines}, {rec}")
+    # the real tree: the numbers are this suite's own counts of the real runners and of the real manifest's lines
+    rp, text, runs, left, errors = real_manifest()
+    bats = [f for f in os.listdir(HOST) if re.fullmatch(r"run_\w+_test\.bat", f)]
+    code, text = run(RUN_POSIX, "--check-names")
+    check(len(bats) >= 30 and code == 0 and text == last(len(runs) + len(left), len(bats), True) + "\n",
+          f"check-names on the real tree: exit 0 and '{last(len(runs) + len(left), len(bats), True)}' alone: {code}\n{text}")
+
+
 def workflow_steps(text):
     """The steps of a workflow text (each '      - ' item after a '    steps:' line), as texts."""
     m = re.search(r"(?m)^    steps:\n", text)
@@ -2162,8 +2244,10 @@ def test_linux_workflow(root):
     checkouts = [s for s in steps if "actions/checkout@" in s]
     check(len(checkouts) == 1 and "actions/checkout@v5" in checkouts[0] and re.search(r"persist-credentials:\s*false\b", checkouts[0]) is not None,
           f"linux workflow: one checkout (v5) with persist-credentials: false: {checkouts}")
-    tests = [s for s in steps if "run_host_tests_posix.py" in s]
-    calls = [l.strip() for s in tests for l in s.split("\n") if "run_host_tests_posix.py" in l and not l.strip().startswith("#")]
+    # the "Manifest names" step calls the same runner and has its own checks below
+    named = [s for s in steps if s.split("\n")[0].strip() == "name: Manifest names"]
+    tests = [s for s in steps if "run_host_tests_posix.py" in s and s not in named]
+    calls =[l.strip() for s in tests for l in s.split("\n") if "run_host_tests_posix.py" in l and not l.strip().startswith("#")]
     call = calls[0] if len(calls) == 1 else ""
     check(len(tests) == 1 and "python3 -I tools/run_host_tests_posix.py --cxx clang++-23" in call
           and not any(o in call for o in ("--exe-suffix", "--only", "--manifest", "--repo", "--compile-timeout", "--timeout")),
@@ -2172,6 +2256,17 @@ def test_linux_workflow(root):
           f"linux workflow: DOA4_CI is 1 for the test step: {call!r}")
     check("| tee host_tests.log" in call and bool(tests) and "set -o pipefail" in tests[0].split(call)[0],
           f"linux workflow: the test step's result survives the tee (set -o pipefail before it): {call!r}")
+    name_calls = [l.strip() for s in named for l in s.split("\n") if "run_host_tests_posix.py" in l and not l.strip().startswith("#")]
+    check(len(named) == 1 and name_calls == ["run: python3 -I tools/run_host_tests_posix.py --check-names"]
+          and re.search(r"(?m)^        working-directory: doa4-recomp$", named[0]) is not None
+          and not any(w in named[0] for w in ("REXSDK_DIR", "tee ", "--cxx", "pipefail")),
+          f"linux workflow: one step 'Manifest names' in doa4-recomp whose run line is "
+          f"'python3 -I tools/run_host_tests_posix.py --check-names' and nothing more: {name_calls}, {named}")
+    order = ["checkout" if "actions/checkout@" in s else "names" if s in named else "other" for s in steps]
+    check(order[:2] == ["checkout", "names"] and "checkout" not in order[1:] and "names" not in order[2:],
+          f"linux workflow: 'Manifest names' is the step after the checkout and before every other step: {order}")
+    check(len([s for s in steps if "run_host_tests_posix.py" in s]) == 2 and bool(call) and "--check-names" not in call,
+          f"linux workflow: two steps call the runner, and the host tests' call has no --check-names: {call!r}")
     builds = [s for s in steps if "cmake --build --preset linux-amd64-release" in s]
     conf = [l.strip() for s in steps for l in s.split("\n") if "cmake --preset linux-amd64-release" in l and not l.strip().startswith("#")]
     check(len(conf) == 1 and "-DCMAKE_C_COMPILER=clang-23" in conf[0].split() and "-DCMAKE_CXX_COMPILER=clang++-23" in conf[0].split(),
