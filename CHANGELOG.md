@@ -6,7 +6,8 @@
 - **Heavy stages under Linux/Proton: less time in a memory call.** On Safari and the Experimental Playground the
   game changes the protection of its animation buffers about 170 to 190 times a frame. Under Proton each of those
   calls cost 37 to 39 microseconds on a tester's PC (about 2.4 on the developer's Windows PC). The game now skips
-  the host's part of the call where nothing would change for the host. In the tester's runs the main thread's
+  the host's part of the call where the host's protection would not change or would only become stricter. In the
+  tester's runs (on a test build with the same change) the main thread's
   wait for the background jobs fell from 12.7 to 8.8 ms a frame on Safari and from 14.0 to 10.7 ms on the
   Playground; the game's state was identical with the change off and on. On Windows the call was already cheap.
   If anything misbehaves, `cheap_physical_protect = false` in `dead_or_alive_4.toml` goes back to 0.3.7's
