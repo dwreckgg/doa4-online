@@ -2164,6 +2164,26 @@ def test_posix_check_names(root):
     code, lines, rec = names_run(three, "--only", "a")
     check(code == 1 and lines == ["run_host_tests_posix: --check-names takes no --only"] and rec == [],
           f"check-names with --only: refused with one line, exit 1, no compile: {code}, {lines}, {rec}")
+    # letter case: the fixed parts of a runner's file name match in any case, as in tools/run_host_tests.py; the name in
+    # the middle keeps the file's spelling and equals a manifest name only letter for letter
+    four = three + "d | src/a.cpp |\n"
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", "Run_d_TEST.Bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [f"run_host_tests_posix: Run_d_TEST.Bat is on no line of {path}", last(3, 4, False)] and rec == [],
+          f"check-names, Run_d_TEST.Bat on no line: exit 1, a line with the file's own name, NOT equal: {code}, {lines}, {rec}")
+    code, lines, rec = names_run(four)
+    check(code == 0 and lines == [last(4, 4, True)] and rec == [],
+          f"check-names, Run_d_TEST.Bat and a line d: the name is d, exit 0, equal: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", "run_D_test.bat")
+    code, lines, rec = names_run(four)
+    check(code == 1 and lines == [f"run_host_tests_posix: run_D_test.bat is on no line of {path}", no_runner("d"), last(4, 4, False)] and rec == [],
+          f"check-names, run_D_test.bat and a line d: two lines, NOT equal: {code}, {lines}, {rec}")
+    # a repository with no tests/host folder (the manifest given from elsewhere) has no runner: refused, never exit 0
+    bare = os.path.join(root, "bare repo")
+    os.makedirs(bare)
+    code, text = run(RUN_POSIX, "--check-names", "--repo", bare, "--manifest", path)
+    check(code == 1 and text == f"run_host_tests_posix: no run_<name>_test.bat in {os.path.join(bare, 'tests', 'host')}\n",
+          f"check-names, no tests/host folder: exit 1, the no-runner line and no names line: {code}\n{text}")
     # the real tree: the numbers are this suite's own counts of the real runners and of the real manifest's lines
     rp, text, runs, left, errors = real_manifest()
     bats = [f for f in os.listdir(HOST) if re.fullmatch(r"run_\w+_test\.bat", f)]
@@ -2247,7 +2267,7 @@ def test_linux_workflow(root):
     # the "Manifest names" step calls the same runner and has its own checks below
     named = [s for s in steps if s.split("\n")[0].strip() == "name: Manifest names"]
     tests = [s for s in steps if "run_host_tests_posix.py" in s and s not in named]
-    calls =[l.strip() for s in tests for l in s.split("\n") if "run_host_tests_posix.py" in l and not l.strip().startswith("#")]
+    calls = [l.strip() for s in tests for l in s.split("\n") if "run_host_tests_posix.py" in l and not l.strip().startswith("#")]
     call = calls[0] if len(calls) == 1 else ""
     check(len(tests) == 1 and "python3 -I tools/run_host_tests_posix.py --cxx clang++-23" in call
           and not any(o in call for o in ("--exe-suffix", "--only", "--manifest", "--repo", "--compile-timeout", "--timeout")),
@@ -2262,6 +2282,8 @@ def test_linux_workflow(root):
           and not any(w in named[0] for w in ("REXSDK_DIR", "tee ", "--cxx", "pipefail")),
           f"linux workflow: one step 'Manifest names' in doa4-recomp whose run line is "
           f"'python3 -I tools/run_host_tests_posix.py --check-names' and nothing more: {name_calls}, {named}")
+    check(len(named) == 1 and "continue-on-error" not in named[0] and re.search(r"(?m)^\s*if:", named[0]) is None,
+          f"linux workflow: the 'Manifest names' step can fail the job: no continue-on-error and no if: key: {named}")
     order = ["checkout" if "actions/checkout@" in s else "names" if s in named else "other" for s in steps]
     check(order[:2] == ["checkout", "names"] and "checkout" not in order[1:] and "names" not in order[2:],
           f"linux workflow: 'Manifest names' is the step after the checkout and before every other step: {order}")

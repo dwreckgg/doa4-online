@@ -36,7 +36,7 @@ tests/host whose whole name is run_<name>_test.bat. It prints one line for each 
 each line that has no runner (each list sorted by name), and as the last line
   posix manifest names: <m> lines, <r> runners, <equal | NOT equal>
 Exit 0 only on "equal"; a folder with no runner at all gives one line and exit 1, and so does --check-names with --only.
-The Linux job runs it as its first step, so a new run_<name>_test.bat with no manifest line is seen there too.
+The Linux job runs it as the first step after the checkout, so a new run_<name>_test.bat with no manifest line is seen there too.
 Two rules a run line must meet, checked by the same tests over the line's sources and the local #include "..." files
 they reach: windows_reach(), no Windows header outside a block that is compiled only on Windows; and msvc_calls(), no
 call spelled the Microsoft way (_name( or name_s() outside such a block. The second is a net over spellings, not a
@@ -142,7 +142,9 @@ def parse_manifest(text):
     return runs, left_out, errors
 
 
-RUNNER_BAT = re.compile(r"run_(\w+)_test\.bat")  # a Windows runner's whole file name; <name> is the group
+# A Windows runner's whole file name; <name> is the group. The fixed parts match in any letter case, as runners() of
+# tools/run_host_tests.py takes them; the name keeps the file's spelling and equals a manifest name letter for letter.
+RUNNER_BAT = re.compile(r"run_(\w+)_test\.bat", re.IGNORECASE)
 
 
 def check_names(repo, manifest, runs, left_out):
@@ -154,16 +156,16 @@ def check_names(repo, manifest, runs, left_out):
         files = os.listdir(folder)
     except OSError:
         files = []
-    runners = {m.group(1) for m in map(RUNNER_BAT.fullmatch, files) if m}
+    runners = {m.group(1): f for f, m in ((f, RUNNER_BAT.fullmatch(f)) for f in sorted(files)) if m}  # {name: file}
     if not runners:
         print(f"run_host_tests_posix: no run_<name>_test.bat in {folder}")
         return 1
     names = {name for name, _, _ in runs} | {name for name, _ in left_out}
-    for name in sorted(runners - names):
-        print(f"run_host_tests_posix: run_{name}_test.bat is on no line of {manifest}")
-    for name in sorted(names - runners):
+    for name in sorted(runners.keys() - names):
+        print(f"run_host_tests_posix: {runners[name]} is on no line of {manifest}")
+    for name in sorted(names - runners.keys()):
         print(f"run_host_tests_posix: {manifest} names {name}, and tests/host has no run_{name}_test.bat")
-    equal = runners == names
+    equal = runners.keys() == names
     print(f"posix manifest names: {len(names)} lines, {len(runners)} runners, {'equal' if equal else 'NOT equal'}")
     return 0 if equal else 1
 
