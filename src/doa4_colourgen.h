@@ -90,4 +90,17 @@ std::optional<Bytes> MakeSpartan(std::span<const uint8_t> source, const SpartanR
 // name (names are matched exactly) or when the maker refuses the source.
 std::optional<Bytes> Make(std::string_view slot, std::span<const uint8_t> source, std::string* why);
 
+// The retail file each slot is made from: its global file number, its entry in chrthree.afs, and the size and
+// SHA-1 the entry has on the supported disc. A source that differs is not passed to Make.
+struct SourceDef { const char* slot; uint16_t file; uint32_t afs_entry; uint64_t size; const char* sha1; };
+inline constexpr SourceDef kSources[7] = {
+    {"alpha_red", 427, 22, 3758080, "b2d94ab7b1da6d4ccdf0e136140d58216639a209"},
+    {"alpha_blue", 427, 22, 3758080, "b2d94ab7b1da6d4ccdf0e136140d58216639a209"},
+    {"alpha_lilac", 427, 22, 3758080, "b2d94ab7b1da6d4ccdf0e136140d58216639a209"},
+    {"spartan_h3_pink", 439, 34, 18741248, "2f8b20c08c23ec96635bbc10d042c77260e27062"},
+    {"spartan_h3_orchid", 445, 40, 18741248, "7467381f8b20fa3a0ab739e3f4486ddba81b3fe2"},
+    {"spartan_h2_orange", 437, 32, 18741248, "05274f0370b48e8306580d3585ce7f6de655e098"},
+    {"spartan_h2_cyan", 447, 42, 18741248, "9c4fc2f8019a2b12a1c5bfd9374a4d2d8f1b40ea"},
+};
+
 }  // namespace doa4::colourgen

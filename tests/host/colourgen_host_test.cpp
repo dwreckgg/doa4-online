@@ -25,10 +25,20 @@
 //                           tile(encode(repaint(decode(blocks it chose)))); a shared range; the caller's control word
 //   make_spartan_refusals   every layout and recipe refusal, one input each; properties of other textures never refuse
 //   make_by_name            the seven slot names give their recipe's output; other names refuse
-// Every group prints its run time. No byte of any game file is stored. The last three lines: GREEN-SITES and
-// RED-SITES (check lines that ran without and with a failure: the mutation probe census), then
-// "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
+//   source_table            cg::kSources agrees with colour_costumes::Slots() (names, order, stand-in files) and with
+//                           the chrthree.afs numbering; Make accepts every Slots() name on its kind's synthetic source
+//   real_files              gated on DOA4_SUITS_GAME_DIR (the game folder holding chrthree.afs, read only): each
+//                           slot's retail source entry has kSources' size and SHA-1, and Make of it has Slots()' size
+//                           and SHA-1; then the seven again on four threads, byte-equal. Unset: SKIPPED (one skipped
+//                           section); set but unreadable: one failed check. Prints time lines (never asserted). On a
+//                           SHA-1 miss, with DOA4_COLOURGEN_APPROVED_DIR (a folder of <slot>.tpr) set, "diag" lines
+//                           compare the made file with the approved one (no check).
+// Every group prints its run time. No byte of any game file is stored, and no file is written. The last four lines:
+// GREEN-SITES and RED-SITES (check lines that ran without and with a failure: the mutation probe census),
+// "skipped sections: K", then "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
 
+#include "../../src/doa4_afs_overlay.h"
+#include "../../src/doa4_colour_costumes.h"
 #include "../../src/doa4_colourgen.h"
 #include "../../src/doa4_gamefiles.h"
 #include "../../src/doa4_suitconv_num.h"
@@ -36,23 +46,38 @@
 #include "colourgen_pins.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
+#endif
+
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
 #endif
 
 namespace cg = doa4::colourgen;
@@ -62,6 +87,7 @@ using cg::Bytes;
 static int g_checks = 0;
 static int g_failures = 0;
 static int g_printed = 0;
+static int g_skipped = 0;  // gated sections that did not run (printed as "skipped sections: K")
 static constexpr int kPrintCap = 200;  // per group; the SITES lines at the end name every failing check site anyway
 static std::map<int, std::pair<int, int>> g_sites;  // check line -> (runs, failures), printed last (the probe census)
 
@@ -1438,6 +1464,361 @@ static void TestMakeByName() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// source_table: cg::kSources against colour_costumes::Slots() and the chrthree.afs numbering (file = 405 + entry);
+// Make is driven by the names of Slots() (ruling G26 M3).
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace cc = doa4::colour_costumes;
+namespace fs = std::filesystem;
+
+static bool IsLowerHex40(const char* s) {
+  if (!s || std::strlen(s) != 40) return false;
+  for (const char* p = s; *p; ++p)
+    if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'))) return false;
+  return true;
+}
+
+static void TestSourceTable() {
+  Group("source_table");
+  const cc::SlotTable& slots = cc::Slots();
+  CKF(std::size(cg::kSources) == 7 && slots.size() == 7, "kSources %zu rows, Slots() %zu", std::size(cg::kSources),
+      slots.size());
+  if (std::size(cg::kSources) != slots.size()) return;
+  for (size_t i = 0; i < slots.size(); ++i) {
+    const cg::SourceDef& s = cg::kSources[i];
+    CKF(std::string_view(s.slot) == slots[i].name, "row %zu: kSources '%s', Slots() '%s'", i, s.slot, slots[i].name);
+    CKF(s.file == slots[i].stand_in_file, "row %zu (%s): file %u, Slots() stand-in %u", i, s.slot, unsigned(s.file),
+        unsigned(slots[i].stand_in_file));
+    CKF(s.file == 405 + s.afs_entry, "row %zu (%s): file %u is not 405 + entry %u", i, s.slot, unsigned(s.file),
+        unsigned(s.afs_entry));
+    CKF(IsLowerHex40(s.sha1), "row %zu (%s): SHA-1 '%s' is not 40 lower-case hex digits", i, s.slot, s.sha1);
+  }
+  // rows of one file agree on entry, size and SHA-1 (and the table has such rows: Alpha's three share file 427)
+  int shared_pairs = 0, disagree = 0;
+  for (size_t i = 0; i < 7; ++i)
+    for (size_t j = i + 1; j < 7; ++j) {
+      const cg::SourceDef &a = cg::kSources[i], &b = cg::kSources[j];
+      if (a.file != b.file) continue;
+      ++shared_pairs;
+      if (a.afs_entry != b.afs_entry || a.size != b.size || std::string_view(a.sha1) != b.sha1) {
+        ++disagree;
+        std::printf("   rows %zu and %zu (file %u) disagree\n", i, j, unsigned(a.file));
+      }
+    }
+  CKF(shared_pairs >= 3, "%d pairs of rows share a file (Alpha's three rows give 3)", shared_pairs);
+  CKF(disagree == 0, "%d pairs of rows of one file disagree on entry, size or SHA-1", disagree);
+  // Make by the names of Slots(): each is accepted on the synthetic source of its kind (character 16 = Alpha-152)
+  const Bytes asrc = Pack(GoodLayout());
+  const Bytes ssrc = SpPack(GoodSpLayout());
+  for (const cc::SlotDef& d : slots) {
+    CKF(d.character == 16 || d.character == 18, "%s: character %u", d.name, unsigned(d.character));
+    std::string why;
+    const std::optional<Bytes> got = cg::Make(d.name, Sp(d.character == 16 ? asrc : ssrc), &why);
+    CKF(got.has_value(), "Make('%s') on its kind's synthetic source: refused: %s", d.name, why.c_str());
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// real_files: the seven slots made from the retail chrthree.afs (gated on DOA4_SUITS_GAME_DIR), each source entry
+// checked against kSources before Make sees it, each result against Slots()' size and SHA-1 (the gate); a second pass
+// on four threads must give the same bytes. Nothing is written; the made files live in memory only.
+// ---------------------------------------------------------------------------------------------------------------
+
+// A non-empty environment variable as a path, or nothing.
+static std::optional<fs::path> EnvPath(const wchar_t* name) {
+  wchar_t* buf = nullptr;
+  size_t len = 0;
+  if (_wdupenv_s(&buf, &len, name) != 0 || !buf) return std::nullopt;
+  std::wstring v(buf);
+  std::free(buf);
+  if (v.empty()) return std::nullopt;
+  return fs::path(v);
+}
+
+static std::string PathText(const fs::path& p) {
+  const std::u8string u = p.u8string();
+  return std::string(u.begin(), u.end());
+}
+
+static double Secs(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+  return std::chrono::duration<double>(b - a).count();
+}
+
+// file bytes (tiled, 16-bit words swapped) at src -> row-major little-endian blocks; false when the grid is not one
+// TiledBlockIndex maps inside itself
+static bool UntileHere(const uint8_t* src, uint32_t bw, uint32_t bh, Bytes& blocks) {
+  const uint64_t n = uint64_t(bw) * bh;
+  blocks.assign(size_t(n) * 8, 0);
+  for (uint32_t by = 0; by < bh; ++by)
+    for (uint32_t bx = 0; bx < bw; ++bx) {
+      const uint32_t t = cg::TiledBlockIndex(bx, by, bw);
+      if (t >= n) return false;
+      const uint8_t* s = src + size_t(t) * 8;
+      uint8_t* d = &blocks[(size_t(by) * bw + bx) * 8];
+      for (int i = 0; i < 4; ++i) {
+        d[2 * i] = s[2 * i + 1];
+        d[2 * i + 1] = s[2 * i];
+      }
+    }
+  return true;
+}
+
+// Diagnosis of a SHA-1 miss against the approved file (no check; lines start "   diag "). Never throws.
+static void Diagnose(const char* name, const Bytes& got, bool spartan) {
+  const std::optional<fs::path> dir = EnvPath(L"DOA4_COLOURGEN_APPROVED_DIR");
+  if (!dir) return;
+  try {
+    const fs::path p = *dir / (std::string(name) + ".tpr");
+    std::ifstream in(p, std::ios::binary);
+    Bytes ap;
+    if (in) ap.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    if (!in.good() && !in.eof()) ap.clear();
+    if (ap.empty()) {
+      std::printf("   diag %s: cannot read the approved file %s\n", name, PathText(p).c_str());
+      return;
+    }
+    std::printf("   diag %s: approved file %zu bytes, SHA-1 %s; made file %zu bytes\n", name, ap.size(),
+                Sha1(ap).c_str(), got.size());
+    const size_t n = std::min(ap.size(), got.size());
+    size_t differ = 0, first = SIZE_MAX, last = 0;
+    for (size_t i = 0; i < n; ++i)
+      if (ap[i] != got[i]) {
+        ++differ;
+        if (first == SIZE_MAX) first = i;
+        last = i;
+      }
+    if (differ)
+      std::printf("   diag %s: %zu bytes differ (over the first %zu), first at 0x%zX, last at 0x%zX\n", name, differ, n,
+                  first, last);
+    else
+      std::printf("   diag %s: no byte differs over the first %zu\n", name, n);
+    const tp::Xpr x = tp::Xpr::Parse(Sp(ap));
+    if (!x.hs) {
+      std::printf("   diag %s: the approved file has no header size\n", name);
+      return;
+    }
+    const uint64_t data0 = 12ull + *x.hs;
+    const std::vector<size_t> tex = x.OfType(tp::MakeFourcc("TX2D"));
+    std::vector<uint8_t> mark(n, 0);  // 1 = inside a paint range (Spartan) or an endpoint word (Alpha)
+    if (spartan) {
+      if (tex.size() < 70) {
+        std::printf("   diag %s: the approved file has %zu textures\n", name, tex.size());
+        return;
+      }
+      for (const int k : cg::kPaintTextures) {
+        const std::array<uint32_t, 6> fc = tp::TexFc(x.res[tex[size_t(k)]].blob);
+        const uint32_t w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
+        const uint32_t bw = w / 4, bh = h / 4;
+        const uint64_t start = data0 + (fc[1] & 0xFFFFF000u), bytes = uint64_t(bw) * bh * 8;
+        if (start + bytes > n) {
+          std::printf("   diag %s: texture %d: range past the compared bytes\n", name, k);
+          continue;
+        }
+        size_t blocks_differ = 0;
+        for (uint64_t b = 0; b < bytes; b += 8) {
+          blocks_differ += !std::equal(ap.begin() + (start + b), ap.begin() + (start + b + 8), got.begin() + (start + b));
+          for (int j = 0; j < 8; ++j) mark[size_t(start + b) + j] = 1;
+        }
+        Bytes ba, bg;
+        if (!UntileHere(ap.data() + start, bw, bh, ba) || !UntileHere(got.data() + start, bw, bh, bg)) {
+          std::printf("   diag %s: texture %d: %ux%u is not a tiled grid\n", name, k, w, h);
+          continue;
+        }
+        Bytes ra(size_t(bw) * bh * 64), rg(ra.size());
+        cg::DecodeDxt1(ba.data(), bw, bh, ra.data());
+        cg::DecodeDxt1(bg.data(), bw, bh, rg.data());
+        int maxd = 0;
+        double sum = 0;
+        const size_t px = size_t(bw) * bh * 16;
+        for (size_t i = 0; i < px; ++i)
+          for (int c = 0; c < 3; ++c) {
+            const int d = std::abs(int(ra[4 * i + c]) - int(rg[4 * i + c]));
+            maxd = std::max(maxd, d);
+            sum += d;
+          }
+        std::printf("   diag %s: texture %d (%ux%u): %llu blocks, %zu differ; decoded channels: largest difference "
+                    "%d, mean %.4f\n",
+                    name, k, w, h, static_cast<unsigned long long>(uint64_t(bw) * bh), blocks_differ, maxd,
+                    sum / double(px * 3));
+      }
+      size_t outside = 0;
+      for (size_t i = 0; i < n; ++i) outside += !mark[i] && ap[i] != got[i];
+      std::printf("   diag %s: %zu differing bytes outside the twelve paint ranges (expected 0)\n", name, outside);
+    } else {
+      if (tex.size() < 121) {
+        std::printf("   diag %s: the approved file has %zu textures\n", name, tex.size());
+        return;
+      }
+      for (size_t k = 0; k <= 120; ++k) {
+        const std::array<uint32_t, 6> fc = tp::TexFc(x.res[tex[k]].blob);
+        const uint32_t w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
+        const uint64_t start = data0 + (fc[1] & 0xFFFFF000u), bytes = uint64_t(w) * h;  // DXT5: one byte per pixel
+        for (uint64_t b = 0; b + 16 <= bytes && start + b + 12 <= n; b += 16)
+          for (int j = 8; j < 12; ++j) mark[size_t(start + b) + j] = 1;
+      }
+      size_t words = 0, other = 0;
+      for (size_t i = 0; i + 1 < n; ++i)
+        if (mark[i] && ((i - data0) % 2 == 0)) words += ap[i] != got[i] || ap[i + 1] != got[i + 1];
+      for (size_t i = 0; i < n; ++i) other += !mark[i] && ap[i] != got[i];
+      std::printf("   diag %s: %zu endpoint words differ, %zu other bytes differ\n", name, words, other);
+    }
+  } catch (const std::exception& e) {
+    std::printf("   diag %s: stopped: %s\n", name, e.what());
+  } catch (...) {
+    std::printf("   diag %s: stopped: unknown exception\n", name);
+  }
+}
+
+// The four-thread pass calls Make only through this, so a pass that skips a call is visible in the count.
+static std::atomic<int> g_worker_calls[7];
+
+static std::optional<Bytes> WorkerMake(size_t i, const char* name, std::span<const uint8_t> src, std::string* why) {
+  g_worker_calls[i].fetch_add(1);
+  return cg::Make(name, src, why);
+}
+
+static void TestRealFiles() {
+  Group("real_files");
+  const std::optional<fs::path> game = EnvPath(L"DOA4_SUITS_GAME_DIR");
+  if (!game) {
+    std::printf("real files: SKIPPED (DOA4_SUITS_GAME_DIR unset)\n");
+    ++g_skipped;
+    return;
+  }
+  const fs::path afs_path = *game / "chrthree.afs";
+  const std::string afs_text = PathText(afs_path);
+  const std::shared_ptr<doa4::afs::FileSource> archive = doa4::afs::FileSource::Open(afs_path);
+  std::optional<doa4::afs::Toc> toc;
+  std::string toc_why;
+  if (archive) toc = doa4::afs::ReadToc(*archive, &toc_why);
+  std::string unusable;
+  if (!archive) unusable = "cannot be opened";
+  else if (!toc) unusable = "its TOC cannot be read: " + toc_why;
+  else if (toc->count < 43) unusable = "it has " + std::to_string(toc->count) + " entries, fewer than 43";
+  CKF(unusable.empty(), "real files: DOA4_SUITS_GAME_DIR is set but %s %s", afs_text.c_str(), unusable.c_str());
+  if (!unusable.empty()) return;
+  std::printf("   %s: %u entries\n", afs_text.c_str(), unsigned(toc->count));
+
+  const cc::SlotTable& slots = cc::Slots();
+  struct Entry {
+    bool read_ok = false;
+    Bytes bytes;
+    std::string sha1;
+  };
+  std::map<uint32_t, Entry> entries;  // each distinct entry read once, kept for both passes
+  std::optional<Bytes> made[7];       // pass 1's accepted results
+  const Bytes* source_of[7] = {};
+  double gen_total = 0;
+  const auto p1 = std::chrono::steady_clock::now();
+  double diag_time = 0;
+  for (size_t i = 0; i < slots.size(); ++i) {
+    const cc::SlotDef& d = slots[i];
+    const cg::SourceDef& s = cg::kSources[i];
+    CKF(std::string_view(s.slot) == d.name, "slot %zu: Slots() '%s', kSources '%s'", i, d.name, s.slot);
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool shared = entries.count(s.afs_entry) != 0;
+    Entry& e = entries[s.afs_entry];
+    if (!shared && s.afs_entry < toc->count) {
+      e.bytes.assign(toc->sizes[s.afs_entry], 0);
+      e.read_ok = archive->Read(toc->offsets[s.afs_entry], e.bytes.data(), e.bytes.size());
+      if (e.read_ok) e.sha1 = Sha1(e.bytes);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    CKF(e.read_ok, "%s: entry %u of %s (%u entries) cannot be read", d.name, unsigned(s.afs_entry), afs_text.c_str(),
+        unsigned(toc->count));
+    const bool size_ok = e.read_ok && e.bytes.size() == s.size;
+    const bool sha_ok = e.read_ok && e.sha1 == s.sha1;
+    CKF(size_ok, "%s: source entry %u size %zu, kSources %llu", d.name, unsigned(s.afs_entry), e.bytes.size(),
+        static_cast<unsigned long long>(s.size));
+    CKF(sha_ok, "%s: source entry %u SHA-1 %s, kSources %s", d.name, unsigned(s.afs_entry), e.sha1.c_str(), s.sha1);
+    if (!size_ok || !sha_ok) continue;  // no generator call on a source that failed its size or SHA-1
+    source_of[i] = &e.bytes;
+    std::string why;
+    const auto t2 = std::chrono::steady_clock::now();
+    std::optional<Bytes> got = cg::Make(d.name, Sp(e.bytes), &why);
+    const auto t3 = std::chrono::steady_clock::now();
+    CKF(got.has_value(), "%s: Make refused the retail source: %s", d.name, why.c_str());
+    if (!got) continue;
+    const std::string sha = Sha1(*got);
+    const auto t4 = std::chrono::steady_clock::now();
+    CKF(got->size() == d.size, "%s: made %zu bytes, Slots() %llu", d.name, got->size(),
+        static_cast<unsigned long long>(d.size));
+    CKF(sha == d.sha1, "%s: made SHA-1 %s, Slots() %s", d.name, sha.c_str(), d.sha1);
+    std::printf("   %s: source entry %u %zu bytes SHA-1 %s; made %zu bytes SHA-1 %s\n", d.name, unsigned(s.afs_entry),
+                e.bytes.size(), e.sha1.c_str(), got->size(), sha.c_str());
+    gen_total += Secs(t2, t3);
+    if (shared)
+      std::printf("   time %s: read+hash shared generate %.2f hash %.2f\n", d.name, Secs(t2, t3), Secs(t3, t4));
+    else
+      std::printf("   time %s: read+hash %.2f generate %.2f hash %.2f\n", d.name, Secs(t0, t1), Secs(t2, t3),
+                  Secs(t3, t4));
+    if (sha != d.sha1) {
+      const auto d0 = std::chrono::steady_clock::now();
+      Diagnose(d.name, *got, d.character != 16);
+      diag_time += Secs(d0, std::chrono::steady_clock::now());
+    }
+    made[i] = std::move(got);
+  }
+  std::printf("   time one thread, seven files: generate %.2f all %.2f\n", gen_total,
+              Secs(p1, std::chrono::steady_clock::now()) - diag_time);
+
+  // pass 2: the same calls on four workers taking slots from one counter; results kept per slot index
+  std::optional<Bytes> made2[7];
+  std::string fail2[7];
+  for (auto& c : g_worker_calls) c.store(0);
+  std::atomic<size_t> next{0};
+  const auto q0 = std::chrono::steady_clock::now();
+  {
+    std::vector<std::thread> workers;
+    for (int w = 0; w < 4; ++w)
+      workers.emplace_back([&]() {
+        for (;;) {
+          const size_t i = next.fetch_add(1);
+          if (i >= slots.size()) return;
+          if (!made[i]) continue;
+          try {
+            std::string why;
+            std::optional<Bytes> r = WorkerMake(i, slots[i].name, Sp(*source_of[i]), &why);
+            if (!r) fail2[i] = "refused: " + why;
+            made2[i] = std::move(r);
+          } catch (const std::exception& ex) {
+            fail2[i] = std::string("threw: ") + ex.what();
+          } catch (...) {
+            fail2[i] = "threw an unknown exception";
+          }
+        }
+      });
+    for (std::thread& t : workers) t.join();
+  }
+  std::printf("   time four threads, seven files: generate %.2f\n", Secs(q0, std::chrono::steady_clock::now()));
+  int eligible = 0;
+  for (size_t i = 0; i < slots.size(); ++i) {
+    if (!made[i]) continue;
+    ++eligible;
+    const int calls = g_worker_calls[i].load();
+    CKF(calls == 1, "%s: the workers called Make %d times", slots[i].name, calls);
+    size_t differ = 0, first = SIZE_MAX;
+    if (made2[i] && made2[i]->size() == made[i]->size())
+      for (size_t k = 0; k < made[i]->size(); ++k)
+        if ((*made2[i])[k] != (*made[i])[k]) {
+          if (first == SIZE_MAX) first = k;
+          ++differ;
+        }
+    CKF(made2[i].has_value() && made2[i]->size() == made[i]->size() && differ == 0,
+        "%s: four-thread result: %s; %zu bytes (pass 1 %zu), %zu differ, first at 0x%zX", slots[i].name,
+        fail2[i].empty() ? "made" : fail2[i].c_str(), made2[i] ? made2[i]->size() : size_t(0), made[i]->size(), differ,
+        first == SIZE_MAX ? size_t(0) : first);
+  }
+  std::printf("   four-thread pass: %d slots\n", eligible);
+#ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS pmc{};
+  pmc.cb = sizeof(pmc);
+  if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+    std::printf("   peak working set of the test process: %.1f MB\n", double(pmc.PeakWorkingSetSize) / 1048576.0);
+#endif
+}
+
 // A group that throws loses its remaining checks, never the other groups'.
 static void RunGroup(void (*fn)(), const char* name) {
   const auto t0 = std::chrono::steady_clock::now();
@@ -1481,9 +1862,12 @@ int main() {
   RunGroup(TestMakeSpartanSynthetic, "make_spartan_synthetic");
   RunGroup(TestMakeSpartanRefusals, "make_spartan_refusals");
   RunGroup(TestMakeByName, "make_by_name");
+  RunGroup(TestSourceTable, "source_table");
+  RunGroup(TestRealFiles, "real_files");
   std::printf("   (all groups: %.2f s)\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   PrintSites();
+  std::printf("skipped sections: %d\n", g_skipped);
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
     return 1;
