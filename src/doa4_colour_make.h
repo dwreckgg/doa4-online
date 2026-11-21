@@ -47,7 +47,7 @@ struct MakeOptions {
   std::function<uint64_t(const std::filesystem::path&)> free_bytes;  // the folder's free space (unset: not checked)
   std::string temp_tag;                                              // unique per process: digits and '-' only
   unsigned threads = 1;                                              // generator calls at once
-  std::function<void(size_t to_make)> on_start;                      // called once, only when to_make > 0
+  std::function<void(size_t to_make)> on_start;                      // called once, only when to_make > 0; may throw
 };
 // good + made + not_made = kSlotCount on every return. good: the slot had a good file before the call, or another
 // process made it meanwhile. notes: one per slot not made ("<slot>: <cause>", the table's order), then the others.
@@ -56,12 +56,18 @@ struct MakeReport {
   std::vector<std::string> notes;
   double seconds = 0;
 };
-// A slot is good when the manifest names a plain file for it that passes its size and SHA-1, or when no usable line
-// names it and <slot>.tpr in the folder passes. When every slot is good and has its line, nothing is touched. Otherwise:
+// A slot is good when the manifest names a plain file for it that passes its size and SHA-1, or when <slot>.tpr in the
+// folder passes, whatever its line says. When every slot is good through its own line, nothing is touched. Otherwise:
 // temporary files older than an hour that an earlier run left are deleted; every slot that is not good is made from its
 // source (free space, then the source's size and SHA-1, are checked first), written as <slot>.tpr; and the manifest is
-// written again, one line per slot whose file is good at that moment. `guest` is read on the calling thread only; only
-// `opt.generate` runs on other threads.
+// written again, one line per slot whose file is good at that moment (a line that names a good file is kept, any other
+// names <slot>.tpr). A manifest that is there and cannot be read at that moment is not replaced. `guest` is read on the
+// calling thread only; only `opt.generate` runs on other threads.
+// Notes: "<slot>: <cause>" with the cause one of "source missing", "source differs", "generator: <text>", "made file
+// fails its check", "no space", "cannot write: <text>", "not attempted: the call stopped first"; then, as they arise,
+// "sweep: <text>", "folder: cannot create: <text>", "on_start: <text>" (what on_start threw; the making goes on),
+// "manifest: <slot> not listed" (a good or made slot with no good file when the manifest was written), "manifest:
+// cannot write: <text>", "stopped: <text>" (what ended the call early).
 MakeReport MakeMissing(const SlotTable& slots, const std::array<MakeDef, kSlotCount>& defs,
                        const std::filesystem::path& folder, const std::filesystem::path& game_root,
                        const GuestBytes& guest, const MakeOptions& opt);

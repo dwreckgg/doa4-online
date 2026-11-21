@@ -63,11 +63,30 @@ bool Passes(const fs::path& folder, const SlotDef& d, const std::string& file) {
   return OpenChecked(folder, d, file, &why) != nullptr;
 }
 
-// The manifest's usable lines, or no line for any slot when there is no readable manifest.
-Parsed ReadManifest(const SlotTable& slots, const fs::path& folder) {
+// The manifest's usable lines. No line for any slot when there is no manifest, when it is over the size limit, or when
+// it cannot be read; *unreadable (may be null) tells the last case apart: manifest.txt is there, within the limit, and
+// could not be opened or read (another program holds it, for example).
+Parsed ReadManifest(const SlotTable& slots, const fs::path& folder, bool* unreadable) {
+  if (unreadable) *unreadable = false;
+  Parsed none{std::vector<std::string>(kSlotCount), std::vector<bool>(kSlotCount, false)};
+  const fs::path path = folder / "manifest.txt";
+  std::error_code ec;
+  const fs::file_status status = fs::status(path, ec);
+  if (status.type() == fs::file_type::not_found) return none;
+  const uint64_t size = ec ? 0 : fs::file_size(path, ec);
+  if (!ec && size > kManifestLimit) return none;
   std::string text;
-  if (!ReadSmallFile(folder / "manifest.txt", kManifestLimit, &text)) {
-    return Parsed{std::vector<std::string>(kSlotCount), std::vector<bool>(kSlotCount, false)};
+  bool read = false;
+  if (!ec) {
+    std::ifstream in(path, std::ios::binary);
+    if (in) {
+      text.assign(size_t(size), '\0');
+      read = size == 0 || bool(in.read(text.data(), std::streamsize(size)));
+    }
+  }
+  if (!read) {
+    if (unreadable) *unreadable = true;
+    return none;
   }
   std::vector<std::string> ignored;
   return ParseManifest(slots, std::move(text), &ignored);
@@ -230,15 +249,19 @@ class Sources {
 
 void Body(const SlotTable& slots, const std::array<MakeDef, kSlotCount>& defs, const fs::path& folder,
           const fs::path& game_root, const GuestBytes& guest, const MakeOptions& opt, Work& w) {
-  // Which slots are good, and which of those the manifest names. Every file opened for this is closed again here.
-  const Parsed first = ReadManifest(slots, folder);
+  // Which slots are good, and which of those the manifest names. A slot is good when its usable line names a file that
+  // passes, or when <slot>.tpr passes whatever its line says (then only the manifest is owed). A manifest that cannot
+  // be read counts as no line here. Every file opened for this is closed again here.
+  const Parsed first = ReadManifest(slots, folder, nullptr);
   size_t to_make = 0, unnamed = 0;
   for (size_t i = 0; i < kSlotCount; ++i) {
+    const std::string own = SlotFile(slots[i]);
     const bool line = !first.file[i].empty();
-    const bool good = Passes(folder, slots[i], line ? first.file[i] : SlotFile(slots[i]));
+    const bool by_line = line && Passes(folder, slots[i], first.file[i]);
+    const bool good = by_line || ((!line || first.file[i] != own) && Passes(folder, slots[i], own));
     if (good) w.state[i] = SlotState::kGood;
     to_make += good ? 0 : 1;
-    unnamed += (good && line) ? 0 : 1;
+    unnamed += by_line ? 0 : 1;
   }
   if (to_make == 0 && unnamed == 0) return;  // every slot good and named: nothing is touched
 
@@ -257,7 +280,16 @@ void Body(const SlotTable& slots, const std::array<MakeDef, kSlotCount>& defs, c
   }
   Sweep(slots, folder, &w.other);
 
-  if (to_make > 0 && opt.on_start) opt.on_start(to_make);
+  // A notification: what it throws becomes a note and the making goes on.
+  if (to_make > 0 && opt.on_start) {
+    try {
+      opt.on_start(to_make);
+    } catch (const std::exception& e) {
+      w.other.push_back(std::string("on_start: ") + e.what());
+    } catch (...) {
+      w.other.push_back("on_start: unknown exception");
+    }
+  }
 
   // On this thread, in table order: the space check, then the source and its check.
   std::vector<Job> jobs;
@@ -362,19 +394,34 @@ void Body(const SlotTable& slots, const std::array<MakeDef, kSlotCount>& defs, c
 
   // The manifest, read again just before it is replaced: one line per slot whose file is good on disk now. A usable
   // line that names a good file is kept (another process may have written it); any other slot's line names <slot>.tpr.
+  // A manifest that is there and cannot be read now is NOT replaced: one built from "no lines" would drop every line
+  // that names a good file under another name. A slot that counts as good or made and has no file that passes at this
+  // moment gets no line, and a note.
   try {
-    const Parsed now = ReadManifest(slots, folder);
+    bool unreadable = false;
+    const Parsed now = ReadManifest(slots, folder, &unreadable);
     const Parsed& lines = now;
+    if (unreadable) {
+      w.other.push_back("manifest: cannot write: the current one cannot be read");
+      return;
+    }
     std::string text = "# colour costume files, one \"<slot> <file>\" line each; the game makes a missing file again\n";
+    std::vector<std::string> not_listed;
     for (size_t i = 0; i < kSlotCount; ++i) {
+      const std::string own = SlotFile(slots[i]);
       std::string file;
       if (!lines.file[i].empty() && Passes(folder, slots[i], lines.file[i])) {
         file = lines.file[i];
-      } else if (Passes(folder, slots[i], SlotFile(slots[i]))) {
-        file = SlotFile(slots[i]);
+      } else if (lines.file[i] != own && Passes(folder, slots[i], own)) {
+        file = own;
       }
-      if (!file.empty()) text += std::string(slots[i].name) + " " + file + "\n";
+      if (!file.empty()) {
+        text += std::string(slots[i].name) + " " + file + "\n";
+      } else if (w.state[i] == SlotState::kGood || w.state[i] == SlotState::kMade) {
+        not_listed.push_back(std::string("manifest: ") + slots[i].name + " not listed");
+      }
     }
+    for (std::string& note : not_listed) w.other.push_back(std::move(note));
     std::string error;
     bool rename_refused = false;
     if (!WriteThenRename(folder / PathFromUtf8("manifest.txt." + tag + ".tmp"), folder / "manifest.txt", text.data(),
@@ -444,7 +491,7 @@ MakeReport MakeMissing(const SlotTable& slots, const std::array<MakeDef, kSlotCo
     // outside the program (system text, the generator's reason, an exception's) goes through Printable.
     for (size_t i = 0; i < kSlotCount; ++i) {
       if (w.state[i] == SlotState::kGood || w.state[i] == SlotState::kMade) continue;
-      const std::string cause = w.cause[i].empty() ? std::string("cannot write: the call stopped first") : w.cause[i];
+      const std::string cause = w.cause[i].empty() ? std::string("not attempted: the call stopped first") : w.cause[i];
       report.notes.push_back(Printable(std::string(slots[i].name) + ": " + cause));
     }
     for (const std::string& note : w.other) report.notes.push_back(Printable(note));

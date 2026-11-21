@@ -1258,7 +1258,9 @@ static MakeOptions Opt(Gen& gen, std::vector<size_t>* starts = nullptr) {
   if (starts) o.on_start = [starts](size_t n) { starts->push_back(n); };
   return o;
 }
-// MakeMissing in a statement of its own. An exception that escapes it is a failed check (one check per call).
+static size_t SlotNotes(const MakeReport& r);
+// MakeMissing in a statement of its own. An exception that escapes it is a failed check, and so is a report whose
+// notes do not hold exactly one note per slot not made (two checks per call).
 static MakeReport RunMake(const World& w, FakeGuest& g, const MakeOptions& o, const SlotTable& t = TestSlots(),
                           const Defs& d = TestDefs()) {
   MakeReport r;
@@ -1269,6 +1271,7 @@ static MakeReport RunMake(const World& w, FakeGuest& g, const MakeOptions& o, co
     escaped = true;
   }
   CHECK(!escaped);
+  CHECK(SlotNotes(r) == r.not_made);  // one note names each slot that was not made, and no other slot
   return r;
 }
 static void PrintMake(const char* test, const MakeReport& r) {
@@ -1999,55 +2002,217 @@ static void TestManifestWriteFails() {
   CheckSlots(s, {});
 }
 
-// Nothing escapes MakeMissing (RunMake's own check), the report still counts seven slots, the thrown text is in a note,
-// and Load afterwards is as it would have been.
+// Nothing escapes MakeMissing (RunMake's own check). A throwing free_bytes stops the call: seven "not attempted" notes
+// and the thrown text; a throwing on_start does not stop it. Load afterwards is as it would have been.
 static void TestNothingEscapes() {
   std::printf("-- TestNothingEscapes\n");
   FakeGuest g = PlantedGuest();
-  auto notes_naming = [](const MakeReport& r, const std::string& part) {
-    size_t n = 0;
-    for (const std::string& note : r.notes) n += Contains(note, part) ? 1 : 0;
-    return n;
-  };
   {
+    // free_bytes throws: the call stops there. Every slot not decided by then is "not attempted" (in the table's order),
+    // and one note carries the thrown text.
     World w;
-    RemoveFiles(w, {1, 2});
+    RemoveAllFiles(w);
     Gen gen;
     MakeOptions o = Opt(gen);
     o.free_bytes = [](const fs::path&) -> uint64_t { throw std::runtime_error("space boom"); };
     const MakeReport r = RunMake(w, g, o);
     PrintMake("TestNothingEscapes (free_bytes)", r);
-    CHECK(r.good == 5 && r.good + r.made + r.not_made == kSlotCount);
-    CHECK(notes_naming(r, "space boom") >= 1);
+    std::vector<std::string> want;
+    for (size_t i = 0; i < kSlotCount; ++i) want.push_back(SlotName(i) + ": not attempted: the call stopped first");
+    want.push_back("stopped: space boom");
+    CHECK(r.good == 0 && r.made == 0 && r.not_made == 7);
+    CHECK(r.notes == want);
+    CHECK(gen.Total() == 0);
     const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
     CHECK(s.usable && s.slots.size() == kSlotCount);
   }
   {
+    // on_start is a notification: what it throws becomes one note and the making goes on.
     World w;
-    RemoveFiles(w, {1, 2});
+    RemoveAllFiles(w);
     Gen gen;
     MakeOptions o = Opt(gen);
     o.on_start = [](size_t) { throw std::runtime_error("start boom"); };
     const MakeReport r = RunMake(w, g, o);
     PrintMake("TestNothingEscapes (on_start)", r);
-    CHECK(r.good == 5 && r.good + r.made + r.not_made == kSlotCount);
-    CHECK(notes_naming(r, "start boom") >= 1);
+    CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);
+    CHECK(r.notes == std::vector<std::string>{"on_start: start boom"});
+    CHECK(GoodFiles(w) == 7);
     const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
-    CHECK(s.usable && s.slots.size() == kSlotCount);
+    CHECK(s.usable && s.slots.size() == kSlotCount && s.notes.empty());
   }
   {
     World w;
-    RemoveFiles(w, {1, 2});
+    RemoveAllFiles(w);
     Gen gen;
     MakeOptions o = Opt(gen);
-    o.on_start = [](size_t) { throw 7; };  // not a std::exception
+    o.on_start = [](size_t) { throw 7; };  // not a std::exception: no text to carry
     const MakeReport r = RunMake(w, g, o);
     PrintMake("TestNothingEscapes (on_start, an int)", r);
-    CHECK(r.good == 5 && r.good + r.made + r.not_made == kSlotCount);
-    CHECK(!r.notes.empty());
+    CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);
+    CHECK(r.notes.size() == 1 && StartsWith(RNote(r, 0), "on_start: "));
     const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
-    CHECK(s.usable && s.slots.size() == kSlotCount);
+    CHECK(s.usable && s.slots.size() == kSlotCount && s.notes.empty());
   }
+}
+
+// R1: the manifest that is there cannot be read at the moment it is to be replaced (another program holds it): it is
+// not replaced. Excluded wrong version: a manifest written from "no lines", which drops the line of a good file kept
+// under another name. The hold is taken inside the generator, so the first read of the call still worked. First with
+// no sharing at all, then with delete sharing only. Measured on Windows 11: either hold also refuses the replacement
+// itself, so here the unchanged-bytes checks hold for the wrong version too; what separates the two is the note (the
+// wrong version tries the write and reports the system's refusal). The wrong version loses lines only when the hold
+// ends between its read and its rename, which no fixture here can place.
+static void TestManifestRereadFails() {
+  std::printf("-- TestManifestRereadFails\n");
+  FakeGuest g = PlantedGuest();
+  std::vector<std::string> start = StdLines();
+  start[0] = "alpha_red custom_red.tpr";
+  const std::string start_text = ManifestOf(start, "\n");
+  const auto arrange = [&start_text](const World& w) {
+    fs::rename(w.File(0), w.colours / "custom_red.tpr");
+    RemoveFiles(w, {1, 5});
+    WriteText(w.colours / "manifest.txt", start_text);
+  };
+  for (DWORD share : {DWORD(0), DWORD(FILE_SHARE_DELETE)}) {
+    World w;
+    arrange(w);
+    HANDLE held = INVALID_HANDLE_VALUE;
+    Gen gen;
+    gen.post = [&](size_t, Made&, std::string*) {
+      if (held != INVALID_HANDLE_VALUE) return;
+      held = CreateFileW((w.colours / "manifest.txt").c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+    };
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestManifestRereadFails", r);
+    CHECK(held != INVALID_HANDLE_VALUE);  // precondition: the manifest was held when it was read again
+    Release(held);
+    CHECK(r.good == 5 && r.made == 2 && r.not_made == 0);  // the two made files still count as made
+    CHECK(r.notes == std::vector<std::string>{"manifest: cannot write: the current one cannot be read"});
+    CHECK(Text(w.colours / "manifest.txt") == start_text);
+    CHECK(Contains(Text(w.colours / "manifest.txt"), "alpha_red custom_red.tpr\n"));
+    CHECK(ReadAll(w.File(1)) == ColourBytes(1) && ReadAll(w.File(5)) == ColourBytes(5));
+    CHECK(TmpCount(w.colours) == 0);
+  }
+  {
+    // Control: the same world without the hold: a manifest of seven lines that still names custom_red.tpr.
+    World w;
+    arrange(w);
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    CHECK(r.good == 5 && r.made == 2 && r.not_made == 0 && r.notes.empty());
+    std::vector<std::string> want = StdLines();
+    want[0] = "alpha_red custom_red.tpr";
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want);
+  }
+}
+
+// R2: a slot that counts as good or made, but has no file that passes when the manifest is written, gets no line and
+// one note that says so; the counts stay. Here a slot that was good at the start loses its file while another slot is
+// being made. Control: without the loss, no such note.
+static void TestGoodSlotLosesItsFile() {
+  std::printf("-- TestGoodSlotLosesItsFile\n");
+  FakeGuest g = PlantedGuest();
+  for (bool lose : {true, false}) {
+    World w;
+    RemoveFiles(w, {4});
+    Gen gen;
+    gen.post = [&](size_t i, Made&, std::string*) {
+      if (!lose || i != 4) return;
+      std::error_code ec;
+      fs::remove(w.File(2), ec);
+    };
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestGoodSlotLosesItsFile", r);
+    std::vector<std::string> want_notes;
+    std::vector<std::string> want_lines = StdLines();
+    if (lose) {
+      want_notes.push_back("manifest: alpha_lilac not listed");
+      want_lines.erase(want_lines.begin() + 2);
+    }
+    CHECK(fs::exists(w.File(2)) == !lose);                 // precondition: the file went only in the first pass
+    CHECK(r.good == 6 && r.made == 1 && r.not_made == 0);  // the counts are as they were
+    CHECK(r.notes == want_notes);
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want_lines);
+  }
+}
+
+// R3: a slot whose usable line names a failing file is still good when <slot>.tpr passes: only the manifest is owed.
+// One line names a file with other bytes, one a file that is not there. With no free space at all the result is the
+// same: nothing is made, so nothing needs space.
+static void TestLineNamesFailingFileButDefaultIsGood() {
+  std::printf("-- TestLineNamesFailingFileButDefaultIsGood\n");
+  FakeGuest g = PlantedGuest();
+  for (bool no_space : {false, true}) {
+    World w;
+    std::vector<uint8_t> bad = ColourBytes(1);
+    bad[3] ^= 0x11;
+    Write(w.colours / "bad.tpr", bad);
+    std::vector<std::string> start = StdLines();
+    start[1] = "alpha_blue bad.tpr";
+    start[5] = "spartan_h2_orange gone.tpr";
+    WriteText(w.colours / "manifest.txt", ManifestOf(start, "\n"));
+    const std::map<std::string, FileState> before = Snapshot(w.colours);
+    Gen gen;
+    std::vector<size_t> starts;
+    MakeOptions o = Opt(gen, &starts);
+    if (no_space) o.free_bytes = [](const fs::path&) { return uint64_t(0); };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestLineNamesFailingFileButDefaultIsGood", r);
+    const std::map<std::string, FileState> after = Snapshot(w.colours);
+    CHECK(r.good == 7 && r.made == 0 && r.not_made == 0);
+    CHECK(r.notes.empty());
+    CHECK(gen.Total() == 0);
+    CHECK(starts.empty());
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == StdLines());  // both lines now name <slot>.tpr
+    size_t kept = 0;
+    for (size_t i = 0; i < kSlotCount; ++i) kept += Kept(before, after, SlotName(i) + ".tpr") ? 1 : 0;
+    CHECK(kept == kSlotCount);  // no file was written again
+  }
+}
+
+// The temporary file's name carries the call's temp_tag: a DIRECTORY planted at exactly that name stops that slot's
+// write (and stays, with its file); a call with another tag makes the slot. Excluded wrong version: a temporary name
+// that ignores temp_tag.
+static void TestTempTagNamesTheTemporary() {
+  std::printf("-- TestTempTagNamesTheTemporary\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveFiles(w, {1, 4});
+  const fs::path planted = w.colours / "alpha_blue.tpr.31-7.tmp";
+  const std::vector<uint8_t> junk = Content(5, 30);
+  fs::create_directories(planted);
+  Write(planted / "keep.bin", junk);
+  CHECK(fs::is_directory(planted) && ReadAll(planted / "keep.bin") == junk);
+  Gen gen;
+  MakeOptions o = Opt(gen);
+  o.temp_tag = "31-7";
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestTempTagNamesTheTemporary", r);
+  CHECK(r.good == 5 && r.made == 1 && r.not_made == 1);
+  CHECK(r.notes.size() == 1 && StartsWith(Cause(r, 1), "cannot write: "));
+  CHECK(gen.Calls(1) == 1);  // it was made: only its temporary could not be written
+  CHECK(!fs::exists(w.File(1)));
+  CHECK(fs::is_directory(planted) && ReadAll(planted / "keep.bin") == junk);
+  CHECK(ReadAll(w.File(4)) == ColourBytes(4));
+  Gen gen2;
+  MakeOptions o2 = Opt(gen2);
+  o2.temp_tag = "31-8";
+  const MakeReport r2 = RunMake(w, g, o2);
+  PrintMake("TestTempTagNamesTheTemporary (another tag)", r2);
+  CHECK(r2.good == 6 && r2.made == 1 && r2.not_made == 0 && r2.notes.empty());
+  CHECK(ReadAll(w.File(1)) == ColourBytes(1));
+  CHECK(fs::is_directory(planted) && ReadAll(planted / "keep.bin") == junk);
 }
 
 // Two makers (two processes at one lobby start) on one folder, each with its own temp_tag. Both are held inside their
@@ -2106,6 +2271,7 @@ static void TestTwoMakersOneFolder() {
   for (int m = 0; m < 2; ++m) {
     CHECK(gens[m].Total() == int(kSlotCount));
     CHECK(SlotNotes(reports[m]) == 0);  // no note names a slot as not made
+    CHECK(SlotNotes(reports[m]) == reports[m].not_made);  // RunMake's check, for these calls made outside it
     CHECK(reports[m].not_made == 0 && reports[m].good + reports[m].made == kSlotCount);
   }
   CHECK(GoodFiles(w) == 7);
@@ -2165,7 +2331,12 @@ static void TestThreadsSameResult() {
                                                "spartan_h3_pink: source differs", "spartan_h2_orange: no space",
                                                "spartan_h2_cyan: no space"};
   CHECK(one.order == table_order);                              // one worker: the generator ran in table order
-  CHECK(four.order.size() == 4 && four.order != table_order);   // four: the slots really finished out of table order
+  // Precondition: on four workers the generator of slot 2 finished before the generator of slot 0 (the two refusing
+  // slots), so notes kept in the order they arise would name slot 2 first.
+  const auto finished_at = [&four](size_t slot) {
+    return size_t(std::find(four.order.begin(), four.order.end(), slot) - four.order.begin());
+  };
+  CHECK(four.order.size() == 4 && finished_at(2) < finished_at(0) && finished_at(0) < four.order.size());
   CHECK(one.r.good == 0 && one.r.made == 2 && one.r.not_made == 5);
   CHECK(one.r.notes == want_notes);
   CHECK(four.r.notes == want_notes);  // table order, whatever finished first
@@ -2334,6 +2505,10 @@ int main() {
   TestRenameOntoHeldGoodFile();
   TestManifestWriteFails();
   TestNothingEscapes();
+  TestManifestRereadFails();
+  TestGoodSlotLosesItsFile();
+  TestLineNamesFailingFileButDefaultIsGood();
+  TestTempTagNamesTheTemporary();
   TestTwoMakersOneFolder();
   TestThreadsSameResult();
   TestManifestKeepsGoodNames();

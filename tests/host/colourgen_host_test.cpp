@@ -38,8 +38,9 @@
 //   real_make_missing       gated on DOA4_SUITS_GAME_DIR and DOA4_COLOURGEN_UD (a test user-data folder; the game
 //                           folder set and this one unset or not creatable: one failed check):
 //                           colour_costumes::MakeMissing makes the seven files into
-//                           <DOA4_COLOURGEN_UD>/colour_costumes, Load serves them, a second call touches nothing,
-//                           two deleted files are made again; the folder is removed at the end
+//                           <DOA4_COLOURGEN_UD>/colourgen_make_test/colour_costumes, Load serves them, a second
+//                           call touches nothing, two deleted files are made again; only
+//                           <DOA4_COLOURGEN_UD>/colourgen_make_test is removed (at the start and at the end)
 // Every group prints its run time. No byte of any game file is stored; only real_make_missing writes files (into its
 // own folder, removed when it ends). The last four lines:
 // GREEN-SITES and RED-SITES (check lines that ran without and with a failure: the mutation probe census),
@@ -1900,7 +1901,8 @@ static void TestMakePerturbedFp() {
 // real_make_missing: gated on DOA4_SUITS_GAME_DIR as real_files is (unset: this group prints SKIPPED and adds no
 // skipped section of its own), plus DOA4_COLOURGEN_UD, a test user-data folder (game folder set but this unset or not
 // creatable: one failed check). colour_costumes::MakeMissing with the real slot table, MakeDefs(), Make, the folder's
-// real free space and four workers makes the seven files into <DOA4_COLOURGEN_UD>/colour_costumes from the retail
+// real free space and four workers makes the seven files into <DOA4_COLOURGEN_UD>/colourgen_make_test/colour_costumes
+// (the group removes only <DOA4_COLOURGEN_UD>/colourgen_make_test, never <DOA4_COLOURGEN_UD>/colour_costumes) from the retail
 // chrthree.afs (found through a planted file table: the source files at kSources' entries, the slots' own entries in
 // avt.afs); Load then serves seven files; a second call makes nothing and touches nothing; with two files deleted a
 // third call makes those two. The folder is removed at the end: the made files stay nowhere. Times are printed, never
@@ -1921,16 +1923,28 @@ static void TestRealMakeMissing() {
   CKF(ud_ok, "real make missing: DOA4_SUITS_GAME_DIR is set but DOA4_COLOURGEN_UD is %s",
       ud ? "not a folder that can be created" : "unset");
   if (!ud_ok) return;
-  const fs::path folder = *ud / "colour_costumes";
+  // This group's own folder under the test user-data folder: it is the only thing removed, at the start and at the
+  // end. <DOA4_COLOURGEN_UD>/colour_costumes (a real colour folder, if the variable names a real user-data folder) is
+  // never touched.
+  const fs::path base = *ud / "colourgen_make_test";
+  const fs::path folder = base / "colour_costumes";
   struct Cleanup {  // the made files stay nowhere, whatever ends this group
     fs::path path;
     ~Cleanup() {
       std::error_code e;
       fs::remove_all(path, e);
     }
-  } cleanup{folder};
-  fs::remove_all(folder, ec);
-  CK(!fs::exists(folder));
+  } cleanup{base};
+  fs::remove_all(base, ec);
+  CK(!fs::exists(base));
+  // One note per slot not made, and no note that names another slot (the colour costumes runner's check on every call).
+  const auto slot_notes = [](const cc::MakeReport& r) {
+    size_t n = 0;
+    for (const std::string& note : r.notes) {
+      for (const cc::SlotDef& d : cc::Slots()) n += note.rfind(std::string(d.name) + ": ", 0) == 0 ? 1 : 0;
+    }
+    return n;
+  };
 
   const cc::SlotTable& slots = cc::Slots();
   std::map<uint32_t, uint8_t> mem;
@@ -1981,6 +1995,7 @@ static void TestRealMakeMissing() {
   // (1) the folder is absent: seven made
   const cc::MakeReport r1 = cc::MakeMissing(slots, cc::MakeDefs(), folder, *game, guest, opt);
   print("first call", r1);
+  CK(slot_notes(r1) == r1.not_made);
   CK(r1.good == 0 && r1.made == 7 && r1.not_made == 0);
   CK(r1.notes.empty());
   CK(calls.load() == 7);
@@ -1998,6 +2013,7 @@ static void TestRealMakeMissing() {
   calls.store(0);
   const cc::MakeReport r2 = cc::MakeMissing(slots, cc::MakeDefs(), folder, *game, guest, opt);
   print("second call", r2);
+  CK(slot_notes(r2) == r2.not_made);
   CK(r2.good == 7 && r2.made == 0 && r2.not_made == 0 && r2.notes.empty());
   CK(calls.load() == 0);
   CK(before.size() == 8 && times() == before);
@@ -2006,11 +2022,12 @@ static void TestRealMakeMissing() {
   CK(removed);
   const cc::MakeReport r3 = cc::MakeMissing(slots, cc::MakeDefs(), folder, *game, guest, opt);
   print("third call", r3);
+  CK(slot_notes(r3) == r3.not_made);
   CK(r3.good == 5 && r3.made == 2 && r3.not_made == 0 && r3.notes.empty());
   CK(calls.load() == 2);
   CK(starts.size() == 2 && starts[1] == 2);
-  fs::remove_all(folder, ec);
-  CK(!fs::exists(folder));
+  fs::remove_all(base, ec);
+  CK(!fs::exists(base));
 }
 
 // A group that throws loses its remaining checks, never the other groups'.
