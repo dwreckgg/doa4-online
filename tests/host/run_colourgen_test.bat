@@ -1,0 +1,53 @@
+@echo off
+rem Builds and runs the colour generator host test (the Alpha-152 recolour, doa4_colourgen_alpha.cpp) with clang-cl (no
+rem CMake), under the converter's floating-point flags for every translation unit (x86-64-v3 with FMA switched off, no
+rem contraction, no fast-math, no errno). The generator object and the converter objects it links (num, tpr) go to
+rem %TEMP%\doa4_colourgen_test\obj\, where suitconv_fp_scan.py scans them before the test runs (the colourgen object is
+rem also named explicitly: the scan's folder search picks only doa4_suitconv_* objects); the test's own object and
+rem the SDK-side sources it links (gamefiles for SHA-1, xdvdfs) go to ...\testobj\.
+rem DOA4_COLOURGEN_OUT, if set, replaces that output folder (the mutation probes build their copies elsewhere).
+rem Prints "PASSED: N checks, 0 failures" (or FAILED) as its last line.
+setlocal
+if not defined DOA4_VSDEVCMD set "DOA4_VSDEVCMD=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\VsDevCmd.bat"
+call "%DOA4_VSDEVCMD%" -arch=amd64 -host_arch=amd64 >nul 2>&1
+if not defined DOA4_LLVM_BIN set "DOA4_LLVM_BIN=C:\Program Files\LLVM\bin"
+set "PATH=%DOA4_LLVM_BIN%;%PATH%"
+set "OUT=%TEMP%\doa4_colourgen_test"
+if defined DOA4_COLOURGEN_OUT set "OUT=%DOA4_COLOURGEN_OUT%"
+if not exist "%OUT%\obj" mkdir "%OUT%\obj"
+if not exist "%OUT%\testobj" mkdir "%OUT%\testobj"
+set "SRC=%~dp0..\..\src"
+set FPFLAGS=/clang:-march=x86-64-v3 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
+set CXXFLAGS=/nologo /std:c++latest /EHsc /O2 %FPFLAGS%
+set "LOG=%OUT%\colourgen_build.log"
+for %%f in (doa4_suitconv_num doa4_suitconv_tpr doa4_colourgen_alpha) do if exist "%OUT%\obj\%%f.obj" del /q "%OUT%\obj\%%f.obj"
+for %%f in (doa4_gamefiles doa4_xdvdfs colourgen_host_test) do if exist "%OUT%\testobj\%%f.obj" del /q "%OUT%\testobj\%%f.obj"
+if exist "%OUT%\colourgen_host_test.exe" del /q "%OUT%\colourgen_host_test.exe"
+type nul > "%LOG%"
+for %%f in (doa4_suitconv_num doa4_suitconv_tpr doa4_colourgen_alpha) do (
+  clang-cl %CXXFLAGS% /c "%SRC%\%%f.cpp" /Fo"%OUT%\obj\%%f.obj" >> "%LOG%" 2>&1 || goto failed
+)
+clang-cl %CXXFLAGS% /c "%SRC%\doa4_gamefiles.cpp" /Fo"%OUT%\testobj\doa4_gamefiles.obj" >> "%LOG%" 2>&1
+if errorlevel 1 goto failed
+clang-cl %CXXFLAGS% /c "%SRC%\doa4_xdvdfs.cpp" /Fo"%OUT%\testobj\doa4_xdvdfs.obj" >> "%LOG%" 2>&1
+if errorlevel 1 goto failed
+clang-cl %CXXFLAGS% /c "%~dp0colourgen_host_test.cpp" /Fo"%OUT%\testobj\colourgen_host_test.obj" >> "%LOG%" 2>&1
+if errorlevel 1 goto failed
+clang-cl /nologo "%OUT%\testobj\colourgen_host_test.obj" "%OUT%\obj\doa4_suitconv_num.obj" "%OUT%\obj\doa4_suitconv_tpr.obj" "%OUT%\obj\doa4_colourgen_alpha.obj" "%OUT%\testobj\doa4_gamefiles.obj" "%OUT%\testobj\doa4_xdvdfs.obj" bcrypt.lib /Fe"%OUT%\colourgen_host_test.exe" >> "%LOG%" 2>&1
+if errorlevel 1 goto failed
+rem The FP scan of every generator and converter object comes first: any FMA instruction or C runtime math call (or a
+rem scan that cannot run) fails the runner with the default summary shape, as one failed check, and the test does not run.
+py -3 -I "%~dp0suitconv_fp_scan.py" "%OUT%\obj" "%OUT%\obj\doa4_colourgen_alpha.obj" > "%OUT%\colourgen_scan.log" 2>&1
+if errorlevel 1 goto scanfailed
+type "%OUT%\colourgen_scan.log"
+"%OUT%\colourgen_host_test.exe"
+exit /b %errorlevel%
+:scanfailed
+type "%OUT%\colourgen_scan.log"
+echo FP SCAN FAILED: a generator or converter object has an FMA instruction or a C runtime math call, or the scan could not run
+echo FAILED: 1 checks, 1 failures
+exit /b 1
+:failed
+type "%LOG%"
+echo BUILD FAILED
+exit /b 1
