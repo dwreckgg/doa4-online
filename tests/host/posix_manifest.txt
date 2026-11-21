@@ -1,0 +1,105 @@
+# The host tests the Linux job compiles and runs (tools/run_host_tests_posix.py reads this file; the job is
+# .github/workflows/linux-build.yml). Every tests/host/run_<name>_test.bat is on exactly one line here:
+#
+#   <name> | <sources, space separated, relative to the repository root> | <extra flags>     the test runs
+#   !<name> | <reason>                                                                     the test is left out
+#
+# <name> is the middle part of run_<name>_test.bat. A run line is compiled in the repository root with
+#   <cxx> -std=c++23 -O2 <flags> <sources> -o <tmp>/<name>
+# and its program is started in tests/host. In the flags, {SDK} stands for the SDK folder (REXSDK_DIR).
+#
+# A test has a run line when its sources, followed through their local #include "..." lines, reach no Windows header
+# outside a block compiled only on Windows (#ifdef _WIN32, #if defined(_WIN32), the #else of #ifndef _WIN32), and its
+# .bat is one clang-cl line that names only files of this repository. Its sources are that line's .cpp files. Its flags
+# are that line's /D options as -D, with /D_MSVC_STL_HARDENING=1 as -D_GLIBCXX_ASSERTIONS and the Windows-only
+# /D_WIN32_WINNT, /DWIN32_LEAN_AND_MEAN and /DNOMINMAX dropped, and a repository include folder as -I <folder>.
+# tests/tools/test_release_tools.py checks all of this against the .bat files and the sources, so a line here that
+# no longer matches its .bat fails that suite.
+#
+# A left-out reason starts with one of:
+#   windows header: <file>:<line> <header>   the first Windows header the sources reach outside such a block
+#   needs the SDK: <what the .bat names>     the .bat names %REXSDK_DIR% or a folder outside the repository
+#   needs game files: <what>
+#   other: <why>                             (a multi-step build: compile loops, object and link steps, a Python step)
+#
+# Notes:
+# - The Linux job is x86-64 only: cpu_info's non-Windows Read() uses <cpuid.h>, and there is no arm64 path.
+# - cpu_info counts cores from /sys/devices/system/cpu, with `logical` from sysconf(_SC_NPROCESSORS_ONLN).
+# - updater_refusal's check 7 needs glibc 2.28 or newer, for renameat2.
+# - updater_refusal is the one run line that takes a header from the SDK: src/doa4_updater.cpp includes
+#   "picosha2/picosha2.h" when it is not built for Windows, so its line adds -pthread -I {SDK}/thirdparty.
+# - np_transport's .bat builds with /std:c++20, and also compiles src/net/np_upnp.cpp alone as a build check; the
+#   Linux line uses -std=c++23 like every other and has no such second compile.
+
+afs_overlay | tests/host/afs_overlay_host_test.cpp src/doa4_afs_overlay.cpp |
+alpha_select | tests/host/alpha_select_host_test.cpp |
+backup | tests/host/backup_host_test.cpp src/doa4_backup.cpp |
+costumes | tests/host/costumes_host_test.cpp src/doa4_costumes.cpp src/doa4_suits_manifest.cpp src/doa4_tweaks.cpp |
+cpu_info | tests/host/cpu_info_host_test.cpp |
+discord | tests/host/discord_host_test.cpp src/doa4_discord_proto.cpp |
+display | tests/host/display_host_test.cpp src/doa4_display.cpp |
+extras | tests/host/extras_host_test.cpp src/doa4_extras.cpp src/doa4_unlocks.cpp src/doa4_backup.cpp |
+graphics | tests/host/graphics_host_test.cpp src/doa4_graphics.cpp |
+idle_wait | tests/host/idle_wait_host_test.cpp |
+intro_skip | tests/host/intro_skip_host_test.cpp src/doa4_intro_skip.cpp |
+lagtrace | tests/host/lagtrace_host_test.cpp src/doa4_lagtrace.cpp |
+move_guard | tests/host/move_guard_host_test.cpp |
+np_core | tests/host/np_core_host_test.cpp src/net/np_core.cpp |
+np_lanes | tests/host/np_lanes_host_test.cpp src/net/np_lanes_pure.cpp | -D_GLIBCXX_ASSERTIONS
+np_restart | tests/host/np_restart_host_test.cpp src/net/np_restart.cpp src/net/np_handoff.cpp src/net/np_rules.cpp src/net/np_wire.cpp src/doa4_tweaks.cpp | -D_GLIBCXX_ASSERTIONS
+np_rules | tests/host/np_rules_host_test.cpp src/net/np_rules.cpp src/net/np_wire.cpp | -D_GLIBCXX_ASSERTIONS
+np_stage_wait | tests/host/np_stage_wait_host_test.cpp | -D_GLIBCXX_ASSERTIONS
+np_start_rules | tests/host/np_start_rules_host_test.cpp src/net/np_start_rules.cpp | -D_GLIBCXX_ASSERTIONS
+np_title_mask | tests/host/np_title_mask_host_test.cpp | -D_GLIBCXX_ASSERTIONS
+np_transport | tests/host/np_transport_host_test.cpp src/net/np_transport.cpp src/net/np_wire.cpp src/net/np_rules.cpp | -D_GLIBCXX_ASSERTIONS
+np_vsm | tests/host/np_vsm_host_test.cpp src/net/np_vsm_pure.cpp | -D_GLIBCXX_ASSERTIONS
+np_wire | tests/host/np_wire_host_test.cpp src/net/np_wire.cpp | -D_GLIBCXX_ASSERTIONS
+online_item_block | tests/host/online_item_block_host_test.cpp |
+online_view | tests/host/online_view_host_test.cpp src/doa4_online_view.cpp src/net/np_rules.cpp src/net/np_wire.cpp | -D_GLIBCXX_ASSERTIONS
+overlay_paint | tests/host/overlay_paint_host_test.cpp |
+pause_reset | tests/host/pause_reset_host_test.cpp |
+photo | tests/host/photo_host_test.cpp src/doa4_photo.cpp |
+photo_watch | tests/host/photo_watch_host_test.cpp src/doa4_photo_watch.cpp src/doa4_photo.cpp |
+random_costume | tests/host/random_costume_host_test.cpp |
+suits_bust | tests/host/suits_bust_test.cpp | -I src
+suits_import_flow | tests/host/suits_import_flow_host_test.cpp src/doa4_suits_import_flow.cpp |
+suits_manifest | tests/host/suits_manifest_host_test.cpp src/doa4_suits_manifest.cpp |
+title_word | tests/host/title_word_host_test.cpp src/doa4_title_word.cpp src/doa4_afs_overlay.cpp |
+tweaks | tests/host/tweaks_host_test.cpp src/doa4_tweaks.cpp src/doa4_costumes.cpp src/doa4_suits_manifest.cpp |
+unlocks | tests/host/unlocks_host_test.cpp src/doa4_unlocks.cpp |
+update_notice | tests/host/update_notice_host_test.cpp src/doa4_update_notice.cpp src/net/np_rules.cpp src/net/np_wire.cpp | -D_GLIBCXX_ASSERTIONS
+updater_refusal | tests/host/updater_refusal_host_test.cpp src/doa4_updater.cpp src/net/np_rules.cpp src/net/np_wire.cpp | -D_GLIBCXX_ASSERTIONS -DDOA4_UPDATER_HOST_TEST -pthread -I {SDK}/thirdparty
+
+!d3d12_intel_policy | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include
+!dot_product | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include, %REXSDK_DIR%\thirdparty\simde, %REXSDK_DIR%\thirdparty\fmt\include, %REXSDK_DIR%\thirdparty\spdlog\include
+!dpps | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include, %REXSDK_DIR%\thirdparty\simde
+!early_swap | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include
+!exclusive_mode | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include
+!gamefiles | windows header: tests/host/gamefiles_host_test.cpp:7 windows.h
+!language | needs the SDK: ../rexglue-sdk/thirdparty/tomlplusplus/include
+!np_exec | windows header: tests/host/np_exec_host_test.cpp:22 windows.h
+!np_files | windows header: tests/host/np_files_host_test.cpp:21 windows.h
+!np_gekko | other: an include that is in no repo folder (third_party/GekkoNet/thirdparty/zpp/zpp_bits.h:32 zpp_throwing.h)
+!np_handoff | needs the SDK: %REXSDK_DIR%, ../rexglue-sdk/thirdparty/tomlplusplus/include
+!np_link | windows header: tests/host/np_link_host_test.cpp:26 winsock2.h
+!np_live | windows header: tests/host/np_live_host_test.cpp:32 windows.h
+!np_online | windows header: tests/host/np_online_host_test.cpp:10 winsock2.h
+!np_upnp | windows header: tests/host/np_upnp_host_test.cpp:4 windows.h
+!photo_service | windows header: src/doa4_photo_win.cpp:11 windows.h
+!photo_win | windows header: src/doa4_photo_win.cpp:11 windows.h
+!present_choice | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include
+!setup_flow | other: an include that is in no repo folder (src/doa4_gamefiles.cpp:9 crypto/TinySHA1.hpp)
+!setup_win | windows header: tests/host/setup_win_host_test.cpp:7 windows.h
+!speakers | needs the SDK: ../rexglue-sdk/thirdparty/tomlplusplus/include
+!suitconv_convert | windows header: tests/host/suitconv_synth.h:7 windows.h
+!suitconv_golden | windows header: tests/host/suitconv_synth.h:7 windows.h
+!suitconv_inputs | windows header: tests/host/suitconv_synth.h:7 windows.h
+!suitconv_job | windows header: tests/host/suitconv_synth.h:7 windows.h
+!suitconv_num | other: multi-step build (3 compile lines)
+!suitconv_sort | other: multi-step build (3 compile lines)
+!suitconv_tpr | other: multi-step build (9 compile lines)
+!suits | windows header: tests/host/suits_host_test.cpp:33 windows.h
+!suits_labels | windows header: tests/host/suits_labels_host_test.cpp:29 windows.h
+!toml_upsert | needs the SDK: ../rexglue-sdk/thirdparty/tomlplusplus/include
+!updater | windows header: tests/host/updater_host_test.cpp:13 windows.h
+!xdvdfs | windows header: tests/host/xdvdfs_host_test.cpp:7 windows.h

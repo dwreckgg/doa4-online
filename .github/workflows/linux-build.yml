@@ -1,0 +1,106 @@
+name: Linux build
+# Compiles the game for Linux (x86-64) and runs the host tests that need no Windows header there, so that a change
+# which breaks the Linux build or those tests is seen on the push that makes it.
+# It publishes nothing: no release, no program file, nothing a player downloads. Its only output is the log files
+# it uploads as a workflow artifact. It never starts the release workflow (netplay-release.yml) and shares nothing
+# with it: its token can only read the repository, and its concurrency group is its own, so a red or a slow Linux job
+# does not hold a Windows release.
+# Which host tests run is written in tests/host/posix_manifest.txt; tools/run_host_tests_posix.py runs them.
+on:
+  push:
+    branches: [main, linux-native]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    # 240 minutes: the first build compiles the SDK and the whole recompiled game with no cache, two files at a time;
+    # the Windows release job is given 300 for its build at the same width plus its release steps.
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: doa4-recomp, persist-credentials: false }   # the build never sees a token
+      - name: Runner size
+        run: |
+          nproc
+          free -m
+          df -h .
+      - name: SDK at the pinned commit
+        run: |
+          # netplay_sdk.txt holds repo=<url> and commit=<40 hex digits>; a missing value stops the step
+          repo=$(sed -n 's/^repo=//p' doa4-recomp/netplay_sdk.txt | tr -d '[:space:]')
+          commit=$(sed -n 's/^commit=//p' doa4-recomp/netplay_sdk.txt | tr -d '[:space:]')
+          if [ -z "$repo" ] || [ -z "$commit" ]; then echo "netplay_sdk.txt: repo or commit is empty"; exit 1; fi
+          echo "SDK $repo at $commit"
+          git clone --filter=blob:none "$repo" rexglue-sdk
+          git -C rexglue-sdk checkout "$commit"
+          git -C rexglue-sdk submodule update --init --recursive
+          # tools/fix_git_symlinks.py is not called: it repairs the text stubs git writes for symlinks on Windows
+          # without symlink support, and git on Linux checks symlinks out as symlinks
+      - name: clang 23, cmake, ninja and the libraries
+        run: |
+          sudo apt-get update
+          # clang 23 from apt.llvm.org, by its own script (the SDK's Linux job installs clang 20 the same way:
+          # rexglue-sdk .github/workflows/_build-platform.yaml:48-53). Round 1's fallback if apt.llvm.org has no 23
+          # for this image: the release archive of LLVM 23.1.4 for Linux, checked by its SHA-256, as the Windows job
+          # unpacks its own.
+          sudo apt-get install -y wget gnupg lsb-release
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+          sudo apt-get install -y clang-23
+          # cmake, ninja-build: the game's preset (CMakePresets.json:23, generator Ninja; CMakeLists.txt:5, CMake 3.25)
+          # build-essential, git, curl, unzip, autoconf: rexglue-sdk .github/workflows/_build-platform.yaml:71
+          sudo apt-get install -y cmake ninja-build build-essential git curl unzip autoconf
+          # pkg-config: rexglue-sdk src/ui/CMakeLists.txt:151 (find_package(PkgConfig REQUIRED))
+          # libx11-xcb-dev: rexglue-sdk src/ui/CMakeLists.txt:152 (pkg_check_modules x11-xcb)
+          # libwayland-dev: rexglue-sdk src/ui/CMakeLists.txt:155 (pkg_check_modules wayland-client)
+          # libgtk-3-dev: rexglue-sdk .github/workflows/_build-platform.yaml:72
+          sudo apt-get install -y pkg-config libx11-xcb-dev libwayland-dev libgtk-3-dev
+          # libasound2-dev, libpulse-dev, libpipewire-0.3-dev: rexglue-sdk thirdparty/CMakeLists.txt:275-280 (SDL3's
+          # ALSA, PulseAudio and PipeWire back ends are switched on) and _build-platform.yaml:73
+          sudo apt-get install -y libasound2-dev libpulse-dev libpipewire-0.3-dev
+          # libvulkan-dev, glslc, glslang-tools: rexglue-sdk cmake/rexglue_fidelityfx.cmake:13 and :30-31
+          # (find_package(Vulkan), glslc or glslangValidator; without them FidelityFX is switched off with a
+          # warning) and _build-platform.yaml:72. The SDK's own x86-64 job takes the LunarG vulkan-sdk and wine
+          # in their place (_build-platform.yaml:61-64); not installed here.
+          sudo apt-get install -y libvulkan-dev glslc glslang-tools
+          clang-23 --version
+          cmake --version
+          ninja --version
+      - name: Configure and build
+        working-directory: doa4-recomp
+        run: |
+          set -o pipefail
+          # the SDK is built by the game's own configure: generated/rexglue.cmake:10-11 adds REXSDK_DIR as a subdirectory
+          cmake --preset linux-amd64-release -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 -DREXSDK_DIR=$GITHUB_WORKSPACE/rexglue-sdk 2>&1 | tee configure.log
+          # -j 2: the recompiled game's largest files take several GB each to compile; the Windows job builds two at a
+          # time beside a 16 GB page file. "Runner size" above prints this runner's memory, for a later round to raise it.
+          cmake --build --preset linux-amd64-release -- -j 2 2>&1 | tee build.log
+      - name: Objects built
+        working-directory: doa4-recomp
+        run: |
+          n=$(find out/build/linux-amd64-release -name '*.o' | wc -l)
+          echo "objects built: $n"
+          if [ "$n" -eq 0 ]; then exit 1; fi
+      - name: Host tests
+        working-directory: doa4-recomp
+        run: |
+          set -o pipefail
+          DOA4_CI=1 REXSDK_DIR=$GITHUB_WORKSPACE/rexglue-sdk python3 -I tools/run_host_tests_posix.py --cxx clang++-23 2>&1 | tee host_tests.log
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build-logs
+          path: |
+            doa4-recomp/configure.log
+            doa4-recomp/build.log
+            doa4-recomp/host_tests.log

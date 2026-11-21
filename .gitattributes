@@ -1,1 +1,4 @@
 pgo/*.profdata binary
+.github/workflows/linux-build.yml text eol=lf
+tools/run_host_tests_posix.py text eol=lf
+tests/host/posix_manifest.txt text eol=lf
