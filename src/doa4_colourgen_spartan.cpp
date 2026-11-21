@@ -215,6 +215,9 @@ void Tile(const uint8_t* blocks, uint32_t bw, uint32_t bh, uint8_t* file) {
 
 void RunJob(void* ctx) {
   Job& job = *static_cast<Job*>(ctx);
+  // first: the domain is tested under the conversion environment (a caller's denormals-are-zero must not refuse a
+  // subnormal vref that is inside it)
+  if (const char* m = OutsideDomain(*job.recipe)) Refuse(m);
   const std::span<const uint8_t> src = job.src;
   const suitconv::tpr::Xpr x = suitconv::tpr::Xpr::Parse(src);
   if (!x.hs) Refuse("no header size");
@@ -271,7 +274,6 @@ void Repaint(const SpartanRecipe& r, const uint8_t* srgb_in, uint8_t* srgb_out, 
 
 std::optional<Bytes> MakeSpartan(std::span<const uint8_t> source, const SpartanRecipe& r, std::string* why) {
   try {
-    if (const char* m = OutsideDomain(r)) Refuse(m);
     Job job{source, &r, {}};
     suitconv::num::RunUnderConvertEnv(&RunJob, &job);
     return std::move(job.out);

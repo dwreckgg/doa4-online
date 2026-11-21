@@ -17,7 +17,7 @@
 //                           the five test recipes (kRepaintTestPin)
 //   quant_ties              Quant565 at every kQuantTies row, the whole 565 word compared
 //   tiled                   kTiledPin over five grids; each grid's index set (and 32x64's) is a permutation
-//   family_inputs           the eleven family pictures built here hash to kFamilyInputPin (the fixture is the pin maker's)
+//   family_inputs           the twelve family pictures built here hash to kFamilyInputPin (the fixture is the pin maker's)
 //   encode_families         SHA-1 of EncodeDxt1 of each family equals kEncodePin
 //   decode_round_trip       the encoded families' block shapes and opacity; four hand-written blocks decode to the
 //                           reference tool's output (literals)
@@ -677,7 +677,7 @@ static void TestTiled() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// family_inputs: the eleven 256x256 pictures of colourgen_pins.h (lines 80-94 there), built here, hash to
+// family_inputs: the twelve 256x256 pictures of colourgen_pins.h (lines 80-95 there), built here, hash to
 // kFamilyInputPin (the fixture is the pin maker's). encode_families and decode_round_trip use them.
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -774,7 +774,8 @@ static Bytes Family(size_t f) {
           }
           break;
         }
-        default:  // F10, F11
+        case 9:   // F10
+        case 10:  // F11 (the shape of F10, another seed)
           for (int c = 0; c < 3; ++c) a[c] = rng.Draw();
           for (int c = 0; c < 3; ++c) b[c] = rng.Draw();
           for (int k = 0; k < 16; ++k) {
@@ -782,17 +783,37 @@ static Bytes Family(size_t f) {
             for (int c = 0; c < 3; ++c) px(k)[c] = Clamp255((a[c] * (15 - w) + b[c] * w) / 15 + rng.Draw() % 3 - 1);
           }
           break;
+        case 11:  // F12: no base colour; three draws a pixel (r, g, b), pixel 15 a dark outlier
+          for (int k = 0; k < 16; ++k) {
+            const int r = rng.Draw();
+            const int g = rng.Draw();
+            const int bl = rng.Draw();
+            if (k < 15) {
+              px(k)[0] = uint8_t((r & 1) == 0 ? 5 : 11);
+              px(k)[1] = uint8_t(7 + g % 3);
+              px(k)[2] = uint8_t(bl % 3);
+            } else {
+              px(k)[0] = uint8_t(3 + r % 4);
+              px(k)[1] = uint8_t(g % 2);
+              px(k)[2] = uint8_t(bl % 2);
+            }
+          }
+          break;
+        default:  // an index this builder has no shape for: a failed check, never some other family's shape
+          CKF(false, "F%zu: the builder has no shape for this family", f + 1);
+          return Bytes();
       }
     }
   return img;
 }
 
-static std::vector<Bytes> g_family;   // the eleven pictures
-static std::vector<Bytes> g_encoded;  // EncodeDxt1 of each (4,096 blocks)
+static constexpr size_t kFamilyShapes = 12;  // the shapes Family() knows: F1 to F12
+static std::vector<Bytes> g_family;          // the twelve pictures
+static std::vector<Bytes> g_encoded;         // EncodeDxt1 of each (4,096 blocks)
 
 static void TestFamilyInputs() {
   Group("family_inputs");
-  CK(pins::kFamilyCount == 11);
+  CK(pins::kFamilyCount == kFamilyShapes);
   g_family.clear();
   for (size_t f = 0; f < pins::kFamilyCount; ++f) {
     g_family.push_back(Family(f));
@@ -809,6 +830,9 @@ static void TestEncodeFamilies() {
   Group("encode_families");
   g_encoded.clear();
   for (size_t f = 0; f < g_family.size(); ++f) {
+    const bool built = g_family[f].size() == size_t(256) * 256 * 3;
+    CKF(built, "F%zu: no picture (family_inputs built none)", f + 1);
+    if (!built) continue;
     Bytes blocks(4096 * 8 + 16, 0xCD);  // 16 sentinel bytes after the last block
     cg::EncodeDxt1(g_family[f].data(), 256, 256, blocks.data());
     CKF(std::all_of(blocks.end() - 16, blocks.end(), [](uint8_t v) { return v == 0xCD; }),
@@ -1326,6 +1350,44 @@ static void TestMakeSpartanRefusals() {
   const std::optional<Bytes> am3 = SpAccepted("amount -3", gf, rc([](cg::SpartanRecipe& r) { r.amount = -3.0; }));
   const std::optional<Bytes> a0 = SpAccepted("amount 0", gf, rc([](cg::SpartanRecipe& r) { r.amount = 0.0; }));
   CK(am3 && a0 && *am3 == *a0 && *a0 != *good_out);
+#if defined(_M_X64) || defined(__x86_64__)
+  // The caller's control word is back after a REFUSAL thrown inside the job: the texture count refusal is raised in
+  // RunJob, under RunUnderConvertEnv, so only the restore on its exception path puts the caller's word back. The
+  // caller's rounding field (toward zero) differs from the conversion word's (to nearest, 0x1F80).
+  {
+    const Bytes f69 = with([](SpLayout& L) { L.ntex = 69; });
+    const unsigned saved = _mm_getcsr();
+    _mm_setcsr(saved | 0x6000u);  // rounding control 11: toward zero
+    std::string why;
+    const std::optional<Bytes> out = cg::MakeSpartan(Sp(f69), cg::kH3Pink, &why);
+    const unsigned after = _mm_getcsr();
+    _mm_setcsr(saved);
+    CKF(!out.has_value() && why.rfind("the file has 69 textures, fewer than 70", 0) == 0,
+        "refusal inside the job: accepted=%d why '%s'", int(out.has_value()), why.c_str());
+    CKF((after & 0x6000u) == 0x6000u, "control word after a refusal inside the job: 0x%04X", after);
+  }
+  // Repaint's domain is tested under the conversion environment, not the caller's: with denormals-are-zero set by the
+  // caller, a subnormal vref (strictly inside (0, 1)) is accepted with the same bytes as without it, and the caller's
+  // word keeps its denormals-are-zero bit.
+  {
+    const cg::SpartanRecipe sub = rc([](cg::SpartanRecipe& r) { r.vref = 1e-310; });
+    std::string why_plain;
+    const std::optional<Bytes> plain = cg::MakeSpartan(Sp(gf), sub, &why_plain);
+    CKF(plain.has_value(), "vref 1e-310 refused without denormals-are-zero: %s", why_plain.c_str());
+    const unsigned saved = _mm_getcsr();
+    _mm_setcsr(saved | 0x0040u);  // denormals-are-zero
+    volatile double probe = 1e-310;
+    const bool daz_sees_positive = probe > 0.0;
+    std::string why_daz;
+    const std::optional<Bytes> daz = cg::MakeSpartan(Sp(gf), sub, &why_daz);
+    const unsigned after = _mm_getcsr();
+    _mm_setcsr(saved);
+    CK(!daz_sees_positive);  // precondition: under the caller's word the subnormal compares as zero
+    CKF(daz.has_value(), "vref 1e-310 under denormals-are-zero: refused: %s", why_daz.c_str());
+    CK(daz && plain && *daz == *plain);
+    CKF((after & 0x0040u) == 0x0040u, "control word after the call: 0x%04X", after);
+  }
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------

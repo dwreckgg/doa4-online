@@ -92,12 +92,14 @@ static const char* const kRepaintTestPin[kRepaintTestCount] = {
 //   F9 per block base (3 draws) and step d = (draw % 16) - 8 per channel (3 draws), each pixel one draw t = byte % 16: channel = clamp(base + d * (t - 8)) (seed 0x0C010009)
 //   F10 (shape "mix") per block colours A, B (6 draws), each pixel one draw w = byte % 16 and three draws e: channel = clamp((A * (15 - w) + B * w) / 15 + (e % 3) - 1) (integer division of a non-negative value) (seed 0x0C04005F)
 //   F11 the shape of F10 with another seed (seed 0x0C04090C)
+//   F12 no base colour; each pixel three draws, one per channel r, g, b: pixels 0 to 14 r = 5 when (byte & 1) == 0, else 11; g = 7 + byte % 3; b = byte % 3; pixel 15 r = 3 + byte % 4; g = byte % 2; b = byte % 2 (seed 0x0C01000C)
 //   F7 was added by the generator: degenerate shapes held by no family: all_black.
 //   F8 was added by the generator: control not met on the families before it.
 //   F9 was added by the generator: control not met on the families before it.
 //   F10 was added by the generator: search for a family on which the norm sum of squares fused alone changes bytes (ruling R3).
 //   F11 was added by the generator: search for a family on which the t dot fused alone changes bytes (ruling R3).
-static constexpr size_t kFamilyCount = 11;
+//   F12 was added by the generator: a family on which dropping the c0 == c1 assignment rule changes bytes (Task 3 review I1).
+static constexpr size_t kFamilyCount = 12;
 static constexpr uint32_t kFamilySeed[kFamilyCount] = {
     0x0C010001,
     0x0C010002,
@@ -110,6 +112,7 @@ static constexpr uint32_t kFamilySeed[kFamilyCount] = {
     0x0C010009,
     0x0C04005F,
     0x0C04090C,
+    0x0C01000C,
 };
 // SHA-1 of the picture: row-major pixels (y outer), three bytes r, g, b each (196,608 bytes).
 static const char* const kFamilyInputPin[kFamilyCount] = {
@@ -124,6 +127,7 @@ static const char* const kFamilyInputPin[kFamilyCount] = {
     "7dd019c977c173bf90c23cdd48796c81563c8715",
     "bd000d7ef843c4f261184c90bb0a8ba03bab34d1",
     "854c54893b16032f4878a676f719c8346ce832aa",
+    "94f9a47ed999a38054f9f833acf16ddf75e340db",
 };
 // SHA-1 of EncodeDxt1(picture): the 4,096 blocks row-major (untiled), 8 little-endian bytes each.
 static const char* const kEncodePin[kFamilyCount] = {
@@ -138,6 +142,7 @@ static const char* const kEncodePin[kFamilyCount] = {
     "6aa5876bb1d2f27e532b93321a44df906a79ab76",
     "e1f21e92e88a7302b0651b97f809dca5797ec47e",
     "d36552dba658681addd882c3978a87e5b0a31625",
+    "004f1ac73e8561744acea194ecb283c7e210913e",
 };
 
 // Controls (asserted by the generator): does a wrong encoder hash differently from kEncodePin?
@@ -157,7 +162,11 @@ static const char* const kEncodePin[kFamilyCount] = {
 //   F9             1          25      25     0      0          0
 //   F10            0           0       0     1      0          0
 //   F11            1           1       0     0      1          0
+//   F12            0           0       0     0      0          0
 //   quant f64: not separated by any family (kQuantTies separates it: see below).
+//   c0 == c1 rule dropped = each pixel takes the nearest of the four palette entries even when c0 == c1
+//   (the reference tool's encoder with that one change, run by the generator). Blocks whose 8 bytes differ:
+//   F1 0, F2 0, F3 0, F4 0, F5 0, F6 0, F7 0, F8 0, F9 0, F10 0, F11 0, F12 148.
 
 // _quant565 at its ties: for each tie point (k + 0.5) * 255 / steps (k = 0..steps-1, steps 31 for red and
 // blue, 63 for green), the nearest float32 and the 4 float32 values on either side, with the 5- or 6-bit
