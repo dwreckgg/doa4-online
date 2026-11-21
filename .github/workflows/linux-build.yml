@@ -68,6 +68,12 @@ jobs:
           # libwayland-dev: rexglue-sdk src/ui/CMakeLists.txt:155 (pkg_check_modules wayland-client)
           # libgtk-3-dev: rexglue-sdk .github/workflows/_build-platform.yaml:72
           sudo apt-get install -y pkg-config libx11-xcb-dev libwayland-dev libgtk-3-dev
+          # SDL3's X11 and Wayland back ends (rexglue-sdk thirdparty/CMakeLists.txt:273-274 switch both on for Linux);
+          # its configure stops at the first missing one (round 1: XSCRNSAVER, thirdparty/sdl3/cmake/sdlchecks.cmake:535).
+          # The list is SDL3's own for Ubuntu (docs/README-linux.md, build dependencies), the X11, Wayland and input part.
+          sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libdecor-0-dev libdbus-1-dev libibus-1.0-dev libudev-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev
           # libasound2-dev, libpulse-dev, libpipewire-0.3-dev: rexglue-sdk thirdparty/CMakeLists.txt:275-280 (SDL3's
           # ALSA, PulseAudio and PipeWire back ends are switched on) and _build-platform.yaml:73
           sudo apt-get install -y libasound2-dev libpulse-dev libpipewire-0.3-dev
