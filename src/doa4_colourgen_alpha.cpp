@@ -93,7 +93,7 @@ void RunJob(void* ctx) {
     if (h % 128 != 0) Refuse(at + "height " + std::to_string(h) + " is not a multiple of 128");
     const uint64_t n = uint64_t(w / 4) * uint64_t(h / 4);
     const uint64_t start = data0 + base;
-    const uint64_t end = start + n * 16;  // at most 2**32 + 2**30: no wrap in 64 bits
+    const uint64_t end = start + n * 16;  // at most (2**32 + 11) + (2**32 - 4096) + 2**26: no wrap in 64 bits
     if (end > src.size()) Refuse(at + "its blocks run past the end of the file");
     spans.emplace_back(start, end);
   }
