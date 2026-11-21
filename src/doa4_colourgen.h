@@ -102,5 +102,14 @@ inline constexpr SourceDef kSources[7] = {
     {"spartan_h2_orange", 437, 32, 18741248, "05274f0370b48e8306580d3585ce7f6de655e098"},
     {"spartan_h2_cyan", 447, 42, 18741248, "9c4fc2f8019a2b12a1c5bfd9374a4d2d8f1b40ea"},
 };
+static_assert(sizeof(kSources) / sizeof(kSources[0]) == 7, "seven colour slots: seven source rows");
+static_assert(
+    [] {
+      for (const SourceDef& s : kSources) {
+        if (s.slot == nullptr || s.sha1 == nullptr) return false;
+      }
+      return true;
+    }(),
+    "every source row names its slot and its SHA-1");
 
 }  // namespace doa4::colourgen

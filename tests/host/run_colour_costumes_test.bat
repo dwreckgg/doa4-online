@@ -7,7 +7,7 @@ if not defined DOA4_LLVM_BIN set "DOA4_LLVM_BIN=C:\Program Files\LLVM\bin"
 set "PATH=%DOA4_LLVM_BIN%;%PATH%"
 set "OUT=%TEMP%\doa4_colour_costumes_test"
 if not exist "%OUT%" mkdir "%OUT%"
-clang-cl /nologo /std:c++latest /EHsc /O2 "%~dp0colour_costumes_host_test.cpp" "%~dp0..\..\src\doa4_colour_costumes.cpp" "%~dp0..\..\src\doa4_suits_manifest.cpp" "%~dp0..\..\src\doa4_tweaks.cpp" "%~dp0..\..\src\doa4_afs_overlay.cpp" "%~dp0..\..\src\doa4_costumes.cpp" "%~dp0..\..\src\doa4_gamefiles.cpp" "%~dp0..\..\src\doa4_xdvdfs.cpp" /Fo"%OUT%\\" /Fe"%OUT%\colour_costumes_host_test.exe"
+clang-cl /nologo /std:c++latest /EHsc /O2 "%~dp0colour_costumes_host_test.cpp" "%~dp0..\..\src\doa4_colour_costumes.cpp" "%~dp0..\..\src\doa4_colour_make.cpp" "%~dp0..\..\src\doa4_suits_manifest.cpp" "%~dp0..\..\src\doa4_tweaks.cpp" "%~dp0..\..\src\doa4_afs_overlay.cpp" "%~dp0..\..\src\doa4_costumes.cpp" "%~dp0..\..\src\doa4_gamefiles.cpp" "%~dp0..\..\src\doa4_xdvdfs.cpp" /Fo"%OUT%\\" /Fe"%OUT%\colour_costumes_host_test.exe"
 if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1

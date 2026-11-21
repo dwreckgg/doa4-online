@@ -42,6 +42,7 @@ set(DEADORALIVE4_SOURCES
     src/doa4_suits_manifest.cpp
     src/doa4_costumes.cpp
     src/doa4_colour_costumes.cpp
+    src/doa4_colour_make.cpp
     src/doa4_suits.cpp
     src/doa4_suits_hooks.cpp
     src/doa4_suits_labels.cpp

@@ -33,12 +33,21 @@
 //                           section); set but unreadable: one failed check. Prints time lines (never asserted). On a
 //                           SHA-1 miss, with DOA4_COLOURGEN_APPROVED_DIR (a folder of <slot>.tpr) set, "diag" lines
 //                           compare the made file with the approved one (no check).
-// Every group prints its run time. No byte of any game file is stored, and no file is written. The last four lines:
+//   make_perturbed_fp       Make on a worker thread whose rounding and denormal modes were changed: the same bytes,
+//                           and the worker keeps the state it set
+//   real_make_missing       gated on DOA4_SUITS_GAME_DIR and DOA4_COLOURGEN_UD (a test user-data folder; the game
+//                           folder set and this one unset or not creatable: one failed check):
+//                           colour_costumes::MakeMissing makes the seven files into
+//                           <DOA4_COLOURGEN_UD>/colour_costumes, Load serves them, a second call touches nothing,
+//                           two deleted files are made again; the folder is removed at the end
+// Every group prints its run time. No byte of any game file is stored; only real_make_missing writes files (into its
+// own folder, removed when it ends). The last four lines:
 // GREEN-SITES and RED-SITES (check lines that ran without and with a failure: the mutation probe census),
 // "skipped sections: K", then "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
 
 #include "../../src/doa4_afs_overlay.h"
 #include "../../src/doa4_colour_costumes.h"
+#include "../../src/doa4_colour_make.h"
 #include "../../src/doa4_colourgen.h"
 #include "../../src/doa4_gamefiles.h"
 #include "../../src/doa4_suitconv_num.h"
@@ -49,6 +58,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -57,6 +67,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -1819,6 +1830,189 @@ static void TestRealFiles() {
 #endif
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// make_perturbed_fp (always on): Make on a worker thread whose floating-point state the caller changed before the
+// call: rounding toward zero, flush-to-zero and denormals-are-zero. The lobby step calls Make on worker threads of a
+// process whose threads may carry any state.
+//   - the bytes equal those made under the default state: excludes a Make that does its arithmetic under the caller's
+//     rounding or denormal mode (one without its floating-point environment guard);
+//   - the worker's control state after Make equals the state it set: excludes a Make that sets the converter's
+//     environment and leaves it set, or resets the default instead of restoring what it found;
+//   - the positive control (1/3 and a denormal product, computed by the worker itself) differs from an unperturbed
+//     worker's: excludes a perturbation that never took effect, under which the two equalities would hold for any Make.
+// The status flags (MXCSR bits 0 to 5) are not compared: arithmetic raises them.
+// ---------------------------------------------------------------------------------------------------------------
+
+static void TestMakePerturbedFp() {
+  Group("make_perturbed_fp");
+#if defined(_M_X64) || defined(__x86_64__)
+  const Bytes asrc = Pack(GoodLayout());
+  const Bytes ssrc = SpPack(GoodSpLayout());
+  const std::optional<Bytes> ref_a = cg::Make("alpha_red", Sp(asrc), nullptr);
+  const std::optional<Bytes> ref_s = cg::Make("spartan_h3_pink", Sp(ssrc), nullptr);
+  CK(ref_a.has_value() && ref_s.has_value());
+  struct Out {
+    std::optional<Bytes> a, s;
+    unsigned set = 0, after_a = 0, after_s = 0, cw_set = 0, cw_after = 0;
+    float third = 0, tiny = 0;
+  };
+  Out plain, bent;
+  auto worker = [&asrc, &ssrc](Out* o, bool perturb) {
+    if (perturb) {
+      unsigned int cw = 0;
+      _controlfp_s(&cw, _RC_CHOP, _MCW_RC);  // rounding toward zero
+      _mm_setcsr(_mm_getcsr() | 0x8040);     // flush-to-zero (bit 15) and denormals-are-zero (bit 6)
+    }
+    volatile float one = 1.0f, three = 3.0f, small = 1e-39f, unit = 1.0f;
+    o->third = one / three;  // rounds up to nearest, down toward zero
+    o->tiny = small * unit;  // a denormal: kept by default, zero under denormals-are-zero
+    o->set = _mm_getcsr();
+    _controlfp_s(&o->cw_set, 0, 0);
+    o->a = cg::Make("alpha_red", Sp(asrc), nullptr);
+    o->after_a = _mm_getcsr();
+    o->s = cg::Make("spartan_h3_pink", Sp(ssrc), nullptr);
+    o->after_s = _mm_getcsr();
+    _controlfp_s(&o->cw_after, 0, 0);
+  };
+  std::thread(worker, &plain, false).join();
+  std::thread(worker, &bent, true).join();
+  const unsigned kControl = 0xFFC0;  // MXCSR without its six status flags
+  CKF((bent.set & 0xE040) == 0xE040 && (plain.set & 0xE040) == 0, "MXCSR set: bent 0x%X plain 0x%X", bent.set, plain.set);
+  CKF(std::bit_cast<uint32_t>(bent.third) != std::bit_cast<uint32_t>(plain.third), "1/3: bent 0x%08X plain 0x%08X",
+      std::bit_cast<uint32_t>(bent.third), std::bit_cast<uint32_t>(plain.third));
+  CKF(bent.tiny == 0.0f && plain.tiny != 0.0f, "denormal product: bent %g plain %g", double(bent.tiny), double(plain.tiny));
+  CK(plain.a.has_value() && plain.s.has_value() && ref_a.has_value() && ref_s.has_value() && *plain.a == *ref_a &&
+     *plain.s == *ref_s);
+  CK(bent.a.has_value() && ref_a.has_value() && *bent.a == *ref_a);
+  CK(bent.s.has_value() && ref_s.has_value() && *bent.s == *ref_s);
+  CKF((bent.after_a & kControl) == (bent.set & kControl), "after the Alpha Make: MXCSR 0x%X, set 0x%X", bent.after_a,
+      bent.set);
+  CKF((bent.after_s & kControl) == (bent.set & kControl), "after the Spartan Make: MXCSR 0x%X, set 0x%X", bent.after_s,
+      bent.set);
+  CKF(bent.cw_after == bent.cw_set && bent.cw_set != plain.cw_set, "control word: bent 0x%X then 0x%X, plain 0x%X",
+      bent.cw_set, bent.cw_after, plain.cw_set);
+#else
+  std::printf("make_perturbed_fp: not an x86-64 build, nothing to perturb\n");
+#endif
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// real_make_missing: gated on DOA4_SUITS_GAME_DIR as real_files is (unset: this group prints SKIPPED and adds no
+// skipped section of its own), plus DOA4_COLOURGEN_UD, a test user-data folder (game folder set but this unset or not
+// creatable: one failed check). colour_costumes::MakeMissing with the real slot table, MakeDefs(), Make, the folder's
+// real free space and four workers makes the seven files into <DOA4_COLOURGEN_UD>/colour_costumes from the retail
+// chrthree.afs (found through a planted file table: the source files at kSources' entries, the slots' own entries in
+// avt.afs); Load then serves seven files; a second call makes nothing and touches nothing; with two files deleted a
+// third call makes those two. The folder is removed at the end: the made files stay nowhere. Times are printed, never
+// asserted.
+// ---------------------------------------------------------------------------------------------------------------
+
+static void TestRealMakeMissing() {
+  Group("real_make_missing");
+  const std::optional<fs::path> game = EnvPath(L"DOA4_SUITS_GAME_DIR");
+  if (!game) {
+    std::printf("real make missing: SKIPPED (DOA4_SUITS_GAME_DIR unset)\n");
+    return;
+  }
+  const std::optional<fs::path> ud = EnvPath(L"DOA4_COLOURGEN_UD");
+  std::error_code ec;
+  if (ud) fs::create_directories(*ud, ec);
+  const bool ud_ok = ud && fs::is_directory(*ud, ec);
+  CKF(ud_ok, "real make missing: DOA4_SUITS_GAME_DIR is set but DOA4_COLOURGEN_UD is %s",
+      ud ? "not a folder that can be created" : "unset");
+  if (!ud_ok) return;
+  const fs::path folder = *ud / "colour_costumes";
+  struct Cleanup {  // the made files stay nowhere, whatever ends this group
+    fs::path path;
+    ~Cleanup() {
+      std::error_code e;
+      fs::remove_all(path, e);
+    }
+  } cleanup{folder};
+  fs::remove_all(folder, ec);
+  CK(!fs::exists(folder));
+
+  const cc::SlotTable& slots = cc::Slots();
+  std::map<uint32_t, uint8_t> mem;
+  auto plant = [&mem](uint32_t file, uint8_t archive, uint32_t entry) {
+    const uint32_t at = doa4::costumes::kFileTable + 4 * file;
+    mem[at] = archive;
+    mem[at + 1] = 0;
+    mem[at + 2] = uint8_t(entry >> 8);
+    mem[at + 3] = uint8_t(entry);
+  };
+  for (const cg::SourceDef& s : cg::kSources) plant(s.file, 5, s.afs_entry);   // chrthree.afs
+  for (const cc::SlotDef& d : slots) plant(d.tpr_file, 0, d.tpr_file - 914u);  // avt.afs: file = 914 + entry
+  const doa4::GuestBytes guest{[&mem](uint32_t a) {
+                                 const auto it = mem.find(a);
+                                 return it == mem.end() ? uint8_t(0) : it->second;
+                               },
+                               [&mem](uint32_t a, uint8_t v) { mem[a] = v; }};
+  std::atomic<int> calls{0};
+  std::vector<size_t> starts;
+  cc::MakeOptions opt;
+  opt.generate = [&calls](std::string_view slot, std::span<const uint8_t> source, std::string* why) {
+    calls.fetch_add(1);
+    return cg::Make(slot, source, why);
+  };
+  opt.free_bytes = [](const fs::path& p) {
+    std::error_code e;
+    const fs::space_info info = fs::space(p, e);
+    return e ? uint64_t(0) : uint64_t(info.available);
+  };
+  opt.temp_tag = cc::MakeTempTag();
+  opt.threads = 4;
+  opt.on_start = [&starts](size_t n) { starts.push_back(n); };
+  auto print = [](const char* what, const cc::MakeReport& r) {
+    std::printf("   real make missing, %s: good %zu made %zu not made %zu, %.2f s\n", what, r.good, r.made, r.not_made,
+                r.seconds);
+    for (const std::string& note : r.notes) std::printf("   real make missing note: %s\n", note.c_str());
+  };
+  auto times = [&folder]() {
+    std::map<std::string, fs::file_time_type> out;
+    std::error_code e;
+    for (fs::directory_iterator it(folder, e), end; !e && it != end; it.increment(e)) {
+      std::error_code te;
+      out[PathText(it->path().filename())] = fs::last_write_time(it->path(), te);
+    }
+    return out;
+  };
+
+  // (1) the folder is absent: seven made
+  const cc::MakeReport r1 = cc::MakeMissing(slots, cc::MakeDefs(), folder, *game, guest, opt);
+  print("first call", r1);
+  CK(r1.good == 0 && r1.made == 7 && r1.not_made == 0);
+  CK(r1.notes.empty());
+  CK(calls.load() == 7);
+  CK(starts.size() == 1 && starts[0] == 7);
+  // (2) Load serves the seven files
+  {
+    const cc::Status s = cc::Load(slots, folder, *game, guest);
+    size_t from_files = 0;
+    for (const cc::LoadedSlot& l : s.slots) from_files += (!l.stand_in && l.tpr) ? 1 : 0;
+    CKF(s.usable && s.slots.size() == 7 && from_files == 7 && s.notes.empty(), "Load: usable %d, %zu slots, %zu from files, %zu notes",
+        int(s.usable), s.slots.size(), from_files, s.notes.size());
+  }
+  // (3) a second call: seven good, Make not called, no write time moved
+  const std::map<std::string, fs::file_time_type> before = times();
+  calls.store(0);
+  const cc::MakeReport r2 = cc::MakeMissing(slots, cc::MakeDefs(), folder, *game, guest, opt);
+  print("second call", r2);
+  CK(r2.good == 7 && r2.made == 0 && r2.not_made == 0 && r2.notes.empty());
+  CK(calls.load() == 0);
+  CK(before.size() == 8 && times() == before);
+  // (4) two files deleted: those two are made
+  const bool removed = fs::remove(folder / "alpha_blue.tpr", ec) && fs::remove(folder / "spartan_h2_cyan.tpr", ec);
+  CK(removed);
+  const cc::MakeReport r3 = cc::MakeMissing(slots, cc::MakeDefs(), folder, *game, guest, opt);
+  print("third call", r3);
+  CK(r3.good == 5 && r3.made == 2 && r3.not_made == 0 && r3.notes.empty());
+  CK(calls.load() == 2);
+  CK(starts.size() == 2 && starts[1] == 2);
+  fs::remove_all(folder, ec);
+  CK(!fs::exists(folder));
+}
+
 // A group that throws loses its remaining checks, never the other groups'.
 static void RunGroup(void (*fn)(), const char* name) {
   const auto t0 = std::chrono::steady_clock::now();
@@ -1864,6 +2058,8 @@ int main() {
   RunGroup(TestMakeByName, "make_by_name");
   RunGroup(TestSourceTable, "source_table");
   RunGroup(TestRealFiles, "real_files");
+  RunGroup(TestMakePerturbedFp, "make_perturbed_fp");
+  RunGroup(TestRealMakeMissing, "real_make_missing");
   std::printf("   (all groups: %.2f s)\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   PrintSites();
