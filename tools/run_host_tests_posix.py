@@ -14,9 +14,10 @@ REXSDK_DIR); nothing else is expanded. A line that uses {SDK} while REXSDK_DIR i
 Each test is compiled in the repository root with
   <cxx> -std=c++23 -O2 <flags> <sources> -o <tmp>/<name>
 (<tmp> is one fresh temporary folder for the whole run, removed at the end) and its program is started in tests/host
-with no input. A program still running after --timeout seconds (default 600) is stopped with its child processes and
-"did not run". Its output (stdout and stderr together) is judged by judge() of tools/run_host_tests.py: the test's own
-summary line and its exit code.
+with no input. A program still running after --timeout seconds (default 600), or a compiler still running after
+--compile-timeout seconds (default 1800), is stopped with its child processes and the test "did not run". The
+program's output (stdout and stderr together) is judged by judge() of tools/run_host_tests.py: the test's own summary
+line and its exit code.
 Prints one line a test, "<name>: passed N", "<name>: FAILED (...)" or "<name>: did not run (...)" (a compile failure is
 "did not run (compile failed; exit N)"), then for a test that did not pass the last 40 lines of its compiler or program
 output; a line "left out: <name> (<reason>)" for each left-out test; and as the last line
@@ -28,8 +29,10 @@ error, a manifest with no run line, or an --only name that is not a run line giv
 --cxx is ONE program name or path (default c++), never split into words. --repo names another repository root and
 --exe-suffix the suffix of the program file the compiler is asked to write; both exist for this runner's own tests
 (tests/tools/test_release_tools.py), the Linux job passes neither.
-windows_reach() is the rule a run line must meet (checked by the same tests): from its sources, following the local
-#include "..." lines, no Windows header is reached outside a block that is compiled only on Windows.
+Two rules a run line must meet, checked by the same tests over the line's sources and the local #include "..." files
+they reach: windows_reach(), no Windows header outside a block that is compiled only on Windows; and msvc_calls(), no
+call spelled the Microsoft way (_name( or name_s() outside such a block. The second is a net over spellings, not a
+proof that the code compiles elsewhere.
 """
 import argparse
 import importlib.util
@@ -46,15 +49,28 @@ REPO = os.path.dirname(HERE)
 MANIFEST = "tests/host/posix_manifest.txt"  # relative to the repository root
 TAIL = 40
 DEFAULT_TIMEOUT = 600  # seconds for each test program
+DEFAULT_COMPILE_TIMEOUT = 1800  # seconds for each compile
 
 # The Windows-only headers (#include <...>), lower case. Built from the sources: every angle include in the closures
 # of the 71 host tests was placed once (C or C++ standard, POSIX, Linux or compiler, Windows-only, SDK or third party).
-# The first two rows are the Windows-only ones found there; the last row is others of the kind, which no test names yet.
+# The first three rows are the Windows-only ones found there (tests/tools/test_release_tools.py checks that every
+# header found inside a Windows-only block is one of them); the last row is others of the kind, which no test names yet.
 WINDOWS_HEADERS = frozenset((
     "windows.h", "winsock2.h", "ws2tcpip.h", "winhttp.h", "bcrypt.h", "iphlpapi.h", "intrin.h", "process.h", "psapi.h",
     "shlobj.h", "shellapi.h", "shobjidl.h", "knownfolders.h", "objbase.h", "wincodec.h", "winioctl.h", "wrl/client.h",
+    "mstcpip.h", "wlanapi.h",
     "io.h", "direct.h", "conio.h",
 ))
+
+# A call spelled the Microsoft way: an identifier that starts with _ and a small letter (_getpid, _dupenv_s, _wfopen)
+# or ends in _s (fopen_s, localtime_s), followed by '(' and not a member or a qualified name. The headers above cannot
+# show such a call: a source may call _getpid() with <process.h> correctly inside #ifdef _WIN32. Built from the data
+# like the header list: over the run lines' closures this spelling occurred once outside a Windows-only block
+# (_getpid, tests/host/costumes_host_test.cpp, since put under #ifdef _WIN32).
+MSVC_CALL = re.compile(r"(?<![\w.>:])(_[a-z]\w*|\w+_s)\s*\(")
+# Names of that spelling that are portable all the same (a project function, a C11 Annex K name with a fallback): none
+# today. Add a name here only with a comment that says where it is defined for every platform.
+PORTABLE_CALLS = frozenset()
 
 
 def _load_judge():
@@ -118,46 +134,121 @@ def parse_manifest(text):
     return runs, left_out, errors
 
 
-# ---- which sources reach a Windows header -----------------------------------------------------------------------------
+# ---- which sources reach a Windows header or call a Microsoft-only name -------------------------------------------------
 
-_DIRECTIVE = re.compile(r"\s*#\s*(ifdef|ifndef|if|elif|else|endif|include)\b(.*)")
+_DIRECTIVE = re.compile(r"\s*#\s*(ifdef|ifndef|if|elifdef|elifndef|elif|else|endif|include)\b(.*)")
 _INCLUDE = re.compile(r'\s*(?:<([^>]+)>|"([^"]+)")')
+_INCLUDE_START = re.compile(r"\s*#\s*include\s*")
+_RAW_PREFIX = re.compile(r"(?<![A-Za-z0-9_])(?:u8|u|U|L)?R")
+_RAW_OPEN = re.compile(r'"([^()\s]{0,16})\(')
+_WORD_BEFORE = re.compile(r"[A-Za-z0-9_.']+$")
 _ONLY_WIN = re.compile(r"defined\s*\(\s*_WIN32\s*\)|defined\s+_WIN32")
 _NOT_WIN = re.compile(r"!\s*defined\s*\(\s*_WIN32\s*\)|!\s*defined\s+_WIN32")
 
 
+def code_lines(text):
+    """The lines of a C++ text with everything that is not code emptied: comments are dropped, a string or character
+    literal becomes "" or '', a raw string literal R"x(...)x" becomes "" with its line breaks kept, so the line numbers
+    stay. The name of an #include "..." line is kept. A directive or a call found in the result is real code."""
+    out, cur, i, n = [], [], 0, len(text)
+
+    def lines_of(skipped):
+        for _ in range(skipped.count("\n")):
+            out.append("".join(cur))
+            cur.clear()
+
+    def quoted_end(start, quote):
+        """The index after the literal that opens at `start`: its closing quote, or the end of the line."""
+        j = start + 1
+        while j < n and text[j] != "\n":
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == quote:
+                return j + 1
+            j += 1
+        return min(j, n)
+
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            lines_of(c)
+            i += 1
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            cur.append(" ")
+            lines_of(text[i:end])
+            i = end
+        elif c == '"':
+            so_far = "".join(cur)
+            raw = _RAW_OPEN.match(text, i) if (_RAW_PREFIX.search(so_far) and _RAW_PREFIX.search(so_far).end() == len(so_far)) else None
+            if _INCLUDE_START.fullmatch(so_far):
+                end = quoted_end(i, '"')
+                cur.append(text[i:end])
+            elif raw:
+                close = ")" + raw.group(1) + '"'
+                end = text.find(close, raw.end())
+                end = n if end < 0 else end + len(close)
+                cur.append('""')
+                lines_of(text[i:end])
+            else:
+                end = quoted_end(i, '"')
+                cur.append('""')
+            i = end
+        elif c == "'":
+            tail = _WORD_BEFORE.search("".join(cur)[-40:])
+            if tail and tail.group(0)[0].isdigit():  # a digit separator (1'000), not a character literal
+                cur.append(c)
+                i += 1
+            else:
+                i = quoted_end(i, "'")
+                cur.append("''")
+        else:
+            cur.append(c)
+            i += 1
+    out.append("".join(cur))
+    return out
+
+
 def _scan(path):
-    """The #include lines of one file: [(line number, 'angle' or 'quote', name, in a Windows-only block)].
+    """What one file holds, in line order: [(line number, kind, name, in a Windows-only block)], kind 'angle' or 'quote'
+    (an #include <...> or "...") or 'call' (a call spelled the Microsoft way, see MSVC_CALL).
     A block is Windows-only when it is the first branch of `#ifdef _WIN32` / `#if defined(_WIN32)`, the `#else` of
-    `#ifndef _WIN32` / `#if !defined(_WIN32)`, or an `#elif defined(_WIN32)` branch, and everything nested in one.
-    Any other condition (`defined(_WIN32) || ...`, `_MSC_VER`, an #else after an #elif) is not: when in doubt a header
-    counts as reached."""
+    `#ifndef _WIN32` / `#if !defined(_WIN32)`, or an `#elif defined(_WIN32)` / `#elifdef _WIN32` branch, and everything
+    nested in one. Any other condition (`defined(_WIN32) || ...`, `_MSC_VER`, another #elif, #elifdef or #elifndef
+    branch) is not: when in doubt a header or a call counts as reached."""
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
-    text = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)  # block comments, lines kept
-    out, stack = [], []  # stack of [state, chained]: state 'win' / 'notwin' / 'other'; chained = an #elif was seen
-    for n, line in enumerate(text.split("\n"), 1):
+    out, stack = [], []  # stack of states: 'win' (Windows only) / 'notwin' (the other branch of one) / 'other'
+    for n, line in enumerate(code_lines(text), 1):
+        windows_only = "win" in stack
         m = _DIRECTIVE.match(line)
         if not m:
+            if not line.lstrip().startswith("#") or re.match(r"\s*#\s*define\b", line):
+                out += [(n, "call", c.group(1), windows_only) for c in MSVC_CALL.finditer(line)
+                        if c.group(1) not in PORTABLE_CALLS]
             continue
-        word, rest = m.group(1), m.group(2).split("//")[0].strip() if m.group(1) != "include" else m.group(2)
+        word, rest = m.group(1), m.group(2).strip()
         if word == "ifdef":
-            stack.append(["win" if rest == "_WIN32" else "other", False])
+            stack.append("win" if rest == "_WIN32" else "other")
         elif word == "ifndef":
-            stack.append(["notwin" if rest == "_WIN32" else "other", False])
+            stack.append("notwin" if rest == "_WIN32" else "other")
         elif word == "if":
-            stack.append(["win" if _ONLY_WIN.fullmatch(rest) else "notwin" if _NOT_WIN.fullmatch(rest) else "other", False])
-        elif word == "elif" and stack:
-            stack[-1] = ["win" if _ONLY_WIN.fullmatch(rest) else "other", True]
+            stack.append("win" if _ONLY_WIN.fullmatch(rest) else "notwin" if _NOT_WIN.fullmatch(rest) else "other")
+        elif word in ("elif", "elifdef", "elifndef") and stack:
+            only_win = rest == "_WIN32" if word == "elifdef" else word == "elif" and _ONLY_WIN.fullmatch(rest) is not None
+            stack[-1] = "win" if only_win else "other"
         elif word == "else" and stack:
-            state, chained = stack[-1]
-            stack[-1] = ["other" if chained else {"win": "notwin", "notwin": "win"}.get(state, "other"), chained]
+            stack[-1] = {"win": "notwin", "notwin": "win"}.get(stack[-1], "other")
         elif word == "endif" and stack:
             stack.pop()
         elif word == "include":
             inc = _INCLUDE.match(rest)
             if inc:
-                windows_only = any(state == "win" for state, _ in stack)
                 out.append((n, "angle" if inc.group(1) else "quote", (inc.group(1) or inc.group(2)).strip(), windows_only))
     return out
 
@@ -176,11 +267,11 @@ def _resolve(name, folder, repo, include_dirs):
     return None
 
 
-def local_includes(path, repo, include_dirs=()):
+def local_includes(path, repo, include_dirs=(), scanned=None):
     """(found, unresolved) for the quoted includes of one file that are outside a Windows-only block:
     found = [(line, name, the file it resolves to)], unresolved = [(line, name)] for a name that is in no folder."""
     found, unresolved = [], []
-    for n, kind, name, windows_only in _scan(path):
+    for n, kind, name, windows_only in (_scan(path) if scanned is None else scanned):
         if kind == "quote" and not windows_only:
             target = _resolve(name, os.path.dirname(path), repo, include_dirs)
             if target is None:
@@ -191,10 +282,10 @@ def local_includes(path, repo, include_dirs=()):
 
 
 def walk(source, repo, include_dirs=()):
-    """Every include the compiler would see on a system that is not Windows, depth first in file order, each file once:
+    """What the compiler would see on a system that is not Windows, depth first in file order, each file once:
     yields (kind, file, line, name), kind 'angle' (a <...> include outside a Windows-only block), 'unresolved' (a
-    quoted include that is in no folder: not followed, and reported here) or 'guarded' (a <...> include inside a
-    Windows-only block). `file` is relative to `repo`, with '/'."""
+    quoted include that is in no folder: not followed, and reported here), 'guarded' (a <...> include inside a
+    Windows-only block) or 'call' (a Microsoft-spelled call outside one). `file` is relative to `repo`, with '/'."""
     seen = set()
 
     def visit(path):
@@ -202,15 +293,18 @@ def walk(source, repo, include_dirs=()):
         if key in seen:
             return
         seen.add(key)
-        for n, kind, name, windows_only in _scan(path):
+        scanned = _scan(path)
+        found, unresolved = local_includes(path, repo, include_dirs, scanned)
+        targets, missing = {n: target for n, _, target in found}, {n for n, _ in unresolved}
+        for n, kind, name, windows_only in scanned:
             if kind == "angle":
                 yield ("guarded" if windows_only else "angle", _rel(path, repo), n, name)
-            elif not windows_only:
-                target = _resolve(name, os.path.dirname(path), repo, include_dirs)
-                if target is None:
-                    yield ("unresolved", _rel(path, repo), n, name)
-                else:
-                    yield from visit(target)
+            elif kind == "call" and not windows_only:
+                yield ("call", _rel(path, repo), n, name)
+            elif kind == "quote" and n in missing:
+                yield ("unresolved", _rel(path, repo), n, name)
+            elif kind == "quote" and n in targets:
+                yield from visit(targets[n])
 
     yield from visit(os.path.abspath(source))
 
@@ -227,6 +321,12 @@ def windows_reach(source, repo, include_dirs=()):
 def unresolved_includes(source, repo, include_dirs=()):
     """[(file, line, name)] of the quoted includes in `source`'s closure that are in no folder (so were not followed)."""
     return [(file, n, name) for kind, file, n, name in walk(source, repo, include_dirs) if kind == "unresolved"]
+
+
+def msvc_calls(source, repo, include_dirs=()):
+    """[(file, line, name)] of the calls spelled the Microsoft way (MSVC_CALL, less PORTABLE_CALLS) that `source`'s
+    closure makes outside a Windows-only block. A net over spellings: an empty list does not prove the code portable."""
+    return [(file, n, name) for kind, file, n, name in walk(source, repo, include_dirs) if kind == "call"]
 
 
 # ---- running ----------------------------------------------------------------------------------------------------------
@@ -267,7 +367,7 @@ def _run(argv, cwd, timeout=None):
         return out.decode("utf-8", errors="replace"), None
 
 
-def run_test(name, sources, flags, cxx, repo, tmp, suffix, timeout):
+def run_test(name, sources, flags, cxx, repo, tmp, suffix, timeout, compile_timeout=DEFAULT_COMPILE_TIMEOUT):
     """(verdict, count, why, output, ran) for one run line."""
     if any("{SDK}" in f for f in flags):
         sdk = os.environ.get("REXSDK_DIR", "")
@@ -275,8 +375,10 @@ def run_test(name, sources, flags, cxx, repo, tmp, suffix, timeout):
             return "did not run", None, "REXSDK_DIR is not set or not a folder, and the line uses {SDK}", "", False
         flags = [f.replace("{SDK}", sdk) for f in flags]
     exe = os.path.join(tmp, name + suffix)
-    output, code = _run([cxx, "-std=c++23", "-O2", *flags, *sources, "-o", exe], repo)
-    if code != 0 or not os.path.isfile(exe):
+    output, code = _run([cxx, "-std=c++23", "-O2", *flags, *sources, "-o", exe], repo, compile_timeout)
+    if code is None:
+        return "did not run", None, f"compile timed out after {compile_timeout:g} s", output, False
+    if code != 0 or not os.path.isfile(exe):  # a compiler that says 0 and wrote no program did not compile it
         return "did not run", None, f"compile failed; exit {code}", output, False
     output, code = _run([exe], os.path.join(repo, "tests", "host"), timeout)
     if code is None:  # a hung program never passes, whatever it printed before it hung
@@ -290,6 +392,8 @@ def main(argv=None):
     ap.add_argument("--cxx", default="c++", help="the C++ compiler: one program name or path (default c++)")
     ap.add_argument("--manifest", help="the manifest (default tests/host/posix_manifest.txt of the repository)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds each test program may take (default 600)")
+    ap.add_argument("--compile-timeout", type=float, default=DEFAULT_COMPILE_TIMEOUT,
+                    help="seconds each compile may take (default 1800); for this runner's own tests and slow machines")
     ap.add_argument("--repo", default=REPO, help="the repository root (this runner's own tests: a stand-in folder)")
     ap.add_argument("--exe-suffix", default=".exe" if os.name == "nt" else "",
                     help="the suffix of the program file the compiler is asked to write and that is then started "
@@ -319,7 +423,8 @@ def main(argv=None):
     tmp = tempfile.mkdtemp(prefix="doa4_posix_host_")
     try:
         for name, sources, flags in chosen:
-            verdict, count, why, output, did_run = run_test(name, sources, flags, a.cxx, repo, tmp, a.exe_suffix, a.timeout)
+            verdict, count, why, output, did_run = run_test(name, sources, flags, a.cxx, repo, tmp, a.exe_suffix, a.timeout,
+                                                            a.compile_timeout)
             ran += 1 if did_run else 0
             if verdict == "passed":
                 passed += 1

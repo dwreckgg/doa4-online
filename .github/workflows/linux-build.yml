@@ -1,6 +1,7 @@
 name: Linux build
 # Compiles the game for Linux (x86-64) and runs the host tests that need no Windows header there, so that a change
-# which breaks the Linux build or those tests is seen on the push that makes it.
+# which breaks the Linux build or those tests is seen in the job of its push, or, when a newer push to the same branch
+# arrives while that job runs (the older job is then cancelled), in the job of the newer push.
 # It publishes nothing: no release, no program file, nothing a player downloads. Its only output is the log files
 # it uploads as a workflow artifact. It never starts the release workflow (netplay-release.yml) and shares nothing
 # with it: its token can only read the repository, and its concurrency group is its own, so a red or a slow Linux job
@@ -18,7 +19,7 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    # 240 minutes: the first build compiles the SDK and the whole recompiled game with no cache, two files at a time;
+    # 240 minutes: every run compiles the SDK and the whole recompiled game with no cache, two files at a time;
     # the Windows release job is given 300 for its build at the same width plus its release steps.
     timeout-minutes: 240
     defaults:
@@ -59,6 +60,9 @@ jobs:
           # cmake, ninja-build: the game's preset (CMakePresets.json:23, generator Ninja; CMakeLists.txt:5, CMake 3.25)
           # build-essential, git, curl, unzip, autoconf: rexglue-sdk .github/workflows/_build-platform.yaml:71
           sudo apt-get install -y cmake ninja-build build-essential git curl unzip autoconf
+          # libstdc++-14-dev: the sources use std::print (tests/host/afs_overlay_host_test.cpp:30 is one of many), and
+          # <print> comes with libstdc++ 14; the image's default libstdc++ is not relied on for it
+          sudo apt-get install -y libstdc++-14-dev
           # pkg-config: rexglue-sdk src/ui/CMakeLists.txt:151 (find_package(PkgConfig REQUIRED))
           # libx11-xcb-dev: rexglue-sdk src/ui/CMakeLists.txt:152 (pkg_check_modules x11-xcb)
           # libwayland-dev: rexglue-sdk src/ui/CMakeLists.txt:155 (pkg_check_modules wayland-client)
@@ -80,7 +84,9 @@ jobs:
         run: |
           set -o pipefail
           # the SDK is built by the game's own configure: generated/rexglue.cmake:10-11 adds REXSDK_DIR as a subdirectory
-          cmake --preset linux-amd64-release -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 -DREXSDK_DIR=$GITHUB_WORKSPACE/rexglue-sdk 2>&1 | tee configure.log
+          # -march=x86-64-v3 for C and C++: the Windows job passes the same pair (netplay-release.yml:102) and
+          # CMakeLists.txt:170 takes the flag from CMAKE_CXX_FLAGS; the game's linux-base preset sets no flags
+          cmake --preset linux-amd64-release -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3" -DREXSDK_DIR=$GITHUB_WORKSPACE/rexglue-sdk 2>&1 | tee configure.log
           # -j 2: the recompiled game's largest files take several GB each to compile; the Windows job builds two at a
           # time beside a 16 GB page file. "Runner size" above prints this runner's memory, for a later round to raise it.
           cmake --build --preset linux-amd64-release -- -j 2 2>&1 | tee build.log

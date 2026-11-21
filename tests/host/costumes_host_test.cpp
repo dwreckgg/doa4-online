@@ -12,6 +12,8 @@
 #include <utility>
 #ifdef _WIN32
 #include <process.h>
+#else
+#include <unistd.h>
 #endif
 #include <filesystem>
 #include <fstream>
@@ -1382,7 +1384,11 @@ static void TestRaiseCountRowFollowsBox() {
 static std::filesystem::path WriteFakeImage(std::vector<uint8_t>* bytes) {
   // One name per process: a second run at the same time must not delete this one's file.
   const std::filesystem::path path = std::filesystem::temp_directory_path() /
+#ifdef _WIN32
                                      ("doa4_test_image_reader_check_" + std::to_string(unsigned(_getpid())) + ".bin");
+#else
+                                     ("doa4_test_image_reader_check_" + std::to_string(unsigned(getpid())) + ".bin");
+#endif
   bytes->resize(0x300);
   for (size_t i = 0; i < bytes->size(); ++i) (*bytes)[i] = uint8_t(i * 7 + 3);
   std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));

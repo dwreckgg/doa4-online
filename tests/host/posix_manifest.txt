@@ -13,14 +13,19 @@
 # .bat is one clang-cl line that names only files of this repository. Its sources are that line's .cpp files. Its flags
 # are that line's /D options as -D, with /D_MSVC_STL_HARDENING=1 as -D_GLIBCXX_ASSERTIONS and the Windows-only
 # /D_WIN32_WINNT, /DWIN32_LEAN_AND_MEAN and /DNOMINMAX dropped, and a repository include folder as -I <folder>.
-# tests/tools/test_release_tools.py checks all of this against the .bat files and the sources, so a line here that
-# no longer matches its .bat fails that suite.
+# A run line's sources also make no call spelled the Microsoft way (_name( or name_s() outside such a block: a net
+# over spellings, which catches a _getpid() left unguarded, not a proof that the code compiles on Linux.
 #
-# A left-out reason starts with one of:
-#   windows header: <file>:<line> <header>   the first Windows header the sources reach outside such a block
-#   needs the SDK: <what the .bat names>     the .bat names %REXSDK_DIR% or a folder outside the repository
-#   needs game files: <what>
-#   other: <why>                             (a multi-step build: compile loops, object and link steps, a Python step)
+# A left-out reason is the first of these that holds for the test, in these exact words:
+#   windows header: <file>:<line> <header>     the first Windows header the sources reach outside such a block
+#   other: multi-step build (<n> compile lines)   compile loops, object and link steps, a Python step
+#   needs the SDK: <what the .bat names>       the .bat names %REXSDK_DIR% or a folder outside the repository
+#   other: floating-point build options (<them>)
+#   other: an include that is in no repo folder (<file>:<line> <name>)
+# ("needs game files: <what>" is kept for a test that cannot run without them; no rule gives it today.)
+# tests/tools/test_release_tools.py works these rules out again from the .bat files and the sources and compares
+# every line here with the result: a run line's sources and flags, and a left-out line's whole reason. A line that
+# no longer matches its .bat or its sources, or a reason written by hand, fails that suite.
 #
 # Notes:
 # - The Linux job is x86-64 only: cpu_info's non-Windows Read() uses <cpuid.h>, and there is no arm64 path.
