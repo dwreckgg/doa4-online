@@ -163,8 +163,6 @@ std::shared_ptr<const afs::Source> OpenChecked(const std::filesystem::path& fold
 
 const SlotTable& Slots() { return kSlots; }
 
-bool Enabled(bool session, std::string_view np_mode) { return !session && (np_mode.empty() || np_mode == "record"); }
-
 std::filesystem::path ColourFolder(const std::filesystem::path& user_data, std::string_view override_utf8) {
   std::filesystem::path folder = user_data / "colour_costumes";
   if (!override_utf8.empty()) {

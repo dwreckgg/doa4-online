@@ -45,6 +45,7 @@
 
 #include "generated/default/dead_or_alive_4_init.h"
 
+#include "../doa4_alpha_colours.h"
 #include "../doa4_gamefiles.h"
 #include "../doa4_intro_skip.h"
 #include "../doa4_lagtrace.h"
@@ -275,6 +276,19 @@ std::atomic<bool> g_switch_test_dir{false};
 std::mutex g_early_mu;
 std::vector<std::string> g_early;  // EarlyLog lines, written into np_log.txt when it opens
 std::string g_skipped;             // fix round M1: guest settings skipped as unregistered (comma list; meta key)
+// The hook thread check and the draw counter (doa4_alpha_colours.h): the thread number of the last frame hook (0: none
+// ran yet), how many frame hooks ran, and whether the thread's line was written.
+std::atomic<uint64_t> g_frame_thread{0};
+std::atomic<uint64_t> g_frame_hooks{0};
+std::atomic<bool> g_frame_thread_logged{false};
+
+// "[doa4][COLOURS] draws <n> frames <m>": the body hook's calls and the frame hook's calls of this process so far, at a
+// session's end and at the process's exit. A PC that drew fewer fighter frames than it simulated shows n below m (with
+// one Alpha shown; two shown count twice a frame).
+void LogDraws() {
+  REXLOG_INFO("[doa4][COLOURS] draws {} frames {}", doa4::alpha_colours::BodyDraws().load(std::memory_order_relaxed),
+              g_frame_hooks.load(std::memory_order_relaxed));
+}
 
 void Log(const std::string& line) {
   State& s = S();
@@ -614,6 +628,7 @@ void Quit(State& s, const std::string& why, bool ask_host = true) {
   if (s.quitting) return;
   s.quitting = true;
   Log(std::string("quit at frame ") + std::to_string(s.frame ? s.frame - 1 : 0) + ": " + why);
+  LogDraws();  // the session's end (a record or replay run)
   CloseFiles(s);
   det::Stop();
   g_active.store(false, std::memory_order_release);  // the hooks pass through from here on
@@ -946,6 +961,7 @@ void EndOnline(State& s, const live::FrameResult& r, bool at_hook) {
   Log("checksums handed to GekkoNet: " + std::to_string(handed));
   LogGeneratorSync(s);
   Log("fight gate open on " + std::to_string(s.gate_open_frames.load()) + " frames");
+  LogDraws();  // the session's end
   Event(s, UnixMs(), "session ended at frame " + std::to_string(f) + ": " + reason);
   if (r.end == live::End::kDesync) Log("desync: " + r.why + " (a dump of .data was queued)");
   // the Leave to the peer (lobby channel, sent 3 times by the lobby); on a desync too (carry 2i: a lossy link can drop
@@ -1484,6 +1500,18 @@ void OnFrameOnline(PPCContext& ctx, uint8_t* base) {
 // The frame hook: runs at the loop head before frame f. The state hashed here
 // is the state entering frame f (everything frame f - 1 did).
 void OnFrame(PPCContext& ctx, uint8_t* base) {
+  // The hook thread check's reference, stored at every frame hook before anything else (the online dispatch too): the
+  // number of the thread this hook, and so the frame's hash, runs on. Its own line is written once, so a log shows the
+  // two numbers of a check line were read in two places.
+  {
+    const uint64_t thread = doa4::alpha_colours::ThreadNumber();
+    g_frame_thread.store(thread, std::memory_order_relaxed);
+    g_frame_hooks.fetch_add(1, std::memory_order_relaxed);
+    if (!g_frame_thread_logged.load(std::memory_order_relaxed) &&
+        !g_frame_thread_logged.exchange(true, std::memory_order_relaxed)) {
+      REXLOG_INFO("[doa4][COLOURS] frame hook thread {}", thread);
+    }
+  }
   State& s = S();
   if (s.mode == Mode::kOnline) {
     OnFrameOnline(ctx, base);
@@ -1945,6 +1973,34 @@ void Abort(const std::string& reason) {
   EndOnline(s, r, false);
 }
 
+void RefuseRun(const std::string& reason) {
+  State& s = S();
+  if (s.mode == Mode::kOnline) {
+    Abort(reason);
+    return;
+  }
+  if (s.mode != Mode::kRecord && s.mode != Mode::kReplay) return;  // a plain offline game: there is no run to refuse
+  // A record or replay run, after Start: np_log.txt is open, the recording holds its header and meta, the hash files
+  // their headers, the determinism layer runs and the hooks are active. In this order: the mode off (as a refused
+  // replay leaves it; Shutdown then has nothing to end); the recording closed with no frame in it, and the hash files;
+  // the determinism layer stopped and the hooks passing through, so no frame of a session runs in a process that was
+  // refused; the writer (idle: no frame ran) ended as Shutdown ends it; the line; the quit.
+  s.mode = Mode::kOff;
+  CloseFiles(s);
+  det::Stop();
+  g_active.store(false, std::memory_order_release);
+  {
+    std::lock_guard lk(s.job_mu);
+    s.stop = true;
+  }
+  s.job_cv.notify_all();
+  if (s.writer.joinable()) s.writer.join();
+  Log("refused: " + reason);
+  if (s.host.quit) s.host.quit();
+}
+
+uint64_t FrameHookThread() { return g_frame_thread.load(std::memory_order_relaxed); }
+
 // This file reaches the SDK's simde_mm_dp_ps redirect the way every generated file does
 // (generated/default/dead_or_alive_4_init.h -> <rex/ppc.h> -> intrinsics.h -> dot_product.h), so the lambda below
 // meets the same macro the recompiled code does.
@@ -1982,9 +2038,7 @@ void Start(Host host) {
         [](const std::string& name) { return rex::cvar::Query<std::string>(name); });
     s.guest_meta = GuestMeta(guest);
     s.unlock_meta = "0";
-    // Colour costumes plan Task 6: colours=1 when this process has the local colour costumes on (the app's decision, made
-    // before Start; SetUpSuits installs them later), no key otherwise. A replay never installs them and writes no key.
-    extra = "guest=" + s.guest_meta + "\nunlock=0\n" + ColoursMetaLine(s.host.colour_costumes);
+    extra = "guest=" + s.guest_meta + "\nunlock=0\n";
   } else {
     if (s.guest_meta != "(none)") extra += "guest=" + s.guest_meta + "\n";
     if (s.unlock_meta != "(none)") extra += "unlock=" + s.unlock_meta + "\n";
@@ -2024,7 +2078,6 @@ void Start(Host host) {
     if (const std::string why = MetaMismatch(s.replay.meta, meta); !why.empty()) {
       if (Env("DOA4_NP_ALLOW_MISMATCH") != "1") {
         Log("refused: the recording was made with a different " + why);
-        if (const std::string n = ColoursRefusalNote(s.replay.meta); !n.empty()) Log(n);  // ruling T6-R1
         s.mode = Mode::kOff;
         if (s.host.quit) s.host.quit();
         return;
@@ -2052,7 +2105,6 @@ void Start(Host host) {
     // the meta must show 0 here)
     Log("record: seed " + std::to_string(s.seed) + ", " + std::to_string(head.size() - kRecHeaderBytes) +
         " bytes of meta");
-    if (s.host.colour_costumes) Log("record: colours=1 in the meta (the local colour costumes are on; a replay refuses it)");
   }
   if (const std::string q = Env("DOA4_NP_QUIT"); !q.empty()) s.quit_frame = std::strtoul(q.c_str(), nullptr, 10);
   s.shot_frames = FrameList(Env("DOA4_NP_SHOTS"));
@@ -2089,6 +2141,7 @@ void NoteTitleMaskSprite(uint32_t sprite, bool visible) {
 // runs (Task 15 G2); a session still running (the game was closed) ends as a leave without the offline relaunch; the
 // watch and restart threads stop.
 void Shutdown() {
+  LogDraws();  // the process's exit, in every kind of process (a plain offline game: frames 0)
   State& s = S();
   if (s.mode == Mode::kOff) return;
   if (s.mode == Mode::kOnline) {

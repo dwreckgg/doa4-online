@@ -1,4 +1,4 @@
-// Alpha-152's colour per fighter (the colour costumes of the local offline build, doa4_colour_costumes.h), her outline,
+// Alpha-152's colour per fighter (the colour costumes, doa4_colour_costumes.h), her outline,
 // and her kick-arc trail when two trail fighters share one set of trail words.
 //
 // Two of her colours are not in her files but in two single globals that only her body-and-composite draw sub_8245C270
@@ -18,8 +18,11 @@
 // game reset of the words writes 0xFFFFFFFF into the slot word (sub_8234A9E0, sub_8234AAA8, sub_8234C678; the draw itself
 // stores only a slot 0-15 there), so a call that finds it drops every player's copy first and starts from the reset words.
 //
-// Everything here is gated on Installed(): the colour slots are installed only in an offline process (no netplay session,
-// no replay, doa4_colour_costumes.h Enabled), so a session, a replay and every process without them is untouched.
+// The writes are gated on Installed(): her rows are installed when the colour entries are overlaid and the colour rows
+// are in the tables (SetUpSuits), in every kind of process: an online session, a record run and a replay too, where
+// both PCs choose the row by the model the fighter loaded. A process without them is untouched. Because a session
+// hashes guest memory every frame, the sites that write also check which thread they run on (the hook thread check,
+// at the end of this file).
 //
 // Header only (the host test, tests/host/alpha_colours_host_test.cpp, needs no SDK); the hooks are in
 // doa4_alpha_colours_hooks.cpp and the select panel's in doa4_alpha_select_hooks.cpp. Addresses: see the host test's
@@ -103,7 +106,7 @@ inline void Put32(const GuestBytes& g, uint32_t a, uint32_t v) {
 }
 }  // namespace detail
 
-// Offline only (SetUpSuits, after Apply, only when the colour entries were installed).
+// SetUpSuits, after Apply, only when the colour entries were installed and their rows are in the tables.
 inline void Install(const ByModel& by_model, const std::array<std::string, 256>& names = {}) {
   Rows& s = detail::State();
   s.by_model = by_model;
@@ -226,5 +229,67 @@ inline void TrailAfter(const GuestBytes& g, uint32_t packed, std::array<TrailSta
 
 // The hooks' log line when a player's row changes (defined in doa4_alpha_colours_hooks.cpp; the select hooks call it too).
 void NoteFighterRow(uint32_t player, const Saved& s);
+
+// ---- the hook thread check ----
+// The session's sync check hashes guest memory in the frame hook (np::OnFrame). The words the three sites below write
+// (the body hook, the trail hook, the select panel's pass) are safe from it only while each site runs on the frame
+// hook's thread: then a write and its putting back happen between two hashes. So each site, at every call, compares its
+// thread with the frame hook's and says so in the log: once that it is the same thread, and once, at whatever later
+// call it first happens, that it is not. Log only: the hook goes on either way.
+
+enum class HookThread : uint8_t { kUnknown, kFrameThread, kOtherThread };
+// frame_thread 0: no frame hook has run in this process yet (np::FrameHookThread), so nothing can be judged.
+inline HookThread JudgeHookThread(uint64_t frame_thread, uint64_t this_thread) {
+  if (frame_thread == 0) return HookThread::kUnknown;
+  return frame_thread == this_thread ? HookThread::kFrameThread : HookThread::kOtherThread;
+}
+// The calling thread's number: 1, 2, 3, ... in the order threads first ask, the same at every call on one thread, never
+// 0, never given to two threads of the process. The frame hook and the three sites all take their thread's from here.
+inline uint64_t ThreadNumber() {
+  static std::atomic<uint64_t> next{1};
+  thread_local const uint64_t mine = next.fetch_add(1, std::memory_order_relaxed);
+  return mine;
+}
+// One site's two "already said" marks (one object per site, for the whole process).
+struct HookSite {
+  std::atomic<bool> frame_thread_noted{false};
+  std::atomic<bool> sync_risk_noted{false};
+};
+// What the site has to log at this call: nothing while the frame hook's thread is unknown; the first time it is this
+// thread, kFrameThread; the first time it is another, kSyncRisk; nothing at every other call. The site's own thread
+// number is read here, so no caller can pass the frame hook's in its place.
+enum class HookNote : uint8_t { kNone, kFrameThread, kSyncRisk };
+inline HookNote NoteHookSite(HookSite& site, uint64_t frame_thread) {
+  switch (JudgeHookThread(frame_thread, ThreadNumber())) {
+    case HookThread::kUnknown:
+      break;
+    case HookThread::kFrameThread:
+      if (!site.frame_thread_noted.load(std::memory_order_relaxed) &&
+          !site.frame_thread_noted.exchange(true, std::memory_order_relaxed)) {
+        return HookNote::kFrameThread;
+      }
+      break;
+    case HookThread::kOtherThread:
+      if (!site.sync_risk_noted.load(std::memory_order_relaxed) &&
+          !site.sync_risk_noted.exchange(true, std::memory_order_relaxed)) {
+        return HookNote::kSyncRisk;
+      }
+      break;
+  }
+  return HookNote::kNone;
+}
+// The site's check and its log line (defined in doa4_alpha_colours_hooks.cpp; the select hooks call it too): the frame
+// hook's thread number from np::FrameHookThread, then "[doa4][COLOURS] hook thread check: <name> on the frame hook's
+// thread (frame <n>, hook <n>)" or the WARN "[doa4][COLOURS] SYNC-RISK: <name> ran on another thread than the frame
+// hook (frame <n>, hook <n>)".
+void CheckHookThread(const char* name, HookSite& site);
+
+// How often the body hook (sub_8245C270's) was called in this process: one count per shown Alpha per drawn frame. The
+// session log prints it beside the frame hook's count ("[doa4][COLOURS] draws <n> frames <m>", np_session.cpp), which
+// shows whether a PC drew fewer fighter frames than it simulated.
+inline std::atomic<uint64_t>& BodyDraws() {
+  static std::atomic<uint64_t> draws{0};
+  return draws;
+}
 
 }  // namespace doa4::alpha_colours

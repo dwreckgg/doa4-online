@@ -2,6 +2,8 @@
 // player's own game files (colourgen::Make); a made file is written only when its size and SHA-1 equal the slot table's.
 // MakeMissing finds which slots of the colour folder have no good file, makes those, and writes the manifest; KindOf and
 // ShouldMake are the caller's decision whether to call it at all. Nothing here logs: the caller logs the report.
+// The other decisions the app's start-up reads are here too, as pure functions: RowsOn and MustRefuse (what a process
+// kind does with the slots), RefusalMessage, FreeBytesFrom and IsPassingNote.
 //
 // MakeMissing never throws and never costs Load anything: after any failure, Load on the same folder behaves as if
 // MakeMissing had not run, apart from the files it made good. It writes only inside `folder` (a temporary file per
@@ -18,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "doa4_colour_costumes.h"
@@ -29,6 +32,32 @@ enum class ProcessKind : uint8_t { kLobby, kMatch };
 ProcessKind KindOf(bool session, std::string_view np_mode);
 // kLobby && !launch_refused && !folder_overridden
 bool ShouldMake(ProcessKind kind, bool launch_refused, bool folder_overridden);
+// Whether the colour costumes' ROWS go into this process's costume tables (their files are loaded and overlaid in every
+// process): everywhere, except a lobby process in vanilla mode. False only for kLobby && vanilla.
+bool RowsOn(ProcessKind kind, bool vanilla);
+// A match process whose colour entries were not installed cannot build the tables the other PC builds, so it must not
+// run: kMatch && !Installed(outcome). A lobby process is never refused.
+bool MustRefuse(ProcessKind kind, InstallOutcome outcome);
+// What the refused process says (np::RefuseRun's reason): "colour costumes: this PC cannot build the 0.3.8 costume
+// tables: <cause>; check the game files (chrthree.afs) and restart". The cause: "test switch
+// DOA4_COLOURS_TEST_UNUSABLE" when test_unusable; else for kNotUsable the first of load_notes (Status::notes), or "the
+// colour slots were not loaded" when there is none; for kDropped `error`; for kFailed `error` + " / " + `retry_error`
+// (`error` alone when there was no second try: retry_error empty); for kInstalled nothing (never asked for). An empty
+// `error` reads "the overlay install failed".
+std::string RefusalMessage(InstallOutcome outcome, const std::vector<std::string>& load_notes, std::string_view error,
+                           std::string_view retry_error, bool test_unusable);
+
+// The free bytes std::filesystem::space reported, for MakeOptions::free_bytes. UINT64_MAX when the query could not be
+// answered (`ec` set, or `available` at the value space() gives on an error, uintmax_t(-1), which is not 0): a query
+// without an answer does not refuse the making; a write that then finds no room fails as any other write does.
+uint64_t FreeBytesFrom(const std::filesystem::space_info& info, const std::error_code& ec);
+
+// MakeMissing's note when the manifest that is there cannot be read at the moment it is to be replaced. It can appear
+// for a moment when two copies of the game start together (one reads while the other renames its manifest into
+// place); the next lobby start writes the manifest.
+inline constexpr std::string_view kManifestUnreadableNote = "manifest: cannot write: the current one cannot be read";
+// True for exactly that note: the caller logs it as information, every other note as a warning.
+bool IsPassingNote(std::string_view note);
 
 // What a slot is made from: a global file number of the game (found through the guest's file table at run time), and
 // the size and SHA-1 that file has on the supported disc. A source that differs is never passed to the generator.

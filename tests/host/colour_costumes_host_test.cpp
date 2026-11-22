@@ -7,7 +7,8 @@
 //   DOA4_COLOURS_DIR=<the private colour folder> (read-only): with the image and the game folder, the approved files load.
 // Also src/doa4_colour_make.cpp (making the missing files at a lobby start): KindOf, ShouldMake, MakeDefs, MakeTempTag
 // and MakeMissing against the same synthetic folders with a test generator; each of those tests prints "-- <its name>"
-// when it starts. With the image, the source files of colourgen::kSources are looked up in its file table.
+// when it starts. With the image, the source files of colourgen::kSources are looked up in its file table. And the
+// decisions the app's wiring reads (same header): RowsOn, MustRefuse, FreeBytesFrom, IsPassingNote, RefusalMessage.
 // Set but unusable, a tier FAILS. No game byte and no colour file is in this repository. Built and run by
 // run_colour_costumes_test.bat. Prints "colour_costumes: N checks run" before its verdict line.
 
@@ -38,6 +39,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "../../src/doa4_costume_lists.h"
@@ -325,16 +327,6 @@ static void CheckSlots(const Status& s, const std::set<size_t>& stand_ins) {
 }
 
 // ---- tests ------------------------------------------------------------------------------------------------------------
-
-static void TestEnabledTable() {
-  CHECK(Enabled(false, "") == true);
-  CHECK(Enabled(false, "record") == true);
-  CHECK(Enabled(false, "replay") == false);
-  CHECK(Enabled(false, "hash") == false);
-  CHECK(Enabled(false, "other") == false);
-  CHECK(Enabled(true, "") == false);
-  CHECK(Enabled(true, "record") == false);
-}
 
 static void TestLoadAllGood() {
   World w;
@@ -1380,6 +1372,8 @@ static void TestKindOf() {
   CHECK(KindOf(false, "record") == ProcessKind::kMatch);
   CHECK(KindOf(false, "replay") == ProcessKind::kMatch);
   CHECK(KindOf(false, "hash") == ProcessKind::kMatch);
+  // Any other DOA4_NP value is a match process too: it makes nothing and ignores vanilla mode, and np::RefuseRun does
+  // nothing in it (np::Start starts no session for such a value: it is a plain offline game).
   CHECK(KindOf(false, "x") == ProcessKind::kMatch);
   CHECK(KindOf(true, "") == ProcessKind::kMatch);
   CHECK(KindOf(true, "record") == ProcessKind::kMatch);
@@ -1398,6 +1392,153 @@ static void TestShouldMake() {
   CHECK(ShouldMake(ProcessKind::kMatch, true, false) == false);
   CHECK(ShouldMake(ProcessKind::kMatch, false, true) == false);
   CHECK(ShouldMake(ProcessKind::kMatch, true, true) == false);
+}
+
+// ---- the decisions the app's wiring reads (colour generator plan Task 6) ------------------------------------------------
+// Each call of the function under test is a statement of its own; each row's comment names the wrong version it excludes.
+
+// The colour rows are in the costume tables of every process, except a lobby process in vanilla mode.
+static void TestRowsOn() {
+  std::printf("-- TestRowsOn\n");
+  // Excludes: rows only in a match process (the kind read without the vanilla flag).
+  { const bool on = RowsOn(ProcessKind::kLobby, false); CHECK(on == true); }
+  // The one false row. Excludes: always on (vanilla mode ignored).
+  { const bool on = RowsOn(ProcessKind::kLobby, true); CHECK(on == false); }
+  // Excludes: off in a match process (the offline-only rule this replaces).
+  { const bool on = RowsOn(ProcessKind::kMatch, false); CHECK(on == true); }
+  // Excludes: vanilla mode alone switches the rows off (the kind not read): a vanilla-mode player's match process
+  // would build other tables than the other PC's.
+  { const bool on = RowsOn(ProcessKind::kMatch, true); CHECK(on == true); }
+}
+
+// A match process that did not install the colour entries must not run; a lobby process is never refused.
+static void TestMustRefuse() {
+  std::printf("-- TestMustRefuse\n");
+  using O = InstallOutcome;
+  // A lobby process, each outcome. Excludes: the outcome read without the kind (three rows), and "always".
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kInstalled); CHECK(refuse == false); }
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kDropped); CHECK(refuse == false); }
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kNotUsable); CHECK(refuse == false); }
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kFailed); CHECK(refuse == false); }
+  // A match process. Excludes: the kind read without the outcome (every match process refused).
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kInstalled); CHECK(refuse == false); }
+  // Excludes: kDropped taken for installed (the swimsuits went in, the colour entries did not), and "never".
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kDropped); CHECK(refuse == true); }
+  // Excludes: only a failed install refuses (a Load that was not usable passes).
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kNotUsable); CHECK(refuse == true); }
+  // Excludes: only "the colours are missing" refuses (a failed install of everything passes).
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kFailed); CHECK(refuse == true); }
+}
+
+// std::filesystem::space answers an error with every member at the largest value, not 0: a query that cannot be
+// answered must not refuse the making ("no space"), and a full disk must.
+static_assert(sizeof(std::uintmax_t) == sizeof(uint64_t) &&
+                  static_cast<uint64_t>(static_cast<std::uintmax_t>(-1)) == UINT64_MAX,
+              "here the sentinel uintmax_t(-1) IS UINT64_MAX: the sentinel row below cannot tell a version without the "
+              "sentinel test from the right one");
+static void TestFreeBytesFrom() {
+  std::printf("-- TestFreeBytesFrom\n");
+  const auto space = [](std::uintmax_t available) {
+    fs::space_info info{};
+    info.capacity = 5000;
+    info.free = 4000;
+    info.available = available;
+    return info;
+  };
+  const std::error_code none;
+  const std::error_code failed = std::make_error_code(std::errc::no_such_file_or_directory);
+  CHECK(!none && bool(failed));  // precondition: the two codes are an answer and an error
+  // An error with a number in the member. Excludes: the error code not read (1000 would be compared with the sizes).
+  { const uint64_t got = FreeBytesFrom(space(1000), failed); CHECK(got == UINT64_MAX); }
+  // An error with 0 in the member. Excludes: "0 free on error", which would report "no space" for every slot.
+  { const uint64_t got = FreeBytesFrom(space(0), failed); CHECK(got == UINT64_MAX); }
+  // No error, the sentinel. (See the static_assert: equal with or without the sentinel test on this platform.)
+  { const uint64_t got = FreeBytesFrom(space(static_cast<std::uintmax_t>(-1)), none); CHECK(got == UINT64_MAX); }
+  // No error, a full disk. Excludes: 0 taken for "unknown" (a full disk must refuse).
+  { const uint64_t got = FreeBytesFrom(space(0), none); CHECK(got == 0); }
+  // No error, a number. Excludes: `free` (4000) or `capacity` (5000) read in place of `available`.
+  { const uint64_t got = FreeBytesFrom(space(123456), none); CHECK(got == 123456); }
+}
+
+// The one note that can appear for a moment when two copies of the game start together.
+static void TestIsPassingNote() {
+  std::printf("-- TestIsPassingNote\n");
+  // The text, written here on its own (MakeMissing's note, pinned in TestManifestRereadFails too).
+  CHECK(kManifestUnreadableNote == "manifest: cannot write: the current one cannot be read");
+  // Excludes: never (every note a warning).
+  { const bool passing = IsPassingNote(kManifestUnreadableNote); CHECK(passing == true); }
+  // A refused write shares the first 24 bytes. Excludes: a match on "manifest: " or on "manifest: cannot write: ".
+  { const bool passing = IsPassingNote("manifest: cannot write: access denied"); CHECK(passing == false); }
+  // Excludes: a match on the start of the text (starts_with).
+  { const bool passing = IsPassingNote(std::string(kManifestUnreadableNote) + " "); CHECK(passing == false); }
+  // Excludes: a match on the end of the text.
+  { const bool passing = IsPassingNote("x" + std::string(kManifestUnreadableNote)); CHECK(passing == false); }
+  // The other manifest note, and a slot's note. Excludes: a match on "manifest: ", and "always".
+  { const bool passing = IsPassingNote("manifest: alpha_lilac not listed"); CHECK(passing == false); }
+  { const bool passing = IsPassingNote("alpha_red: source differs"); CHECK(passing == false); }
+  { const bool passing = IsPassingNote(""); CHECK(passing == false); }
+}
+
+// What a refused match process says: the cause by outcome, then what repairs it.
+static void TestRefusalMessage() {
+  std::printf("-- TestRefusalMessage\n");
+  using O = InstallOutcome;
+  const std::string head = "colour costumes: this PC cannot build the 0.3.8 costume tables: ";
+  const std::string tail = "; check the game files (chrthree.afs) and restart";
+  const std::vector<std::string> notes = {"alpha_red: its stand-in cannot be read", "a second note"};
+  const std::vector<std::string> no_notes;
+  // The whole text, literally. kNotUsable names the FIRST note. Excludes: the last note, every note joined, the
+  // install error in the note's place, another wording of the start or the end.
+  {
+    const std::string got = RefusalMessage(O::kNotUsable, notes, "an install error", "a retry error", false);
+    CHECK(got == "colour costumes: this PC cannot build the 0.3.8 costume tables: alpha_red: its stand-in cannot be read; "
+                 "check the game files (chrthree.afs) and restart");
+  }
+  // kNotUsable with no note. Excludes: an empty cause, and a read of the first note of an empty list.
+  {
+    const std::string got = RefusalMessage(O::kNotUsable, no_notes, "an install error", "a retry error", false);
+    CHECK(got == head + "the colour slots were not loaded" + tail);
+  }
+  // kDropped names the install error. Excludes: the note (kNotUsable's source), and the retry's error (the retry worked).
+  {
+    const std::string got = RefusalMessage(O::kDropped, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "an install error" + tail);
+  }
+  // kDropped with no error text. Excludes: an empty cause.
+  {
+    const std::string got = RefusalMessage(O::kDropped, notes, "", "a retry error", false);
+    CHECK(got == head + "the overlay install failed" + tail);
+  }
+  // kFailed names both tries. Excludes: the first error alone, the retry's alone, the two in the other order.
+  {
+    const std::string got = RefusalMessage(O::kFailed, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "an install error / a retry error" + tail);
+  }
+  // kFailed with no first error text. Excludes: an empty first half (" / a retry error").
+  {
+    const std::string got = RefusalMessage(O::kFailed, notes, "", "a retry error", false);
+    CHECK(got == head + "the overlay install failed / a retry error" + tail);
+  }
+  // kFailed with no retry text (Load was not usable and the swimsuits' install failed: there was no second try).
+  // Excludes: a cause that ends in " / " with nothing after it.
+  {
+    const std::string got = RefusalMessage(O::kFailed, notes, "an install error", "", false);
+    CHECK(got == head + "an install error" + tail);
+  }
+  // The test switch beats a real note, and every outcome's own cause. Excludes: the switch not read.
+  {
+    const std::string got = RefusalMessage(O::kNotUsable, notes, "an install error", "a retry error", true);
+    CHECK(got == head + "test switch DOA4_COLOURS_TEST_UNUSABLE" + tail);
+  }
+  {
+    const std::string got = RefusalMessage(O::kFailed, no_notes, "an install error", "a retry error", true);
+    CHECK(got == head + "test switch DOA4_COLOURS_TEST_UNUSABLE" + tail);
+  }
+  // kInstalled has no cause (the app never asks for it). Excludes: another outcome's cause borrowed for it.
+  {
+    const std::string got = RefusalMessage(O::kInstalled, notes, "an install error", "a retry error", false);
+    CHECK(got == head + tail);
+  }
 }
 
 // MakeDefs() against the real slot table and colourgen::kSources, and against this file's own ledger rows (kStandInLedger:
@@ -1976,6 +2117,11 @@ static void TestManifestWriteFails() {
   PrintMake("TestManifestWriteFails", r);
   CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);  // the made slots still count as made
   CHECK(r.notes.size() == 1 && StartsWith(RNote(r, 0), "manifest: cannot write: "));
+  // WHICH refusal: the manifest could be read again (the hold shares reading) and the write was tried and refused, so
+  // the note carries the system's text. Excludes: the re-read judged unreadable (kManifestUnreadableNote, the rule of
+  // TestManifestRereadFails), which shares the prefix above and writes nothing either.
+  CHECK(RNote(r, 0).size() > std::string("manifest: cannot write: ").size());
+  CHECK(RNote(r, 0) != kManifestUnreadableNote);
   CHECK(Text(w.colours / "manifest.txt") == "# held\n");
   CHECK(TmpCount(w.colours) == 0);
   CHECK(GoodFiles(w) == 7);
@@ -2025,6 +2171,27 @@ static void TestNothingEscapes() {
     CHECK(gen.Total() == 0);
     const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
     CHECK(s.usable && s.slots.size() == kSlotCount);
+  }
+  {
+    // The same stop with five slots good on disk and two missing: the five stay good, and only the two undecided
+    // slots are "not attempted", in the table's order. Excludes: a stop that forgets what was already decided (seven
+    // not made, or good 0), a note for a good slot, and the two notes in another order.
+    World w;
+    RemoveFiles(w, {1, 5});
+    Gen gen;
+    MakeOptions o = Opt(gen);
+    o.free_bytes = [](const fs::path&) -> uint64_t { throw std::runtime_error("space boom"); };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestNothingEscapes (free_bytes, five good)", r);
+    const std::vector<std::string> want = {SlotName(1) + ": not attempted: the call stopped first",
+                                           SlotName(5) + ": not attempted: the call stopped first", "stopped: space boom"};
+    CHECK(r.good == 5 && r.made == 0 && r.not_made == 2);
+    CHECK(r.notes == want);
+    CHECK(gen.Total() == 0);
+    CHECK(GoodFiles(w) == 5 && !fs::exists(w.File(1)) && !fs::exists(w.File(5)));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable);
+    CheckSlots(s, {1, 5});
   }
   {
     // on_start is a notification: what it throws becomes one note and the making goes on.
@@ -2142,6 +2309,51 @@ static void TestGoodSlotLosesItsFile() {
     bool shape = false;
     const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
     CHECK(shape && lines == want_lines);
+  }
+  {
+    // The same rule for a slot MADE in this call, and two such notes in the table's order. Nothing a caller supplies
+    // runs between a slot's write and the manifest, so the loss is produced by the slot table: a table (one the game
+    // never has) in which slots 5 and 6 carry the file names of slots 3 and 4. Each of the four is made and written
+    // in the table's order, so 5's bytes replace 3's file and 6's replace 4's: when the manifest is written, 3 and 4
+    // count as made and their file no longer passes. Excludes: the note only for a slot that was good at the start
+    // (the "made" half of the condition dropped), and the two notes in another order (by name, orchid comes first).
+    World w;
+    RemoveFiles(w, {3, 4, 5, 6});
+    CHECK(fs::remove(w.colours / "manifest.txt"));  // no line for any slot: each is judged by <slot>.tpr alone
+    SlotTable table = TestSlots();
+    table[5].name = table[3].name;
+    table[6].name = table[4].name;
+    std::array<int, kSlotCount> made{};
+    Gen unused;
+    MakeOptions o = Opt(unused);
+    o.generate = [&made](std::string_view, std::span<const uint8_t> source, std::string* why) -> Made {
+      for (size_t i = 3; i < kSlotCount; ++i) {  // the four sources differ in size: the source tells the slot
+        const std::vector<uint8_t> want = StandInFor(i);
+        if (source.size() == want.size() && std::equal(source.begin(), source.end(), want.begin())) {
+          ++made[i];
+          return ColourBytes(i);
+        }
+      }
+      if (why) *why = "not a source of this test";
+      return std::nullopt;
+    };
+    const MakeReport r = RunMake(w, g, o, table);
+    PrintMake("TestGoodSlotLosesItsFile (made slots)", r);
+    CHECK((made == std::array<int, kSlotCount>{0, 0, 0, 1, 1, 1, 1}));  // precondition: each of the four was made once
+    // precondition: the shared files hold the later slots' bytes, which the earlier slots' checks refuse
+    CHECK(ReadAll(w.File(3)) == ColourBytes(5) && ReadAll(w.File(4)) == ColourBytes(6));
+    CHECK(ColourBytes(5).size() != ColourBytes(3).size() && ColourBytes(6).size() != ColourBytes(4).size());
+    CHECK(r.good == 3 && r.made == 4 && r.not_made == 0);  // the counts are as they were when each was written
+    const std::vector<std::string> want_notes = {"manifest: " + SlotName(3) + " not listed",
+                                                 "manifest: " + SlotName(4) + " not listed"};
+    CHECK(r.notes == want_notes);
+    CHECK(SlotName(4) < SlotName(3));  // precondition: the table's order is not the names' order
+    const std::vector<std::string> want_lines = {SlotName(0) + " " + SlotName(0) + ".tpr", SlotName(1) + " " + SlotName(1) + ".tpr",
+                                                 SlotName(2) + " " + SlotName(2) + ".tpr", SlotName(3) + " " + SlotName(3) + ".tpr",
+                                                 SlotName(4) + " " + SlotName(4) + ".tpr"};
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want_lines);  // the two shared names are listed once each, for slots 5 and 6
   }
 }
 
@@ -2462,7 +2674,6 @@ int main() {
   std::string why;
   const std::optional<doa4_test::CostumeImage> image = doa4_test::LoadCostumeImage(&why);
 
-  TestEnabledTable();
   TestSlotTableValues();
   TestAlphaRows();
   TestSummaryOff();
@@ -2486,6 +2697,11 @@ int main() {
   TestStandInWrongSizeNotUsable();
   TestKindOf();
   TestShouldMake();
+  TestRowsOn();
+  TestMustRefuse();
+  TestFreeBytesFrom();
+  TestIsPassingNote();
+  TestRefusalMessage();
   TestMakeDefsCoverSlots();
   TestAllGoodTouchesNothing();
   TestMakesAllFromEmpty();

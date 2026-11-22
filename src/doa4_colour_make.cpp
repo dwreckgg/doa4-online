@@ -402,7 +402,7 @@ void Body(const SlotTable& slots, const std::array<MakeDef, kSlotCount>& defs, c
     const Parsed now = ReadManifest(slots, folder, &unreadable);
     const Parsed& lines = now;
     if (unreadable) {
-      w.other.push_back("manifest: cannot write: the current one cannot be read");
+      w.other.push_back(std::string(kManifestUnreadableNote));
       return;
     }
     std::string text = "# colour costume files, one \"<slot> <file>\" line each; the game makes a missing file again\n";
@@ -444,6 +444,49 @@ ProcessKind KindOf(bool session, std::string_view np_mode) {
 bool ShouldMake(ProcessKind kind, bool launch_refused, bool folder_overridden) {
   return kind == ProcessKind::kLobby && !launch_refused && !folder_overridden;
 }
+
+bool RowsOn(ProcessKind kind, bool vanilla) { return !(kind == ProcessKind::kLobby && vanilla); }
+
+bool MustRefuse(ProcessKind kind, InstallOutcome outcome) { return kind == ProcessKind::kMatch && !Installed(outcome); }
+
+std::string RefusalMessage(InstallOutcome outcome, const std::vector<std::string>& load_notes, std::string_view error,
+                           std::string_view retry_error, bool test_unusable) {
+  // An install that failed without a text still has a cause to name.
+  const std::string first = error.empty() ? std::string("the overlay install failed") : std::string(error);
+  std::string cause;
+  if (test_unusable) {
+    cause = "test switch DOA4_COLOURS_TEST_UNUSABLE";
+  } else {
+    switch (outcome) {
+      case InstallOutcome::kInstalled:
+        break;  // never asked for: nothing was refused
+      case InstallOutcome::kNotUsable:
+        cause = load_notes.empty() ? std::string("the colour slots were not loaded") : load_notes.front();
+        break;
+      case InstallOutcome::kDropped:
+        cause = first;
+        break;
+      case InstallOutcome::kFailed:
+        cause = first;
+        if (!retry_error.empty()) {  // empty: there was no second try (Load was not usable)
+          cause += " / ";
+          cause += retry_error;
+        }
+        break;
+    }
+  }
+  std::string message = "colour costumes: this PC cannot build the 0.3.8 costume tables: ";
+  message += cause;
+  message += "; check the game files (chrthree.afs) and restart";
+  return message;
+}
+
+uint64_t FreeBytesFrom(const std::filesystem::space_info& info, const std::error_code& ec) {
+  if (ec || info.available == static_cast<std::uintmax_t>(-1)) return UINT64_MAX;
+  return info.available;
+}
+
+bool IsPassingNote(std::string_view note) { return note == kManifestUnreadableNote; }
 
 const std::array<MakeDef, kSlotCount>& MakeDefs() {
   static const std::array<MakeDef, kSlotCount> kDefs = [] {

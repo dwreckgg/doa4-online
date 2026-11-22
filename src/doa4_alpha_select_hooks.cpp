@@ -84,6 +84,9 @@ namespace as = doa4::alpha_select;
 std::atomic<bool> g_enabled{false};
 std::atomic<int32_t> g_screen_w{0}, g_screen_h{0};  // the frame's opening viewport (sub_824F4E90)
 std::atomic<bool> g_said_first[as::kPanels] = {};  // by view: the "put back" line was written for that panel
+// RunPass writes her two colour words as the body hook does (a third writer, since the colour slots are installed in
+// sessions too): its marks for the hook thread check (doa4_alpha_colours.h), under the name "select pass".
+doa4::alpha_colours::HookSite g_select_site;
 std::atomic<bool> g_said_stand_down{false};
 thread_local bool t_in_pass = false;  // RunPass is between its first and its last guest call on this thread
 
@@ -209,6 +212,7 @@ std::string Differences(const Fields& a, const Fields& b) {
 
 // Her pass for one select panel. The caller has checked everything Decide checks (so call.view is below kPanels).
 void RunPass(PPCContext& ctx, uint8_t* base, const as::Call& call) {
+  doa4::alpha_colours::CheckHookThread("select pass", g_select_site);  // at every call: this pass's thread against the frame hook's
   const uint32_t device = call.device;
   const bool first = !g_said_first[call.view].exchange(true, std::memory_order_relaxed);
   Fields before;
