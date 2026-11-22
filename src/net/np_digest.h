@@ -84,7 +84,10 @@ inline constexpr SweepMask kSweepMasks[] = {
     // sub_8276F7F0 and sub_823BB568 read the word, each as the destination of the vertex copy (sub_82770990, or
     // 82770488's own loop) into the command buffer, which the guest never reads back; its only store is the word
     // itself. +12 (the staging block's first word, written only by the batch's init sub_8276E548) is 0 on every frame
-    // of B3_r1 on both sides and stays hashed.
+    // of B3_r1 on both sides and stays hashed. Its twin +108 (0x8357C1F4, with +112 its staging) holds a second
+    // command-buffer pointer, stored by sub_827706A0 and read by sub_8276F7F0 only in batch mode 2; it stays hashed
+    // because mode 2 is never selected (every call of the mode setter sub_8276F6E0 passes 1) and it is 0 in the B2_r1
+    // dumps: a false desync at 0x8357C1F4 would be this same class (review M1, ledger G66).
     {0x8357C190, 4, "vertex pointer of the 2D quad batch 0x8357C188: the D3D command-buffer address that "
                     "sub_82750AC8 returns, stored by sub_82770488; read only as the vertex copy's destination"},
     {0x8357D520, 4, "D3D resource id counter (atomic increment in sub_8275D658): ids for D3D state caching"},
