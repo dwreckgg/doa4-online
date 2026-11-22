@@ -140,6 +140,7 @@ static const NotCarried kSdkNotCarried[] = {
     {"audio_volume", "audio-out"},
     {"backward_scan_limit", "codegen"},
     {"cache_path", "path"},
+    {"cheap_physical_protect", "memory"},  // 0.3.8: host memory protection calls only (game state byte-identical off and on); first of its group
     {"d3d12_adapter", "gpu-backend"},
     {"d3d12_allow_variable_refresh_rate_and_tearing", "present"},
     {"d3d12_bindless", "gpu-budget"},
@@ -147,6 +148,7 @@ static const NotCarried kSdkNotCarried[] = {
     {"d3d12_break_on_warning", "gpu-backend"},
     {"d3d12_clear_depth_via_drawing", "gpu-backend"},
     {"d3d12_clear_depth_via_drawing_intel", "gpu-backend"},
+    {"d3d12_constant_alpha_blend_factor", "gpu-render"},  // 0.3.8: picture only (blend factor of constant-alpha draws); resolved pixels can reach guest memory (readback_resolve=some), no game logic known to read them
     {"d3d12_debug", "gpu-backend"},
     {"d3d12_dxbc_disasm", "log"},
     {"d3d12_dxbc_disasm_dxilconv", "log"},
@@ -244,6 +246,7 @@ static const NotCarried kSdkNotCarried[] = {
     {"pad_remap_p3", "input"},
     {"pad_remap_p4", "input"},
     {"perf_log_csv", "log"},
+    {"physical_protect_timing", "log"},  // 0.3.8: only logs the physical protect stats line
     {"pre_mask_resolve_l2_block", "gpu-render"},
     {"present_allow_overscan_cutoff", "present"},
     {"present_before_vblank_wait", "present"},  // Task 8: host present timing only (the guest's order is unchanged)
@@ -348,7 +351,7 @@ static constexpr size_t kSdkCount = sizeof(kSdkNames) / sizeof(kSdkNames[0]);
 static constexpr size_t kSdkNotCarriedCount = sizeof(kSdkNotCarried) / sizeof(kSdkNotCarried[0]);
 static constexpr size_t kPortNotCarriedCount = sizeof(kPortNotCarried) / sizeof(kPortNotCarried[0]);
 static constexpr size_t kTrustedCount = sizeof(kTrusted) / sizeof(kTrusted[0]);
-static constexpr size_t kSdkTotal = 206;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear)
+static constexpr size_t kSdkTotal = 209;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend)
 
 // The expected names: the carried list, then the Extras tweak cvars of the tweaks module.
 // The port's own carried settings beyond the tweaks: they change guest memory and are no trust matter (np_handoff.cpp
