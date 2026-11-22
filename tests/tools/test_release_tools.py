@@ -876,6 +876,12 @@ def check_no_v3_build_route():
     needle = "x86-64-v" + "3"  # built at run time so this file does not match itself
     r = subprocess.run(["git", "grep", "-n", "-I", needle, "--", ".", ":!thirdparty", ":!generated"],
                        cwd=REPO, capture_output=True, text=True)
+    # git grep exits 0 (hits) or 1 (none); anything else, or any stderr, means the search did not run
+    check(r.returncode in (0, 1) and not r.stderr.strip(), f"git grep ran: rc {r.returncode}, stderr {r.stderr.strip()!r}")
+    exempt = ("src/net/np_core.cpp", "tests/host/suitconv_fp_control.cpp")
+    raw_files = [l.split(":")[0] for l in r.stdout.splitlines()]
+    check(any(f in exempt or f.startswith("tests/host/") for f in raw_files),
+          "positive control: the raw search output holds at least one exempt hit (the search found the tree)")
     hits = [l for l in r.stdout.splitlines()
             if not l.split(":")[0].startswith("tests/host/")
             and l.split(":")[0] not in ("src/net/np_core.cpp", "tests/host/suitconv_fp_control.cpp")]
