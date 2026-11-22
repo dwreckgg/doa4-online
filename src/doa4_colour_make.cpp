@@ -484,9 +484,14 @@ std::string RefusalMessage(InstallOutcome outcome, bool colours_usable, const st
         break;
     }
   }
+  // What repairs it. Slots that are not usable come from the game file their stand-ins are read from. A build or an
+  // install that failed (kDropped, kFailed) can come from a swimsuit archive too, so that remedy names no one file.
+  const bool install_failed =
+      !test_unusable && (outcome == InstallOutcome::kDropped || outcome == InstallOutcome::kFailed);
   std::string message = "colour costumes: this PC cannot build the 0.3.8 costume tables: ";
   message += cause;
-  message += "; check the game files (chrthree.afs) and restart";
+  message += install_failed ? "; check the game files and the swimsuit import, then restart"
+                            : "; check the game files (chrthree.afs) and restart";
   return message;
 }
 

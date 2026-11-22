@@ -1270,11 +1270,11 @@ class DeadOrAlive4App : public rex::ReXApp {
         case doa4::np::live::End::kDesync: ending = ov::Ending::kDesync; break;
         case doa4::np::live::End::kFrame0Timeout: ending = ov::Ending::kFrame0Timeout; break;
         case doa4::np::live::End::kInternal:
-          // This PC ended the session itself (np::Abort: it cannot build the costume tables, or its port did not
-          // open; or the session's own internal end): the end's reason, the text EndOnline kept in the last result,
-          // goes into this PC's banner. Nothing sends it to the other PC.
+          // An end np::Abort made (this PC cannot build the costume tables, or its port did not open) carries a reason
+          // written to be shown: it goes into this PC's banner. Every other internal end has none here (AbortReason
+          // is empty: their texts are for the log) and keeps the fixed text. Nothing sends it to the other PC.
           ending = ov::Ending::kInternal;
-          reason = doa4::np::LastResult().why;
+          reason = doa4::np::AbortReason();
           break;
         case doa4::np::live::End::kWorkerOrder: ending = ov::Ending::kWorkerOrder; break;  // lockstep port B3
         case doa4::np::live::End::kNone: break;
@@ -2126,7 +2126,8 @@ class DeadOrAlive4App : public rex::ReXApp {
   // folder (no Status is alive on it yet: a loaded file is held open without write sharing). A match process, a
   // process whose session start was refused, and a folder named by doa4_colour_costumes_dir make nothing. Runs in
   // line on the thread that runs SetUpSuits (the UI thread, before or between its messages): about half a second for
-  // all seven files on four threads, and nothing at all once they are made.
+  // all seven files on four threads. Once they are made, every lobby start still checks the seven files here (a
+  // SHA-1 of each, about 86 MB in all) before Load hashes them again; nothing is written then.
   void MakeColourFiles(const std::filesystem::path& colour_dir, const std::filesystem::path& game_root,
                        bool folder_overridden) {
     namespace cc = doa4::colour_costumes;

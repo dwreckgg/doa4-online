@@ -230,6 +230,7 @@ struct State {
   HANDLE timer = nullptr;      // a high-resolution waitable timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), game thread
   std::mutex result_mu;
   live::FrameResult last_result;
+  bool result_by_abort = false;  // under result_mu: last_result is an end np::Abort made (its `why` is Abort's reason)
   std::mutex timing_mu;
   NetTiming timing;
   uint32_t mxcsr0 = 0;
@@ -948,7 +949,9 @@ void LogGeneratorSync(State& s) {
   if (s.gen_sync_frames.load() || s.gen_sync_locked.load()) Log("scene generator made equal on " + std::to_string(s.gen_sync_frames.load()) + " frames, its lock held on " + std::to_string(s.gen_sync_locked.load()));
 }
 
-void EndOnline(State& s, const live::FrameResult& r, bool at_hook) {
+// by_abort: the end is np::Abort's (this PC ended the session itself, with a reason written for the player): the mark
+// is stored beside the result, and only then does AbortReason give the reason out for the banner.
+void EndOnline(State& s, const live::FrameResult& r, bool at_hook, bool by_abort = false) {
   if (s.ended.exchange(true)) return;
   s.running.store(false);
   const bool refused = s.refused.load();
@@ -978,6 +981,7 @@ void EndOnline(State& s, const live::FrameResult& r, bool at_hook) {
   {
     std::lock_guard lk(s.result_mu);
     s.last_result = r;
+    s.result_by_abort = by_abort;
   }
   if (s.live) s.live->Close();  // carry 2i: Executor::DropPending, then gekko Destroy
   CloseFiles(s);
@@ -1942,6 +1946,12 @@ live::FrameResult LastResult() {
   return s.last_result;
 }
 
+std::string AbortReason() {
+  State& s = S();
+  std::lock_guard lk(s.result_mu);
+  return s.result_by_abort ? s.last_result.why : std::string();
+}
+
 void RequestLeave() {
   State& s = S();
   const int32_t at = s.session_frame.load() + 1;
@@ -1970,7 +1980,7 @@ void Abort(const std::string& reason) {
   r.end = live::End::kInternal;
   r.end_frame = 0;
   r.why = reason;
-  EndOnline(s, r, false);
+  EndOnline(s, r, false, /*by_abort=*/true);
 }
 
 void RefuseRun(const std::string& reason) {

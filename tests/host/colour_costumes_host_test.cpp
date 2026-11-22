@@ -1485,6 +1485,9 @@ static void TestRefusalMessage() {
   using O = InstallOutcome;
   const std::string head = "colour costumes: this PC cannot build the 0.3.8 costume tables: ";
   const std::string tail = "; check the game files (chrthree.afs) and restart";
+  // The remedy follows the outcome: a build or install that failed (kDropped, kFailed) can come from a swimsuit
+  // archive as well as from a game file, so its remedy names both and no one file.
+  const std::string tail_install = "; check the game files and the swimsuit import, then restart";
   // Load's notes in the order Load pushes them: why a stand-in was needed first, the cause of "not usable" last.
   const std::vector<std::string> notes = {"the colour folder is missing; every slot shows its stand-in",
                                           "alpha_red: its stand-in cannot be read; no colour slot is installed"};
@@ -1503,36 +1506,40 @@ static void TestRefusalMessage() {
     CHECK(got == head + "the colour slots were not loaded" + tail);
   }
   // kDropped names the install error. Excludes: the note (kNotUsable's source), and the retry's error (the retry worked).
+  // The whole text of the second remedy, literally. Excludes: one remedy for every outcome (chrthree.afs named for a
+  // failure a swimsuit archive can cause).
   {
     const std::string got = RefusalMessage(O::kDropped, true, notes, "an install error", "a retry error", false);
-    CHECK(got == head + "an install error" + tail);
+    CHECK(got == head + "an install error" + tail_install);
+    CHECK(got == "colour costumes: this PC cannot build the 0.3.8 costume tables: an install error; check the game files "
+                 "and the swimsuit import, then restart");
   }
   // kDropped with no error text. Excludes: an empty cause.
   {
     const std::string got = RefusalMessage(O::kDropped, true, notes, "", "a retry error", false);
-    CHECK(got == head + "the overlay install failed" + tail);
+    CHECK(got == head + "the overlay install failed" + tail_install);
   }
   // kDropped with the usable flag off: the flag is read for kFailed only. Excludes: the colour cause put in front
   // whenever the flag is off, whatever the outcome.
   {
     const std::string got = RefusalMessage(O::kDropped, false, notes, "an install error", "a retry error", false);
-    CHECK(got == head + "an install error" + tail);
+    CHECK(got == head + "an install error" + tail_install);
   }
   // kFailed with the colour slots usable names both tries. Excludes: the first error alone, the retry's alone, the
   // two in the other order, and the colour cause put in front although the slots were usable.
   {
     const std::string got = RefusalMessage(O::kFailed, true, notes, "an install error", "a retry error", false);
-    CHECK(got == head + "an install error / a retry error" + tail);
+    CHECK(got == head + "an install error / a retry error" + tail_install);
   }
   // kFailed, usable, with no first error text. Excludes: an empty first half (" / a retry error").
   {
     const std::string got = RefusalMessage(O::kFailed, true, notes, "", "a retry error", false);
-    CHECK(got == head + "the overlay install failed / a retry error" + tail);
+    CHECK(got == head + "the overlay install failed / a retry error" + tail_install);
   }
   // kFailed, usable, with no retry text. Excludes: a cause that ends in " / " with nothing after it.
   {
     const std::string got = RefusalMessage(O::kFailed, true, notes, "an install error", "", false);
-    CHECK(got == head + "an install error" + tail);
+    CHECK(got == head + "an install error" + tail_install);
   }
   // kFailed with the colour slots NOT usable (Load was not usable and the swimsuits' install failed: there was no
   // second try): the colour cause as for kNotUsable, then the install error. A retry text is given here although
@@ -1540,18 +1547,19 @@ static void TestRefusalMessage() {
   // colour slots could not be loaded), and the retry text appended.
   {
     const std::string got = RefusalMessage(O::kFailed, false, notes, "an install error", "a retry error", false);
-    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / an install error" + tail);
+    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / an install error" + tail_install);
   }
   // The same with no note, and with no error text. Excludes: an empty half on either side of " / ".
   {
     const std::string got = RefusalMessage(O::kFailed, false, no_notes, "an install error", "a retry error", false);
-    CHECK(got == head + "the colour slots were not loaded / an install error" + tail);
+    CHECK(got == head + "the colour slots were not loaded / an install error" + tail_install);
   }
   {
     const std::string got = RefusalMessage(O::kFailed, false, notes, "", "", false);
-    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / the overlay install failed" + tail);
+    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / the overlay install failed" + tail_install);
   }
-  // The test switch beats a real note, and every outcome's own cause. Excludes: the switch not read.
+  // The test switch beats a real note, and every outcome's own cause, and keeps the first remedy whatever the
+  // outcome. Excludes: the switch not read, and (the kFailed row) the outcome's remedy under the switch.
   {
     const std::string got = RefusalMessage(O::kNotUsable, false, notes, "an install error", "a retry error", true);
     CHECK(got == head + "test switch DOA4_COLOURS_TEST_UNUSABLE" + tail);
@@ -2536,12 +2544,31 @@ static void TestTwoMakersOneFolder() {
   CHECK(!escaped[0] && !escaped[1]);
   CHECK(!b.expired);
   CHECK(b.entered[0] == int(kSlotCount) && b.entered[1] == int(kSlotCount));
+  // Per maker, the designed outcome of two copies writing one folder (the design's degrade row "cannot write: ...
+  // file held by another running copy: stand-in this run; made at a later start; one log line"): every slot is
+  // good, made or not made; a slot may be not made ONLY because its write was refused while the other maker held
+  // the file, and then exactly one note says so, "<slot>: cannot write: <the system's text>". Every other note
+  // fails: another cause for a slot (nothing here is short of space or of a source), a second note for one slot, a
+  // note that names no slot. "No slot not made" is not asserted: it holds only by timing (a refused rename whose
+  // re-check is refused too is rare, and designed).
   for (int m = 0; m < 2; ++m) {
     CHECK(gens[m].Total() == int(kSlotCount));
-    CHECK(SlotNotes(reports[m]) == 0);  // no note names a slot as not made
+    CHECK(reports[m].good + reports[m].made + reports[m].not_made == kSlotCount);
+    CHECK(reports[m].notes.size() == reports[m].not_made);  // one note per slot not made, and no other note
+    size_t refused_writes = 0, other_notes = 0;
+    for (const std::string& note : reports[m].notes) {
+      bool allowed = false;
+      for (size_t i = 0; i < kSlotCount; ++i) {
+        const std::string start = SlotName(i) + ": cannot write: ";
+        allowed = allowed || (StartsWith(note, start) && note.size() > start.size());
+      }
+      (allowed ? refused_writes : other_notes) += 1;
+    }
+    CHECK(other_notes == 0);  // excludes: a slot under contention reported with another cause ("no space", ...)
+    CHECK(refused_writes == reports[m].not_made);
     CHECK(SlotNotes(reports[m]) == reports[m].not_made);  // RunMake's check, for these calls made outside it
-    CHECK(reports[m].not_made == 0 && reports[m].good + reports[m].made == kSlotCount);
   }
+  // The folder's outcome is strict whatever each maker reported: seven good files, no temporary, the standard lines.
   CHECK(GoodFiles(w) == 7);
   CHECK(TmpCount(w.colours) == 0);
   bool shape = false;

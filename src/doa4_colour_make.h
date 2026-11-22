@@ -39,7 +39,9 @@ bool RowsOn(ProcessKind kind, bool vanilla);
 // run: kMatch && !Installed(outcome). A lobby process is never refused.
 bool MustRefuse(ProcessKind kind, InstallOutcome outcome);
 // What the refused process says (np::RefuseRun's reason): "colour costumes: this PC cannot build the 0.3.8 costume
-// tables: <cause>; check the game files (chrthree.afs) and restart". The cause: "test switch
+// tables: <cause><remedy>". The remedy is "; check the game files (chrthree.afs) and restart" for kNotUsable (the
+// stand-ins are read from that file), for the test switch and for kInstalled, and "; check the game files and the
+// swimsuit import, then restart" for kDropped and kFailed (a swimsuit archive can break the build too). The cause: "test switch
 // DOA4_COLOURS_TEST_UNUSABLE" when test_unusable; else for kNotUsable the LAST of load_notes (Status::notes: Load pushes
 // the note that says why nothing is usable right before it returns; the notes before it say why a stand-in was
 // needed), or "the colour slots were not loaded" when there is none; for kDropped `error`; for kFailed with the colour

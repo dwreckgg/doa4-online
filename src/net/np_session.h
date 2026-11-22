@@ -146,6 +146,10 @@ std::optional<uint8_t> SessionMixedSuitHolders();
 bool BannerWaiting();                 // a hold has lasted >= 1 s and is still on (any thread; the overlay's banner)
 int32_t SessionFrame();               // the last frame hook's frame (-1 before the first)
 live::FrameResult LastResult();
+// The reason of an end np::Abort made on this PC (the session was ended here, with a reason written to be shown: this
+// PC cannot build the costume tables, its port did not open); "" for every other end, an internal one included, and
+// while the session runs. The banner shows it; nothing sends it to the other PC.
+std::string AbortReason();
 // Review I2: the other player's game answered as a lobby (the refused-session end); read by the banner.
 bool SessionRefused();
 void RequestLeave();                  // UI: this side leaves at the next frame
