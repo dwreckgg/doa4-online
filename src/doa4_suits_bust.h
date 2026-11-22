@@ -99,6 +99,14 @@ inline AgeSetting LineSetting(int saved_age, bool box) {
   return EffectiveSetting(saved_age, box, /*legacy_full=*/false);
 }
 
+// The offline reader's rule (AgeWanted outside a session): in vanilla mode (doa4::vanilla::Running(), passed in so this
+// header stays free of it) retail movement, the box off at 18, whatever is saved; else LineSetting. The saved values are
+// only read, never changed: turning vanilla mode off shows them again.
+inline AgeSetting OfflineSetting(int saved_age, bool box, bool vanilla) {
+  if (vanilla) return {false, kAgeRetail};
+  return LineSetting(saved_age, box);
+}
+
 // A session's box and age from the host's hand-off text (np::SessionBust; a replay's from its recording). Age: a whole
 // decimal int32 (from_chars over the whole text: no sign '+', no spaces, no suffix); box: exactly "true" or "false" (the
 // cvar registry's text). Both valid: LineSetting. A missing line (either nullopt: a recording made before the box, on

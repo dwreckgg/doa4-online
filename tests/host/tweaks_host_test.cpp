@@ -834,6 +834,50 @@ static void TestCostumeBlockFailure() {
 }
 
 // The tests that use the patch sites' originals.
+// Task 7 (the vanilla box): in vanilla mode no tweak is applied at load, and the wipe still turns a saved-on costume box
+// off, so Apply(i, false) meets a live tweak that was never applied, after EndLoad. It returns no error and the guest
+// bytes equal the start. An EFFECT check, not a no-write check (ledger G50, ruling C1): Apply's off writes the captured
+// originals back by design (doa4_tweaks.cpp Apply), which over unchanged bytes changes nothing; a write-back cannot be
+// seen here. Excludes: an off that fails on a never-applied tweak, and one that writes anything but the captured state.
+// The two table tweaks here; the three costume tweaks in TestNeverAppliedCostumeOffWritesNothing (image tier: their
+// blocks need the real tables).
+static void TestNeverAppliedOffWritesNothing() {
+  std::printf("-- TestNeverAppliedOffWritesNothing\n");
+  for (const size_t t : {kTagAllStages, kMpHiddenCharacters}) {
+    FakeGuest g;
+    TweakPatcher patcher;
+    patcher.CaptureOriginals(g.guest, kNoAlloc);
+    patcher.EndLoad();
+    const std::map<uint32_t, uint8_t> start = g.bytes;
+    const std::string error = patcher.Apply(g.guest, t, false, g.protect);
+    CHECK(error.empty());
+    CHECK(g.faults == 0);
+    CHECK(g.bytes == start);  // effect check: every guest byte as at the start
+    CHECK(g.Holds(FixtureFor(t), false));
+  }
+}
+
+// The costume half of TestNeverAppliedOffWritesNothing: each costume box never applied, after EndLoad, turned off (the
+// wipe's call in vanilla mode). An EFFECT check (ruling C1): no error, the tables and every guest byte as at the start,
+// through both write paths (byte writes and whole words).
+static void TestNeverAppliedCostumeOffWritesNothing() {
+  std::printf("-- TestNeverAppliedCostumeOffWritesNothing\n");
+  for (const size_t t : {kHelenaOpera, kKokoroKimonos, kChristieCostume}) {
+    CostumeGuest g;
+    doa4::GuestBytes both = g.guest;
+    both.write_be32 = [&](uint32_t a, uint32_t v) { g.SetBe32(a, v); };
+    TweakPatcher patcher;
+    patcher.CaptureOriginals(g.guest, g.alloc);
+    patcher.EndLoad();
+    const std::vector<uint8_t> tables = g.AllTables();
+    const std::map<uint32_t, uint8_t> start = g.bytes;
+    const std::string error = patcher.Apply(both, t, false, [](uint32_t, uint32_t, bool) { return true; });
+    CHECK(error.empty());
+    CHECK(g.AllTables() == tables);  // effect check: the tables as at the start
+    CHECK(g.bytes == start);         // and every other guest byte
+  }
+}
+
 static void RunPatchTests() {
   TestListsMatchThePatchFile();
   TestReadOnlyRanges();
@@ -846,6 +890,7 @@ static void RunPatchTests() {
   TestRestartNote();
   TestOffNeedsOriginals();
   TestCaptureOnlyOnce();
+  TestNeverAppliedOffWritesNothing();
 }
 
 int main() {
@@ -909,6 +954,7 @@ int main() {
     TestCostumeTweaksTogether();
     TestCostumeBlocksAreAllocatedOnceUpFront();
     TestCostumeBlockFailure();
+    TestNeverAppliedCostumeOffWritesNothing();
   } else if (doa4_test::ReportNoImage("tweaks: the costume tweaks on the image's costume tables", why)) {
     ++g_checks;
     ++g_failures;

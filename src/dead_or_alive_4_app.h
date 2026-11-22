@@ -91,6 +91,7 @@
 #include "doa4_unlocks.h"
 #include "doa4_updater.h"
 #include "doa4_utf8.h"
+#include "doa4_vanilla.h"
 #include "net/np_files.h"
 #include "net/np_handoff.h"
 #include "net/np_online.h"
@@ -1466,6 +1467,16 @@ class DeadOrAlive4App : public rex::ReXApp {
       REXLOG_INFO("[doa4][EXTRAS] {} costume count(s) above the maximum lowered", n);
     }
     if (!doa4::unlocks::FindProfile(guest_)) return;
+    // Vanilla mode raises nothing in the save (the clamp above stays, plan U1): a saved-on box raises its counts again at
+    // the first start with vanilla mode off.
+    if (doa4::vanilla::Running()) {
+      static bool logged = false;  // UiTick runs on the UI thread only
+      if (!logged) {
+        logged = true;
+        REXLOG_INFO("[doa4][VANILLA] costume counts: raise skipped");
+      }
+      return;
+    }
     for (const doa4::tweaks::Tweak& tweak : doa4::tweaks::AllTweaks()) {
       if (tweak.additions.empty() || !rex::cvar::Query<bool>(tweak.cvar)) continue;
       for (const doa4::tweaks::CostumeAddition& addition : tweak.additions) {
@@ -2323,6 +2334,11 @@ class DeadOrAlive4App : public rex::ReXApp {
     suits_checksum_ = doa4::suits::ImportChecksum(suits_status_);
     // What the tables hold. Offline, the import. In a session, the picks, on both PCs: CheckSuit reads only the tables, which the
     // host's settings made equal, so a refusal is the same on both.
+    // Vanilla mode (doa4_vanilla.h) is read here, after every overlay input above was decided without it: the overlays,
+    // their install and suits_checksum_ are the same with it on and off; only the rows below are left out.
+    const bool vanilla = doa4::vanilla::Running();
+    const doa4::colour_costumes::TableRowsChoice rows =
+        doa4::colour_costumes::ChooseTableRows(kind_, vanilla, colour->outcome, colour->test_unequal);
     std::vector<doa4::suits::Suit> table_suits;
     if (session) {
       if (suit_state != SuitSession::kNone) {
@@ -2332,15 +2348,15 @@ class DeadOrAlive4App : public rex::ReXApp {
         REXLOG_INFO("[doa4][SUITS] session: {} picks go in the tables, this PC holds the files of {} (online checksum {})", table_suits.size(),
                     suits_status_.suits.size(), suits_checksum_.empty() ? std::string("none") : suits_checksum_);
       }
-    } else {
+    } else if (rows.offline_suit_rows) {
       table_suits = doa4::suits::SuitsOf(suits_status_);
+    } else {
+      REXLOG_INFO("[doa4][VANILLA] tables: no suit rows, no colour rows (the overlays are installed as without it)");
     }
     // The colour costumes' rows (plan F10, step 4): only when their entries were installed, so no record ever names an entry
     // that is not overlaid (Installed: the gate TestNotInstalledNoExtras pins, M5-1), and only where this process has the
-    // rows on (RowsOn: everywhere, except a lobby process in vanilla mode).
-    const bool vanilla = false;  // no vanilla mode yet: its latch is read here once it exists
-    const bool colour_rows = doa4::colour_costumes::Installed(colour->outcome) &&
-                             doa4::colour_costumes::RowsOn(kind_, vanilla) && !colour->test_unequal;
+    // rows on (RowsOn: everywhere, except a lobby process in vanilla mode). ChooseTableRows above.
+    const bool colour_rows = rows.colour_rows;
     std::vector<doa4::costumes::Extra> extras;
     if (colour_rows) extras = doa4::colour_costumes::TableExtras(colours);
     if (!table_suits.empty() || !extras.empty()) {
@@ -2477,6 +2493,9 @@ class DeadOrAlive4App : public rex::ReXApp {
   }
 
   void SetUpExtras() {
+    // Vanilla mode (doa4_vanilla.h): latched once, first, before the early return below (a lobby with no guest memory still
+    // latches) and before any covered reader runs. A match process latches off whatever is saved.
+    doa4::vanilla::Latch(doa4::vanilla::LatchValue(kind_, rex::cvar::Query<bool>("doa4_vanilla_only")));
     rex::Runtime* rt = runtime();
     rex::memory::Memory* memory = rt ? rt->memory() : nullptr;
     if (!memory) {
@@ -2507,8 +2526,15 @@ class DeadOrAlive4App : public rex::ReXApp {
     }
     guest_ready_ = true;
     const auto& tweaks = doa4::tweaks::AllTweaks();
+    const bool vanilla = doa4::vanilla::Running();
+    if (vanilla) {
+      // No tweak is applied; the saved boxes and their live values stay as they are (vanilla mode never writes them).
+      int saved_on = 0;
+      for (const doa4::tweaks::Tweak& t : tweaks) saved_on += rex::cvar::Query<bool>(t.cvar) ? 1 : 0;
+      REXLOG_INFO("[doa4][VANILLA] on: {} saved boxes not applied", saved_on);
+    }
     for (size_t i = 0; i < tweaks.size(); ++i) {
-      if (!rex::cvar::Query<bool>(tweaks[i].cvar)) continue;
+      if (vanilla || !rex::cvar::Query<bool>(tweaks[i].cvar)) continue;
       std::string error = patcher_.Apply(guest_, i, true, protect_);
       const bool in_memory = patcher_.IsOn(guest_, i);
       if (error.empty() && in_memory) {
@@ -2521,6 +2547,17 @@ class DeadOrAlive4App : public rex::ReXApp {
     // The load is over: the at-load-only tweak (Alpha-152) is refused from here on, in both directions, so nothing of it is
     // patched while the game runs. Her select model follows the bytes in memory, not the cvar (which the menu may change).
     patcher_.EndLoad();
+    if (vanilla) {
+      // The live values, read back after the load (R7's evidence that vanilla mode tested them and wrote none): the six
+      // tweak cvars in AllTweaks() order, then the Age box and the age.
+      std::string live;
+      for (const doa4::tweaks::Tweak& t : tweaks) {
+        live += fmt::format("{}{}={}", live.empty() ? "" : " ", t.cvar, rex::cvar::Query<bool>(t.cvar));
+      }
+      live += fmt::format(" doa4_bust_age_on={} doa4_bust_age={}", rex::cvar::Query<bool>("doa4_bust_age_on"),
+                          rex::cvar::Query<int32_t>("doa4_bust_age"));
+      REXLOG_INFO("[doa4][VANILLA] live: {}", live);
+    }
     const bool running_alpha152 = patcher_.IsOn(guest_, doa4::tweaks::kAlpha152);
     doa4::alpha_select::Enable(running_alpha152);  // before any guest code: the boot copy's hook reads it
     running_alpha152_.store(running_alpha152 ? 1 : 0, std::memory_order_release);

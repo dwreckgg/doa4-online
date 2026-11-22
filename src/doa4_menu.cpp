@@ -1,6 +1,7 @@
 // In-game menu (Escape): Game, Controls, Photo, Extras and Online tabs. See doa4_menu.h.
 
 #include "doa4_menu.h"
+#include "doa4_vanilla.h"
 
 #include <imgui.h>
 
@@ -244,6 +245,8 @@ bool MenuDialog::SuitsImportEnabled(std::string* why) const {
     reason = "no import in this build";
   } else if (host_.suits_import->busy()) {
     reason = "an import is running";
+  } else if (vanilla::Running()) {
+    reason = vanilla::kOffText;  // the button greyed in vanilla mode; the files on disk stay as they are
   } else if (Locked(online_view::Control::kExtras)) {
     reason = online_view::kLockedText;
   } else if (host_.online.state) {
@@ -469,7 +472,9 @@ float MenuDialog::WidestRow() {
   w.push_back(text(kWipeQuestion));
   w.push_back(row({button("Yes, wipe unlocks"), button("Cancel")}));
   w.push_back(text("Waiting for the game to save..."));
-  for (const tweaks::Tweak& t : tweaks::AllTweaks()) w.push_back(toggle(t.label));
+  w.push_back(row({toggle("Vanilla DoA4 content only"), text("Applies after a restart"), button("Restart now")}));
+  for (const tweaks::Tweak& t : tweaks::AllTweaks()) w.push_back(row({toggle(t.label), text(vanilla::kOffText)}));
+  w.push_back(row({toggle("Age:"), text(vanilla::kOffText)}));
   for (const bool running : {false, true}) w.push_back(text(AlphaRestartNote(running)));  // the "Restart now" button: above
   w.push_back(toggle("Age:"));
   w.push_back(display::MenuPx(kBustAgeSliderWidth, ImGui::GetFontSize()));  // "##bust_age": its label draws no text
@@ -785,10 +790,39 @@ void MenuDialog::DrawKeyboardSection() {
 }
 
 void MenuDialog::DrawExtrasTab() {
-  ImGui::SeparatorText("Unlocks");
   // In an online session nothing here may touch the player's real save or the guest's tables (spec 6).
   const bool extras_locked = Locked(online_view::Control::kExtras);
+  // Vanilla mode as this process latched it at start-up (doa4_vanilla.h); the box below changes the saved setting only.
+  const bool vanilla_running = vanilla::Running();
+  ImGui::SeparatorText("Extras");
   if (extras_locked) ImGui::TextColored(kNoteColor, "%s", online_view::kLockedText);
+  {
+    bool saved = rex::cvar::Query<bool>("doa4_vanilla_only");
+    ImGui::BeginDisabled(extras_locked);
+    if (ImGui::Checkbox("Vanilla DoA4 content only", &saved)) {
+      // The doa4_skip_intro writer: the cvar and the toml key, nothing else; it applies at the next start.
+      if (SetPresentationSetting("doa4_vanilla_only", saved ? "true" : "false", false)) {
+        REXLOG_INFO("[doa4][VANILLA] doa4_vanilla_only = {}: saved for the next start", saved);
+      }
+    }
+    ImGui::EndDisabled();
+    // The same note and "Restart now" as the Alpha-152 box: while the saved setting differs from the running one.
+    if (rex::cvar::Query<bool>("doa4_vanilla_only") != vanilla_running) {
+      ImGui::SameLine();
+      ImGui::TextColored(kNoteColor, "Applies after a restart");
+      ImGui::SameLine();
+      ImGui::BeginDisabled(extras_locked);
+      if (ImGui::Button("Restart now##vanilla")) {
+        Restart(online_view::Control::kExtras);
+      }
+      ImGui::EndDisabled();
+      if (const char* warning = UnsavedUnlocksWarning(*host_.extras)) {
+        ImGui::TextColored(kErrorColor, "%s", warning);
+      }
+    }
+  }
+
+  ImGui::SeparatorText("Unlocks");
   const std::optional<uint32_t> profile =
       host_.guest ? unlocks::FindProfile(*host_.guest) : std::nullopt;
   if (!profile) {
@@ -857,17 +891,23 @@ void MenuDialog::DrawExtrasTab() {
           "Added after each character's own costumes. Turning one on also unlocks that character's other costumes. "
           "Re-enter character select to see the change.");
     }
-    bool on = rex::cvar::Query<bool>(tweak.cvar);
+    // In vanilla mode the box is drawn unchecked and greyed (a display copy: the saved setting is not changed).
+    bool on = vanilla_running ? false : rex::cvar::Query<bool>(tweak.cvar);
     // A live tweak is applied to guest memory; an at-load-only one (Alpha-152) is only saved, for the next start.
-    ImGui::BeginDisabled((!tweak.at_load_only && !host_.guest) || extras_locked);
+    ImGui::BeginDisabled((!tweak.at_load_only && !host_.guest) || extras_locked || vanilla_running);
     if (ImGui::Checkbox(tweak.label, &on)) {
       SetTweak(i, on);
     }
     ImGui::EndDisabled();
+    if (vanilla_running) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("%s", vanilla::kOffText);
+    }
     // The game copies her select cell once at boot: the box changes the saved setting, the running game keeps its own.
-    // The running state is asked now, not when the menu was built (before the load it is not known: no note).
+    // The running state is asked now, not when the menu was built (before the load it is not known: no note). Not in
+    // vanilla mode: a restart changes nothing while the vanilla box is on.
     const tweaks::RestartNote note =
-        i == tweaks::kAlpha152
+        i == tweaks::kAlpha152 && !vanilla_running
             ? tweaks::RestartNoteFor(rex::cvar::Query<bool>(tweak.cvar),
                                      host_.running_alpha152 ? host_.running_alpha152() : std::nullopt)
             : tweaks::RestartNote::kNone;
@@ -895,8 +935,16 @@ void MenuDialog::DrawExtrasTab() {
       session_shown ? **session_bust_
                     : suits::bust::LineSetting(rex::cvar::Query<int32_t>("doa4_bust_age"),
                                                rex::cvar::Query<bool>("doa4_bust_age_on"));
-  ImGui::BeginDisabled(extras_locked || session_shown);
+  // Vanilla mode (offline only: a session shows the session's values): the box drawn unchecked and greyed, a display copy;
+  // the saved box and age are not changed.
+  const bool age_vanilla = vanilla_running && !session_shown;
+  if (age_vanilla) s.on = false;
+  ImGui::BeginDisabled(extras_locked || session_shown || age_vanilla);
   if (ImGui::Checkbox("Age:", &s.on)) SaveBustSetting(s);
+  if (age_vanilla) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", vanilla::kOffText);
+  }
   ImGui::BeginDisabled(!s.on);
   ImGui::SetNextItemWidth(display::MenuPx(kBustAgeSliderWidth, ImGui::GetFontSize()));
   if (ImGui::SliderInt("##bust_age", &s.age, 1, 99, "%d", ImGuiSliderFlags_AlwaysClamp)) {
@@ -1378,6 +1426,13 @@ void MenuDialog::DrawPhotoTab() {
 
 bool MenuDialog::SetTweak(size_t index, bool on) {
   const tweaks::Tweak& tweak = tweaks::AllTweaks()[index];
+  // Vanilla mode: turning a box ON is refused before anything is written (no backup, no toml key, no cvar, no patch).
+  // Turning one off (the wipe, design 6's exception) goes on as before.
+  if (vanilla::RefusesTweak(on)) {
+    status_ = vanilla::kOffText;
+    REXLOG_INFO("[doa4][VANILLA] {} = true refused: {}", tweak.cvar, vanilla::kOffText);
+    return false;
+  }
   if (host_.refuse && host_.refuse(std::string("tweak ") + tweak.cvar, &status_)) return false;
   const char* value = on ? "true" : "false";
   // A costume box changes the save: the first backup comes before anything else.

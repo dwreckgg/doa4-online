@@ -1147,6 +1147,33 @@ void TestParseStrongest() {
 }
 
 // The strongest ratio at 99 without the test switch: 2.0 for every girl (the user's verdict A29, route G3).
+// Task 7 (R-g): the Age box's offline reader in vanilla mode is retail movement, whatever is saved; out of it, LineSetting.
+// Expected values from the rule (vanilla -> {false, 18}; else LineSetting, whose rows TestLineSetting pins), not from the
+// code. Each call is a statement of its own.
+void TestAgeWantedVanilla() {
+  std::printf("-- TestAgeWantedVanilla\n");
+  // Box on, age 40, vanilla mode: retail. Excludes: OfflineSetting ignoring vanilla (v8): that would want 40.
+  {
+    const b::AgeSetting s = b::OfflineSetting(40, true, true);
+    const int wanted = b::WantedAge(s);
+    Check(wanted == b::kAgeRetail, "OfflineSetting(40, box on, vanilla) wants 18 (retail)");
+    Check(s == b::AgeSetting{false, b::kAgeRetail}, "OfflineSetting(40, box on, vanilla) shows the box off at 18");
+  }
+  // Box on, age 40, no vanilla mode: the slider's 40. Excludes: vanilla always on, and the box read as off.
+  {
+    const b::AgeSetting s = b::OfflineSetting(40, true, false);
+    const int wanted = b::WantedAge(s);
+    Check(wanted == 40, "OfflineSetting(40, box on, no vanilla) wants 40");
+  }
+  // Box off, no vanilla mode: retail as LineSetting gives it. (This row alone cannot tell vanilla from "box off"; the
+  // age-40 rows above are the separating ones.)
+  {
+    const b::AgeSetting s = b::OfflineSetting(40, false, false);
+    const int wanted = b::WantedAge(s);
+    Check(wanted == b::kAgeRetail, "OfflineSetting(40, box off, no vanilla) wants 18");
+  }
+}
+
 void TestRetailStrongestPinned() { Check(b::kRetailStrongest == 2.0f, "the retail strongest ratio is 2.0 (A29)"); }
 
 }  // namespace
@@ -1165,6 +1192,7 @@ int main() {
   TestEffectiveAge();
   TestEffectiveSetting();
   TestLineSetting();
+  TestAgeWantedVanilla();
   TestSettingFromText();
   TestIsBustState();
   TestCountRecords();

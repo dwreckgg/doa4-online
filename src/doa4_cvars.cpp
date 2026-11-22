@@ -2,6 +2,10 @@
 
 #include <rex/cvar.h>
 
+// Extras tab, first row: vanilla mode (doa4_vanilla.h). Latched once at start-up in a lobby process; a match process ignores
+// it. Never carried into a session (it is neither a tweak nor a carried port setting) and never writes a covered setting.
+REXCVAR_DEFINE_BOOL(doa4_vanilla_only, false, "DOA4", "Vanilla DoA4 content only (applies at the next start)");
+
 // Extras tab: game tweaks (doa4_tweaks.h). Applied at load (OnPostLoadXexImage).
 REXCVAR_DEFINE_BOOL(doa4_tag_all_stages, false, "DOA4",
                     "All stages in Tag battle (Xenia patch by ryu_highabusa)");

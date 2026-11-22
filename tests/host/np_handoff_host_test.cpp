@@ -39,6 +39,7 @@
 #include "../../src/doa4_language.h"
 #include "../../src/doa4_suits_bust.h"
 #include "../../src/doa4_tweaks.h"
+#include "../../src/doa4_vanilla.h"
 
 namespace ho = doa4::np::handoff;
 namespace lang = doa4::language;
@@ -322,6 +323,8 @@ static const NotCarried kSdkNotCarried[] = {
 // of the same size, and the table rows are compiled in), so the two PCs' tables are equal whatever each one's folder is.
 static const char* const kPortNotCarried[] = {"doa4_game_files", "doa4_suits_import_pending", "doa4_show_fps", "doa4_skip_intro", "doa4_discord_status", "doa4_update_notice", "doa4_idle_waits", "doa4_photo_auto","doa4_photo_dir", "doa4_photo_format", "doa4_user_data",
                                               "doa4_colour_costumes_dir",
+                                              // never sent: a lobby-only setting; a match process ignores it
+                                              "doa4_vanilla_only",
                                               "netplay_port", "netplay_delay_auto", "netplay_delay", "netplay_last_join",
                                               "netplay_show_stats", "netplay_upnp",
                                               // lockstep port B3: the host's worker order; the hand-off carries its result as the
@@ -2034,6 +2037,60 @@ static void TestCapture() {
     const std::string t = ho::CaptureGuestSettings([&](const std::string&) { return std::string("1"); });
     CHECK(!t.empty());
   }
+
+  // Vanilla mode (colour generator plan Task 7, amendment r2-F9): a host whose lobby latched vanilla mode carries its OWN
+  // live values, the six boxes and the Age box on and the age 40, never the vanilla view (every box off, age 18).
+  // Excludes: a capture that consults vanilla::Running() and sends the vanilla view (plan probe 4), and a vanilla mode
+  // that clears the live values (then the reader below would not return them: R7's live line covers the app side).
+  std::printf("-- TestCapture (vanilla latched)\n");
+  Group("capture: in vanilla mode the host's live boxes and Age go out, not the vanilla view");
+  doa4::vanilla::ResetForTest();
+  doa4::vanilla::Latch(true);
+  {
+    std::map<std::string, std::string> live = Store();
+    for (const doa4::tweaks::Tweak& t : doa4::tweaks::AllTweaks()) live[t.cvar] = "true";
+    live["doa4_bust_age_on"] = "true";
+    live["doa4_bust_age"] = "40";
+    const std::string text = ho::CaptureGuestSettings([&](const std::string& n) { return Val(live, n); });
+    std::map<std::string, std::string> sent;  // the text's name=value lines, split at the first '='
+    for (size_t i = 0; i < text.size();) {
+      size_t end = text.find('\n', i);
+      if (end == std::string::npos) end = text.size();
+      const std::string line = text.substr(i, end - i);
+      const size_t eq = line.find('=');
+      if (eq != std::string::npos) sent[line.substr(0, eq)] = line.substr(eq + 1);
+      i = end + 1;
+    }
+    for (const doa4::tweaks::Tweak& t : doa4::tweaks::AllTweaks()) {
+      g_ctx = t.cvar;
+      CHECK(Val(sent, t.cvar) == "true");  // the live value; the vanilla view would be "false"
+    }
+    g_ctx.clear();
+    CHECK(Val(sent, "doa4_bust_age_on") == "true");  // not "false"
+    CHECK(Val(sent, "doa4_bust_age") == "40");       // not "18"
+    CHECK(text == ExpectedText(live));               // nothing else changed either
+  }
+  doa4::vanilla::ResetForTest();
+}
+
+// Vanilla mode's setting is never sent (design 6): it is not a carried name, and no Extras tweak is named so.
+// Excludes: the cvar added to kPortSettings or made a tweak (then a joiner would apply the host's vanilla mode to a match
+// process, which must ignore it).
+static void TestVanillaNotCarried() {
+  std::printf("-- TestVanillaNotCarried\n");
+  Group("vanilla: doa4_vanilla_only is not carried and not a tweak");
+  const std::vector<std::string>& names = ho::GuestSettingNames();
+  CHECK(!names.empty());  // the absence below is read in a list that holds names
+  CHECK(std::count(names.begin(), names.end(), std::string("doa4_vanilla_only")) == 0);
+  CHECK(std::count(names.begin(), names.end(), std::string("doa4_bust_age")) == 1);  // a positive control of the search
+  for (const doa4::tweaks::Tweak& t : doa4::tweaks::AllTweaks()) {
+    g_ctx = t.cvar;
+    CHECK(std::string(t.cvar) != "doa4_vanilla_only");
+  }
+  g_ctx.clear();
+  bool listed_not_carried = false;
+  for (const char* n : kPortNotCarried) listed_not_carried = listed_not_carried || std::string(n) == "doa4_vanilla_only";
+  CHECK(listed_not_carried);  // classified in the census as host-only (R-i)
 }
 
 static void TestApply() {
@@ -2734,6 +2791,7 @@ int main(int argc, char** argv) {
   TestHostileLanguage();
   TestReplayDefaults();
   TestCapture();
+  TestVanillaNotCarried();
   TestApply();
   TestTrustClass();
   TestSettingsInHandoff();

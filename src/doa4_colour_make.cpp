@@ -447,6 +447,11 @@ bool ShouldMake(ProcessKind kind, bool launch_refused, bool folder_overridden) {
 
 bool RowsOn(ProcessKind kind, bool vanilla) { return !(kind == ProcessKind::kLobby && vanilla); }
 
+TableRowsChoice ChooseTableRows(ProcessKind kind, bool vanilla, InstallOutcome outcome, bool test_unequal) {
+  const bool rows_on = RowsOn(kind, vanilla);
+  return {Installed(outcome) && rows_on && !test_unequal, rows_on};
+}
+
 bool MustRefuse(ProcessKind kind, InstallOutcome outcome) { return kind == ProcessKind::kMatch && !Installed(outcome); }
 
 std::string RefusalMessage(InstallOutcome outcome, bool colours_usable, const std::vector<std::string>& load_notes,

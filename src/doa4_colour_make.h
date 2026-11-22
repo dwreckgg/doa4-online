@@ -35,6 +35,17 @@ bool ShouldMake(ProcessKind kind, bool launch_refused, bool folder_overridden);
 // Whether the colour costumes' ROWS go into this process's costume tables (their files are loaded and overlaid in every
 // process): everywhere, except a lobby process in vanilla mode. False only for kLobby && vanilla.
 bool RowsOn(ProcessKind kind, bool vanilla);
+// Which rows SetUpSuits puts into this process's costume tables. colour_rows: the colour costumes' rows and Alpha-152's
+// colour rows, only when their entries were installed, the rows are on (RowsOn) and the test switch
+// DOA4_COLOURS_TEST_UNEQUAL is not set: Installed(outcome) && RowsOn(kind, vanilla) && !test_unequal. offline_suit_rows:
+// the imported suits' rows in a process without a session: RowsOn(kind, vanilla) (a lobby in vanilla mode shows retail
+// tables). The overlays, their install and the swimsuit checksum read nothing of this: they are the same with vanilla
+// mode on and off.
+struct TableRowsChoice {
+  bool colour_rows;
+  bool offline_suit_rows;
+};
+TableRowsChoice ChooseTableRows(ProcessKind kind, bool vanilla, InstallOutcome outcome, bool test_unequal);
 // A match process whose colour entries were not installed cannot build the tables the other PC builds, so it must not
 // run: kMatch && !Installed(outcome). A lobby process is never refused.
 bool MustRefuse(ProcessKind kind, InstallOutcome outcome);

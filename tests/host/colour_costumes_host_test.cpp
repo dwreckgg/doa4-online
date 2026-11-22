@@ -1411,6 +1411,52 @@ static void TestRowsOn() {
   { const bool on = RowsOn(ProcessKind::kMatch, true); CHECK(on == true); }
 }
 
+// Which rows go into the costume tables (Task 7, R-f): a lobby process in vanilla mode gets neither the colour rows nor the
+// imported suits' rows (retail tables); a match process ignores vanilla mode. The overlays are not decided here.
+static void TestVanillaLeavesRowsOut() {
+  std::printf("-- TestVanillaLeavesRowsOut\n");
+  using O = InstallOutcome;
+  // A vanilla lobby with the entries installed: no rows at all. Excludes: the suits' rows always on (v6), the colour rows
+  // gated without RowsOn (v7), and the stub's "both on".
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, true, O::kInstalled, false);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == false);
+  }
+  // The same lobby without vanilla mode: both. Excludes: rows off whenever the lobby is asked (kind read alone).
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, false, O::kInstalled, false);
+    CHECK(c.colour_rows == true);
+    CHECK(c.offline_suit_rows == true);
+  }
+  // A match process with the saved box on: both, as without it. Excludes: vanilla read without the kind (a vanilla
+  // player's match process would build other tables than the other PC's).
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kMatch, true, O::kInstalled, false);
+    CHECK(c.colour_rows == true);
+    CHECK(c.offline_suit_rows == true);
+  }
+  // Entries not installed: no colour rows, the suits' rows as before. Excludes: colour rows without Installed (a record
+  // naming an entry that is not overlaid), and the suits' rows tied to the colour outcome.
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, false, O::kNotUsable, false);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == true);
+  }
+  // The test switch DOA4_COLOURS_TEST_UNEQUAL: no colour rows; the suits' rows follow RowsOn alone, on and off.
+  // Excludes: the switch dropped from the colour gate, and the switch read into the suits' rows.
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, false, O::kInstalled, true);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == true);
+  }
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, true, O::kInstalled, true);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == false);
+  }
+}
+
 // A match process that did not install the colour entries must not run; a lobby process is never refused.
 static void TestMustRefuse() {
   std::printf("-- TestMustRefuse\n");
@@ -2784,6 +2830,7 @@ int main() {
   TestKindOf();
   TestShouldMake();
   TestRowsOn();
+  TestVanillaLeavesRowsOut();
   TestMustRefuse();
   TestFreeBytesFrom();
   TestIsPassingNote();
