@@ -16,7 +16,7 @@ if "%OUT%"=="" set "OUT=%TEMP%\doa4_dpps_test"
 if not exist "%OUT%" mkdir "%OUT%"
 set EXTRA=
 if not "%~1"=="" set EXTRA=/I"%~1"
-clang-cl /nologo /std:c++latest /EHsc /O2 /fp:strict /MT -march=x86-64-v3 %EXTRA% /I"%REXSDK_DIR%\include" /I"%REXSDK_DIR%\thirdparty\simde" "%~dp0dpps_host_test.cpp" /Fo"%OUT%\\" /Fe"%OUT%\dpps_host_test.exe"
+clang-cl /nologo /std:c++latest /EHsc /O2 /fp:strict /MT -march=x86-64-v2 %EXTRA% /I"%REXSDK_DIR%\include" /I"%REXSDK_DIR%\thirdparty\simde" "%~dp0dpps_host_test.cpp" /Fo"%OUT%\\" /Fe"%OUT%\dpps_host_test.exe"
 if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1

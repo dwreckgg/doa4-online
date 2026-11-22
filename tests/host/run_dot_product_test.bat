@@ -14,7 +14,7 @@ if "%OUT%"=="" set "OUT=%TEMP%\doa4_dot_product_test"
 if not exist "%OUT%" mkdir "%OUT%"
 set EXTRA=
 if not "%~1"=="" set EXTRA=/I"%~1"
-clang-cl /nologo /std:c++latest /EHsc /O2 /fp:strict /MT -march=x86-64-v3 -msse4.1 %EXTRA% /I"%REXSDK_DIR%\include" /I"%REXSDK_DIR%\thirdparty\simde" /I"%REXSDK_DIR%\thirdparty\fmt\include" /I"%REXSDK_DIR%\thirdparty\spdlog\include" /showIncludes "%~dp0dot_product_host_test.cpp" /Fo"%OUT%\\" /Fe"%OUT%\dot_product_host_test.exe" > "%OUT%\build.log" 2>&1
+clang-cl /nologo /std:c++latest /EHsc /O2 /fp:strict /MT -march=x86-64-v2 -msse4.1 %EXTRA% /I"%REXSDK_DIR%\include" /I"%REXSDK_DIR%\thirdparty\simde" /I"%REXSDK_DIR%\thirdparty\fmt\include" /I"%REXSDK_DIR%\thirdparty\spdlog\include" /showIncludes "%~dp0dot_product_host_test.cpp" /Fo"%OUT%\\" /Fe"%OUT%\dot_product_host_test.exe" > "%OUT%\build.log" 2>&1
 if errorlevel 1 (
   type "%OUT%\build.log"
   echo BUILD FAILED

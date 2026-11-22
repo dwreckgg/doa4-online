@@ -20,7 +20,7 @@ Building it yourself is for contributors: see [docs/BUILDING.md](docs/BUILDING.m
 
 You do not need to build anything. Each player does steps 1-3 once.
 
-**What you need:** Windows 10 or 11, 64-bit; a CPU with AVX2 (Intel Haswell / AMD Zen or newer) and at
+**What you need:** Windows 10 or 11, 64-bit; a CPU with SSE4.2 (Intel Core from 2008 (Nehalem) / AMD FX from 2011 (Bulldozer) or newer) and at
 least two cores; the Microsoft Visual C++ 2015-2022 x64 runtime (if it is missing, the game stops with a "VCRUNTIME140.dll was not found" style error: install it from
 [Microsoft's download page](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist));
 your own copy of *Dead or Alive 4 (USA, Europe) (Rev 1)* as a disc image (`.iso`) or an extracted

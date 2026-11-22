@@ -106,21 +106,40 @@ Describe 'Get-DOA4MissingToolPlan and Install-DOA4Tools' {
     }
 }
 
-Describe 'Test-DOA4Avx2' {
-    It 'is true when clang reports __AVX2__ for the native CPU' {
+Describe 'Test-DOA4CpuLevel' {
+    $refusal = 'This CPU does not support SSE4.2. The game is built for x86-64-v2 (Intel Core from 2008 (Nehalem) / AMD FX from 2011 (Bulldozer) or newer) and cannot run on this PC.'
+    It 'is true on an AVX2 PC, asking clang about the native CPU' {
         $tools = New-FakeTools -VsRoot (Join-Path $TestDrive 'a1')
-        (Test-DOA4Avx2 -Cmd (New-FakeTable $tools)).Supported | Should Be $true
+        (Test-DOA4CpuLevel -Cmd (New-FakeTable $tools)).Supported | Should Be $true
         $tools.Clang.State.Calls[0] | Should Be '-dM -E -march=native -x c -'
     }
-    It 'is false, with an explanation, on a CPU without AVX2 (AVX alone is not enough)' {
-        $tools = New-FakeTools -VsRoot (Join-Path $TestDrive 'a2') -NoAvx2
-        $r = Test-DOA4Avx2 -Cmd (New-FakeTable $tools)
+    It 'is true with SSE4.2 and POPCNT but no AVX2 (the AMD FX-8350 case)' {
+        $tools = New-FakeTools -VsRoot (Join-Path $TestDrive 'a4') -CpuMacros @('#define __AVX__ 1', '#define __POPCNT__ 1', '#define __SSE4_1__ 1', '#define __SSE4_2__ 1')
+        (Test-DOA4CpuLevel -Cmd (New-FakeTable $tools)).Supported | Should Be $true
+        $tools.Clang.State.Calls[0] | Should Be '-dM -E -march=native -x c -'
+    }
+    It 'is false, with the refusal, with POPCNT but no SSE4.2 (an AMD Phenom II)' {
+        $tools = New-FakeTools -VsRoot (Join-Path $TestDrive 'a5') -CpuMacros @('#define __POPCNT__ 1', '#define __SSE3__ 1', '#define __SSE4A__ 1')
+        $r = Test-DOA4CpuLevel -Cmd (New-FakeTable $tools)
         $r.Supported | Should Be $false
-        $r.Detail | Should Match 'does not support AVX2'
+        $r.Detail | Should Match 'does not support SSE4\.2'
+        $r.Detail | Should BeExactly $refusal
+    }
+    It 'is false with SSE4.2 but no POPCNT' {
+        $tools = New-FakeTools -VsRoot (Join-Path $TestDrive 'a6') -CpuMacros @('#define __SSE4_1__ 1', '#define __SSE4_2__ 1')
+        $r = Test-DOA4CpuLevel -Cmd (New-FakeTable $tools)
+        $r.Supported | Should Be $false
+        $r.Detail | Should BeExactly $refusal
+    }
+    It 'is false on a CPU below x86-64-v2 (-NoSse42, a Core 2)' {
+        $tools = New-FakeTools -VsRoot (Join-Path $TestDrive 'a2') -NoSse42
+        $r = Test-DOA4CpuLevel -Cmd (New-FakeTable $tools)
+        $r.Supported | Should Be $false
+        $r.Detail | Should BeExactly $refusal
     }
     It 'is unknown (null) when clang cannot be run' {
         $tools = New-FakeTools -VsRoot (Join-Path $TestDrive 'a3') -Missing @('llvm')
-        $r = Test-DOA4Avx2 -Cmd (New-FakeTable $tools)
+        $r = Test-DOA4CpuLevel -Cmd (New-FakeTable $tools)
         $null -eq $r.Supported | Should Be $true
     }
 }

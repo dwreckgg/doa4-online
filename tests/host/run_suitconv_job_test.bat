@@ -1,6 +1,6 @@
 @echo off
 rem Builds and runs the suit importer's job host test (src/doa4_suitconv_job.cpp: worker, progress, cancel, checked writes and
-rem the swap) with clang-cl (no CMake), under the converter's floating-point flags for every translation unit (x86-64-v3 with
+rem the swap) with clang-cl (no CMake), under the converter's floating-point flags for every translation unit (x86-64-v2 with
 rem FMA switched off, no contraction, no fast-math, no errno). Converter objects, the job's included, go to
 rem %TEMP%\doa4_suitconv_test\obj\ (named after their source), where suitconv_fp_scan.py scans them before the test runs; the
 rem test's own object and the SDK-side sources it links (afs overlay, xdvdfs, gamefiles, manifest, the import loader, the costume tables) go to ...\testobj\.
@@ -24,7 +24,7 @@ if defined DOA4_SUITCONV_OUT set "OUT=%DOA4_SUITCONV_OUT%"
 if not exist "%OUT%\obj" mkdir "%OUT%\obj"
 if not exist "%OUT%\testobj" mkdir "%OUT%\testobj"
 set "SRC=%~dp0..\..\src"
-set FPFLAGS=/clang:-march=x86-64-v3 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
+set FPFLAGS=/clang:-march=x86-64-v2 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
 set CXXFLAGS=/nologo /std:c++latest /EHsc /O2 %FPFLAGS%
 set "LOG=%OUT%\job_build.log"
 if exist "%OUT%\obj\doa4_suitconv_job.obj" del /q "%OUT%\obj\doa4_suitconv_job.obj"
