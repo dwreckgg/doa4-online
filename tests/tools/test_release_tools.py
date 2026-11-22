@@ -878,14 +878,22 @@ def check_no_v3_build_route():
                        cwd=REPO, capture_output=True, text=True)
     # git grep exits 0 (hits) or 1 (none); anything else, or any stderr, means the search did not run
     check(r.returncode in (0, 1) and not r.stderr.strip(), f"git grep ran: rc {r.returncode}, stderr {r.stderr.strip()!r}")
-    exempt = ("src/net/np_core.cpp", "tests/host/suitconv_fp_control.cpp")
-    raw_files = [l.split(":")[0] for l in r.stdout.splitlines()]
-    check(any(f in exempt or f.startswith("tests/host/") for f in raw_files),
-          "positive control: the raw search output holds at least one exempt hit (the search found the tree)")
-    hits = [l for l in r.stdout.splitlines()
-            if not l.split(":")[0].startswith("tests/host/")
-            and l.split(":")[0] not in ("src/net/np_core.cpp", "tests/host/suitconv_fp_control.cpp")]
-    check(not hits, f"no {needle} build route outside the exempt files: {hits}")
+    # one table: file -> text a hit must hold to be exempt (None: every hit in the file). np_core.cpp is keyed to its
+    # measurement comment, so a new v3 line elsewhere in it is caught; suitconv_fp_control.cpp is the FMA control (dev PC only).
+    exempt = {"src/net/np_core.cpp": "measured with -march=" + needle, "tests/host/suitconv_fp_control.cpp": None}
+
+    def is_exempt(line):
+        path, _, rest = line.partition(":")
+        if path not in exempt:
+            return False
+        return exempt[path] is None or exempt[path] in rest
+
+    lines = r.stdout.splitlines()
+    exempt_found = sorted({l.split(":")[0] for l in lines if is_exempt(l)})
+    check(exempt_found == sorted(exempt),
+          f"positive control: the raw search output holds a hit for each exempt entry (the search found the tree): {exempt_found}")
+    hits = [l for l in lines if not is_exempt(l)]
+    check(not hits, f"no {needle} build route outside the exempt entries: {hits}")
 
 
 def test_no_v3_build_route(root):

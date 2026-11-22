@@ -1,6 +1,6 @@
 @echo off
 rem Builds and runs the suit converter XPR2 / chunk-table / .cat reader and writer host test (the tpr.py port) with clang-cl
-rem (no CMake), under the converter's floating-point flags for every translation unit (x86-64-v3 with FMA switched off, no
+rem (no CMake), under the converter's floating-point flags for every translation unit (x86-64-v2 with FMA switched off, no
 rem contraction, no fast-math, no errno). Converter objects go to %TEMP%\doa4_suitconv_test\obj\ (named after their
 rem source), where suitconv_fp_scan.py scans them before the test runs; the test's own object and the SDK-side sources it
 rem links (afs overlay, xdvdfs, gamefiles) go to ...\testobj\.
@@ -19,7 +19,7 @@ if defined DOA4_SUITCONV_OUT set "OUT=%DOA4_SUITCONV_OUT%"
 if not exist "%OUT%\obj" mkdir "%OUT%\obj"
 if not exist "%OUT%\testobj" mkdir "%OUT%\testobj"
 set "SRC=%~dp0..\..\src"
-set FPFLAGS=/clang:-march=x86-64-v3 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
+set FPFLAGS=/clang:-march=x86-64-v2 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
 set CXXFLAGS=/nologo /std:c++latest /EHsc /O2 %FPFLAGS%
 if exist "%OUT%\obj\doa4_suitconv_num.obj" del /q "%OUT%\obj\doa4_suitconv_num.obj"
 if exist "%OUT%\obj\doa4_suitconv_tpr.obj" del /q "%OUT%\obj\doa4_suitconv_tpr.obj"
