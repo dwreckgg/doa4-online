@@ -34,7 +34,7 @@ Versions are the ones the release workflow and the maintainers use; nearby versi
 
 | Tool | Version used | Where to get it |
 |---|---|---|
-| Windows 10/11, 64-bit, CPU with AVX2 (Intel Haswell / AMD Zen or newer) | Windows 11 | The build targets `x86-64-v2`. |
+| Windows 10/11, 64-bit, a CPU with SSE4.2 (Intel Core from 2008 (Nehalem) / AMD FX from 2011 (Bulldozer) or newer) | Windows 11 | The build targets `x86-64-v2`. |
 | Git | any recent | <https://git-scm.com> or `winget install Git.Git` |
 | Visual Studio 2026 Build Tools (v18), workload **Desktop development with C++** | 18 | <https://visualstudio.microsoft.com/downloads/>. It provides the Windows SDK, the MSVC libraries, CMake and Ninja (the build uses the bundled CMake and Ninja). |
 | LLVM / Clang (the compiler; MSVC's compiler is not used) | 23.1.4 | `winget install LLVM.LLVM` (installs to `C:\Program Files\LLVM`) |
@@ -167,7 +167,7 @@ cmake --build --preset win-amd64-release
 - `REXSDK_DIR` builds the SDK from source alongside the game (no separate SDK install). Use forward
   slashes.
 - The `-march=x86-64-v2` flags are required: the preset does not set a CPU level and the SDK uses
-  SSSE3/AVX intrinsics, which fail to compile without it.
+  SSSE3/SSE4.1 intrinsics, which fail to compile without it.
 - The first build compiles the SDK and the large generated code and takes a while; later builds are
   incremental.
 - The swimsuit converter's files are compiled with floating-point flags of their own (`CMakeLists.txt`,
@@ -273,7 +273,7 @@ published.
 | Symptom | Cause and fix |
 |---|---|
 | Compile errors in `thirdparty/libmspack/...` or `thirdparty/o1heap/...` | Symlink stubs: run `tools/fix_git_symlinks.py` on the SDK folder (section 4). |
-| Errors about SSSE3 / AVX intrinsics (`_mm_...` functions) | Configure was run without the `-march=x86-64-v2` flags. Delete `out\build\win-amd64-release` and configure again. |
+| Errors about SSSE3 / SSE4.1 intrinsics (`_mm_...` functions) | Configure was run without the `-march=x86-64-v2` flags. Delete `out\build\win-amd64-release` and configure again. |
 | `imgui.h` or `rex/version.h` not found | The two include directories after `rexglue_setup_target(dead_or_alive_4)` in `CMakeLists.txt` are missing (an old checkout, or a clone of the upstream repository, which lacks them). |
 | `clang` not found / CMake picks the wrong compiler | LLVM's `bin` folder is not first on `PATH` in that window. |
 | CMake warning `no v* tag reachable from HEAD` | Harmless; the build is not affected. |

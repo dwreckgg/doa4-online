@@ -872,7 +872,7 @@ def test_pgo_np_build_wiring(root):
 
 
 def check_no_v3_build_route():
-    """No build route may name the AVX2 CPU level; hits under tests/host/ and two measurement notes are exempt."""
+    """No build route may name the AVX2 CPU level; the exemptions are the text-keyed np_core.cpp:571 note and tests/host/suitconv_fp_control.cpp."""
     needle = "x86-64-v" + "3"  # built at run time so this file does not match itself
     r = subprocess.run(["git", "grep", "-n", "-I", needle, "--", ".", ":!thirdparty", ":!generated"],
                        cwd=REPO, capture_output=True, text=True)
