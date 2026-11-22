@@ -146,6 +146,7 @@ static const NotCarried kSdkNotCarried[] = {
     {"d3d12_break_on_warning", "gpu-backend"},
     {"d3d12_clear_depth_via_drawing", "gpu-backend"},
     {"d3d12_clear_depth_via_drawing_intel", "gpu-backend"},
+    {"d3d12_constant_alpha_blend_factor", "gpu-render"},  // 0.3.8: picture only (blend factor of constant-alpha draws); resolved pixels can reach guest memory (readback_resolve=some), no game logic known to read them
     {"d3d12_debug", "gpu-backend"},
     {"d3d12_dxbc_disasm", "log"},
     {"d3d12_dxbc_disasm_dxilconv", "log"},
@@ -343,7 +344,7 @@ static constexpr size_t kSdkCount = sizeof(kSdkNames) / sizeof(kSdkNames[0]);
 static constexpr size_t kSdkNotCarriedCount = sizeof(kSdkNotCarried) / sizeof(kSdkNotCarried[0]);
 static constexpr size_t kPortNotCarriedCount = sizeof(kPortNotCarried) / sizeof(kPortNotCarried[0]);
 static constexpr size_t kTrustedCount = sizeof(kTrusted) / sizeof(kTrusted[0]);
-static constexpr size_t kSdkTotal = 208;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect)
+static constexpr size_t kSdkTotal = 209;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend)
 
 // The expected names: the carried list, then the Extras tweak cvars of the tweaks module.
 // The port's own carried settings beyond the tweaks: they change guest memory and are no trust matter (np_handoff.cpp

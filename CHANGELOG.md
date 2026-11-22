@@ -13,6 +13,12 @@
   If anything misbehaves, `cheap_physical_protect = false` in `dead_or_alive_4.toml` goes back to 0.3.7's
   behaviour.
 
+### Fixed
+- **Story mode fades: no half-second still picture** ([issue #23](https://github.com/dwreckgg/doa4-online/issues/23)).
+  The cross-fade after YOU LOSE / CONTINUE? (and other fades drawn the same way) now fades into the next round
+  instead of holding the old picture for about half a second and then cutting. If a picture looks wrong,
+  `d3d12_constant_alpha_blend_factor = false` in `dead_or_alive_4.toml` draws as 0.3.7 did.
+
 ## 0.3.7 (2026-11-19)
 
 ### New
