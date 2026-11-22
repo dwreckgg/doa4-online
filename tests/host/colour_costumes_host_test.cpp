@@ -2547,25 +2547,28 @@ static void TestTwoMakersOneFolder() {
   // Per maker, the designed outcome of two copies writing one folder (the design's degrade row "cannot write: ...
   // file held by another running copy: stand-in this run; made at a later start; one log line"): every slot is
   // good, made or not made; a slot may be not made ONLY because its write was refused while the other maker held
-  // the file, and then exactly one note says so, "<slot>: cannot write: <the system's text>". Every other note
-  // fails: another cause for a slot (nothing here is short of space or of a source), a second note for one slot, a
-  // note that names no slot. "No slot not made" is not asserted: it holds only by timing (a refused rename whose
-  // re-check is refused too is rare, and designed).
+  // the file, and then exactly one note says so, "<slot>: cannot write: <the system's text>". The manifest notes
+  // are allowed too (any note that starts with "manifest: "): two makers meet at the manifest as well, and by design
+  // one of them may find it unreadable for a moment (kManifestUnreadableNote), have its write refused, or leave a
+  // slot unlisted. Every other note fails: another cause for a slot (nothing here is short of space or of a
+  // source), a second note for one slot, a note of neither form. "No slot not made" is not asserted: it holds only
+  // by timing (a refused rename whose re-check is refused too is rare, and designed).
   for (int m = 0; m < 2; ++m) {
     CHECK(gens[m].Total() == int(kSlotCount));
     CHECK(reports[m].good + reports[m].made + reports[m].not_made == kSlotCount);
-    CHECK(reports[m].notes.size() == reports[m].not_made);  // one note per slot not made, and no other note
-    size_t refused_writes = 0, other_notes = 0;
+    size_t refused_writes = 0, manifest_notes = 0, other_notes = 0;
     for (const std::string& note : reports[m].notes) {
-      bool allowed = false;
+      bool refused_write = false;
       for (size_t i = 0; i < kSlotCount; ++i) {
         const std::string start = SlotName(i) + ": cannot write: ";
-        allowed = allowed || (StartsWith(note, start) && note.size() > start.size());
+        refused_write = refused_write || (StartsWith(note, start) && note.size() > start.size());
       }
-      (allowed ? refused_writes : other_notes) += 1;
+      (refused_write ? refused_writes : StartsWith(note, "manifest: ") ? manifest_notes : other_notes) += 1;
     }
-    CHECK(other_notes == 0);  // excludes: a slot under contention reported with another cause ("no space", ...)
-    CHECK(refused_writes == reports[m].not_made);
+    // Excludes: a slot under contention reported with another cause ("no space", ...), and a note of neither form.
+    CHECK(other_notes == 0);
+    CHECK(refused_writes == reports[m].not_made);  // one such note per slot not made; excludes a second for one slot
+    (void)manifest_notes;  // allowed in any number: counted only to say what the third class is not
     CHECK(SlotNotes(reports[m]) == reports[m].not_made);  // RunMake's check, for these calls made outside it
   }
   // The folder's outcome is strict whatever each maker reported: seven good files, no temporary, the standard lines.
