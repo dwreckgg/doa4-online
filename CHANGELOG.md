@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.8
+## 0.3.8 (unreleased)
 
 ### New
 - **No AVX2 needed any more (issue #18).** The game now runs on CPUs with SSE4.2 (Intel Core from 2008 / AMD FX from 2011). Tested by a player on an AMD FX-8350. About 1 % more CPU on newer CPUs.
