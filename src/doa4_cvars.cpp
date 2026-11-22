@@ -45,8 +45,9 @@ REXCVAR_DEFINE_STRING(doa4_game_files, "", "DOA4",
 REXCVAR_DEFINE_BOOL(doa4_suits_import_pending, false, "DOA4",
                     "A DOAX2 swimsuit import was started and has not finished; the next start offers it again");
 
-// Colour costumes (doa4_colour_costumes.h, local offline build): the folder holding manifest.txt and the colour files.
-// Empty: <user data>/colour_costumes.
+// Colour costumes (doa4_colour_costumes.h): the folder holding manifest.txt and the colour files. Empty: <user
+// data>/colour_costumes, where a lobby start makes the files this PC lacks; a folder named here is read as it is, in
+// every process, and nothing is made in it.
 REXCVAR_DEFINE_STRING(doa4_colour_costumes_dir, "", "DOA4",
                       "Folder holding the colour costume files (empty: the user data folder's colour_costumes)");
 

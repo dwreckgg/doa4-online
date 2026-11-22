@@ -449,10 +449,13 @@ bool RowsOn(ProcessKind kind, bool vanilla) { return !(kind == ProcessKind::kLob
 
 bool MustRefuse(ProcessKind kind, InstallOutcome outcome) { return kind == ProcessKind::kMatch && !Installed(outcome); }
 
-std::string RefusalMessage(InstallOutcome outcome, const std::vector<std::string>& load_notes, std::string_view error,
-                           std::string_view retry_error, bool test_unusable) {
+std::string RefusalMessage(InstallOutcome outcome, bool colours_usable, const std::vector<std::string>& load_notes,
+                           std::string_view error, std::string_view retry_error, bool test_unusable) {
   // An install that failed without a text still has a cause to name.
   const std::string first = error.empty() ? std::string("the overlay install failed") : std::string(error);
+  // Why the colour slots are not usable: Load's LAST note (it returns right after the note that says so; the notes
+  // before it say why a stand-in was needed).
+  const std::string not_usable = load_notes.empty() ? std::string("the colour slots were not loaded") : load_notes.back();
   std::string cause;
   if (test_unusable) {
     cause = "test switch DOA4_COLOURS_TEST_UNUSABLE";
@@ -461,16 +464,22 @@ std::string RefusalMessage(InstallOutcome outcome, const std::vector<std::string
       case InstallOutcome::kInstalled:
         break;  // never asked for: nothing was refused
       case InstallOutcome::kNotUsable:
-        cause = load_notes.empty() ? std::string("the colour slots were not loaded") : load_notes.front();
+        cause = not_usable;
         break;
       case InstallOutcome::kDropped:
         cause = first;
         break;
       case InstallOutcome::kFailed:
-        cause = first;
-        if (!retry_error.empty()) {  // empty: there was no second try (Load was not usable)
+        if (!colours_usable) {  // no second try was made: the colour cause, then what failed
+          cause = not_usable;
           cause += " / ";
-          cause += retry_error;
+          cause += first;
+        } else {
+          cause = first;
+          if (!retry_error.empty()) {
+            cause += " / ";
+            cause += retry_error;
+          }
         }
         break;
     }

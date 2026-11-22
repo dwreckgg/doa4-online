@@ -1983,10 +1983,17 @@ void RefuseRun(const std::string& reason) {
   // A record or replay run, after Start: np_log.txt is open, the recording holds its header and meta, the hash files
   // their headers, the determinism layer runs and the hooks are active. In this order: the mode off (as a refused
   // replay leaves it; Shutdown then has nothing to end); the recording closed with no frame in it, and the hash files;
-  // the determinism layer stopped and the hooks passing through, so no frame of a session runs in a process that was
-  // refused; the writer (idle: no frame ran) ended as Shutdown ends it; the line; the quit.
+  // the three hash files removed (headers only: a refused replay never opens them, and a run folder with a digest.d4d
+  // reads as "a session ran" to tools/np_run.py), the recording kept (header and meta, no frame); the determinism
+  // layer stopped and the hooks passing through, so no frame of a session runs in a process that was refused; the
+  // writer (idle: no frame ran) ended as Shutdown ends it; the line; the quit.
   s.mode = Mode::kOff;
   CloseFiles(s);
+  for (const char* name : {"digest.d4d", "sweep.d4s", "counters.d4k"}) {
+    std::error_code ec;
+    std::filesystem::remove(s.dir / name, ec);  // a file that is not there is no error
+    if (ec) Log(std::string("hash file ") + name + " not removed: " + ec.message());  // one line; the refusal goes on
+  }
   det::Stop();
   g_active.store(false, std::memory_order_release);
   {

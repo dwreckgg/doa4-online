@@ -154,9 +154,9 @@ void PeerLeft(int32_t frame, wire::LeaveReason reason);  // the session lobby's 
 void Abort(const std::string& reason);
 // This process must not run its match (the app's start-up found it cannot build the costume tables the other PC builds:
 // SetUpSuits, after Start). Online: Abort(reason). A record or replay run: the session is switched off as a refused
-// replay's is (its mode off, the recording and the hash files closed, so the recording holds its header and no frame;
-// the determinism layer stopped, the hooks passing through), np_log.txt gets "refused: <reason>", and the host is
-// asked to quit. Any other process (a plain offline game, DOA4_NP set to anything else included): nothing.
+// replay's is (its mode off; the recording closed, holding its header and meta and no frame; the three hash files
+// digest.d4d, sweep.d4s and counters.d4k closed and removed, a failed remove being one log line; the determinism layer
+// stopped, the hooks passing through), np_log.txt gets "refused: <reason>", and the host is asked to quit. Any other process (a plain offline game, DOA4_NP set to anything else included): nothing.
 void RefuseRun(const std::string& reason);
 // The frame hook's thread: alpha_colours::ThreadNumber() of the thread that last ran the frame hook of a netplay
 // process (OnFrame stores it at its top, every frame), 0 while none has run: always 0 in a plain offline game, whose

@@ -1485,60 +1485,116 @@ static void TestRefusalMessage() {
   using O = InstallOutcome;
   const std::string head = "colour costumes: this PC cannot build the 0.3.8 costume tables: ";
   const std::string tail = "; check the game files (chrthree.afs) and restart";
-  const std::vector<std::string> notes = {"alpha_red: its stand-in cannot be read", "a second note"};
+  // Load's notes in the order Load pushes them: why a stand-in was needed first, the cause of "not usable" last.
+  const std::vector<std::string> notes = {"the colour folder is missing; every slot shows its stand-in",
+                                          "alpha_red: its stand-in cannot be read; no colour slot is installed"};
   const std::vector<std::string> no_notes;
-  // The whole text, literally. kNotUsable names the FIRST note. Excludes: the last note, every note joined, the
-  // install error in the note's place, another wording of the start or the end.
+  // The whole text, literally. kNotUsable names the LAST note. Excludes: the first note (it says why a stand-in was
+  // needed, not why none could be read), every note joined, the install error in the note's place, another wording
+  // of the start or the end.
   {
-    const std::string got = RefusalMessage(O::kNotUsable, notes, "an install error", "a retry error", false);
+    const std::string got = RefusalMessage(O::kNotUsable, false, notes, "an install error", "a retry error", false);
     CHECK(got == "colour costumes: this PC cannot build the 0.3.8 costume tables: alpha_red: its stand-in cannot be read; "
-                 "check the game files (chrthree.afs) and restart");
+                 "no colour slot is installed; check the game files (chrthree.afs) and restart");
   }
-  // kNotUsable with no note. Excludes: an empty cause, and a read of the first note of an empty list.
+  // kNotUsable with no note. Excludes: an empty cause, and a read of the last note of an empty list.
   {
-    const std::string got = RefusalMessage(O::kNotUsable, no_notes, "an install error", "a retry error", false);
+    const std::string got = RefusalMessage(O::kNotUsable, false, no_notes, "an install error", "a retry error", false);
     CHECK(got == head + "the colour slots were not loaded" + tail);
   }
   // kDropped names the install error. Excludes: the note (kNotUsable's source), and the retry's error (the retry worked).
   {
-    const std::string got = RefusalMessage(O::kDropped, notes, "an install error", "a retry error", false);
+    const std::string got = RefusalMessage(O::kDropped, true, notes, "an install error", "a retry error", false);
     CHECK(got == head + "an install error" + tail);
   }
   // kDropped with no error text. Excludes: an empty cause.
   {
-    const std::string got = RefusalMessage(O::kDropped, notes, "", "a retry error", false);
+    const std::string got = RefusalMessage(O::kDropped, true, notes, "", "a retry error", false);
     CHECK(got == head + "the overlay install failed" + tail);
   }
-  // kFailed names both tries. Excludes: the first error alone, the retry's alone, the two in the other order.
+  // kDropped with the usable flag off: the flag is read for kFailed only. Excludes: the colour cause put in front
+  // whenever the flag is off, whatever the outcome.
   {
-    const std::string got = RefusalMessage(O::kFailed, notes, "an install error", "a retry error", false);
+    const std::string got = RefusalMessage(O::kDropped, false, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "an install error" + tail);
+  }
+  // kFailed with the colour slots usable names both tries. Excludes: the first error alone, the retry's alone, the
+  // two in the other order, and the colour cause put in front although the slots were usable.
+  {
+    const std::string got = RefusalMessage(O::kFailed, true, notes, "an install error", "a retry error", false);
     CHECK(got == head + "an install error / a retry error" + tail);
   }
-  // kFailed with no first error text. Excludes: an empty first half (" / a retry error").
+  // kFailed, usable, with no first error text. Excludes: an empty first half (" / a retry error").
   {
-    const std::string got = RefusalMessage(O::kFailed, notes, "", "a retry error", false);
+    const std::string got = RefusalMessage(O::kFailed, true, notes, "", "a retry error", false);
     CHECK(got == head + "the overlay install failed / a retry error" + tail);
   }
-  // kFailed with no retry text (Load was not usable and the swimsuits' install failed: there was no second try).
-  // Excludes: a cause that ends in " / " with nothing after it.
+  // kFailed, usable, with no retry text. Excludes: a cause that ends in " / " with nothing after it.
   {
-    const std::string got = RefusalMessage(O::kFailed, notes, "an install error", "", false);
+    const std::string got = RefusalMessage(O::kFailed, true, notes, "an install error", "", false);
     CHECK(got == head + "an install error" + tail);
+  }
+  // kFailed with the colour slots NOT usable (Load was not usable and the swimsuits' install failed: there was no
+  // second try): the colour cause as for kNotUsable, then the install error. A retry text is given here although
+  // none exists then. Excludes: the usable flag not read ("an install error / a retry error", which never says the
+  // colour slots could not be loaded), and the retry text appended.
+  {
+    const std::string got = RefusalMessage(O::kFailed, false, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / an install error" + tail);
+  }
+  // The same with no note, and with no error text. Excludes: an empty half on either side of " / ".
+  {
+    const std::string got = RefusalMessage(O::kFailed, false, no_notes, "an install error", "a retry error", false);
+    CHECK(got == head + "the colour slots were not loaded / an install error" + tail);
+  }
+  {
+    const std::string got = RefusalMessage(O::kFailed, false, notes, "", "", false);
+    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / the overlay install failed" + tail);
   }
   // The test switch beats a real note, and every outcome's own cause. Excludes: the switch not read.
   {
-    const std::string got = RefusalMessage(O::kNotUsable, notes, "an install error", "a retry error", true);
+    const std::string got = RefusalMessage(O::kNotUsable, false, notes, "an install error", "a retry error", true);
     CHECK(got == head + "test switch DOA4_COLOURS_TEST_UNUSABLE" + tail);
   }
   {
-    const std::string got = RefusalMessage(O::kFailed, no_notes, "an install error", "a retry error", true);
+    const std::string got = RefusalMessage(O::kFailed, false, no_notes, "an install error", "a retry error", true);
     CHECK(got == head + "test switch DOA4_COLOURS_TEST_UNUSABLE" + tail);
   }
   // kInstalled has no cause (the app never asks for it). Excludes: another outcome's cause borrowed for it.
   {
-    const std::string got = RefusalMessage(O::kInstalled, notes, "an install error", "a retry error", false);
+    const std::string got = RefusalMessage(O::kInstalled, true, notes, "an install error", "a retry error", false);
     CHECK(got == head + tail);
   }
+}
+
+// The refusal's cause when the notes come from their producer: Load on a folder set that is not usable for one reason
+// (a stand-in of the wrong size) and degraded for another (no colour folder at all). Load says the benign thing
+// first and the cause last; the message must name the cause. Excludes: the first note taken for the cause.
+static void TestRefusalNamesLoadsCause() {
+  std::printf("-- TestRefusalNamesLoadsCause\n");
+  FakeGuest g = PlantedGuest();
+  const uint64_t size = TestSlots()[3].size;  // spartan_h3_pink: stand-in file 439, entry 34
+  std::vector<uint8_t> shorter = StandInBytes(34);
+  shorter.pop_back();
+  World w;
+  WriteChrthree(w, 48, {{34, shorter}});
+  std::error_code ec;
+  fs::remove_all(w.colours, ec);
+  CHECK(!ec && !fs::exists(w.colours));  // precondition: there is no colour folder
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  PrintNotes("TestRefusalNamesLoadsCause", s);
+  const std::string cause = "its stand-in is " + std::to_string(size - 1) + " bytes, not " + std::to_string(size);
+  // preconditions: not usable; at least two notes; the first is the folder's, the last the stand-in's
+  CHECK(!s.usable);
+  CHECK(s.notes.size() >= 2 && Contains(NoteAt(s, 0), "is missing; every slot shows its stand-in") &&
+        !Contains(NoteAt(s, 0), cause));
+  CHECK(!s.notes.empty() && Contains(s.notes.back(), cause) && Contains(s.notes.back(), "no colour slot is installed"));
+  const std::string got = RefusalMessage(InstallOutcome::kNotUsable, s.usable, s.notes, "", "", false);
+  CHECK(Contains(got, cause));
+  CHECK(!Contains(got, "is missing; every slot shows its stand-in"));
+  CHECK(!s.notes.empty() &&
+        got == "colour costumes: this PC cannot build the 0.3.8 costume tables: " + s.notes.back() +
+                   "; check the game files (chrthree.afs) and restart");
 }
 
 // MakeDefs() against the real slot table and colourgen::kSources, and against this file's own ledger rows (kStandInLedger:
@@ -2702,6 +2758,7 @@ int main() {
   TestFreeBytesFrom();
   TestIsPassingNote();
   TestRefusalMessage();
+  TestRefusalNamesLoadsCause();
   TestMakeDefsCoverSlots();
   TestAllGoodTouchesNothing();
   TestMakesAllFromEmpty();

@@ -1257,6 +1257,7 @@ class DeadOrAlive4App : public rex::ReXApp {
     namespace ov = doa4::online_view;
     const ov::In in = OnlineViewIn(false);
     ov::Ending ending = ov::Ending::kNone;
+    std::string reason;  // of this PC's own internal end only (BannerText reads it for kInternal alone)
     if (in.in_session) {
       switch (doa4::np::LastResult().end) {
         case doa4::np::live::End::kLeft: ending = ov::Ending::kLeft; break;
@@ -1268,13 +1269,19 @@ class DeadOrAlive4App : public rex::ReXApp {
         case doa4::np::live::End::kLost: ending = ov::Ending::kLost; break;
         case doa4::np::live::End::kDesync: ending = ov::Ending::kDesync; break;
         case doa4::np::live::End::kFrame0Timeout: ending = ov::Ending::kFrame0Timeout; break;
-        case doa4::np::live::End::kInternal: ending = ov::Ending::kInternal; break;
+        case doa4::np::live::End::kInternal:
+          // This PC ended the session itself (np::Abort: it cannot build the costume tables, or its port did not
+          // open; or the session's own internal end): the end's reason, the text EndOnline kept in the last result,
+          // goes into this PC's banner. Nothing sends it to the other PC.
+          ending = ov::Ending::kInternal;
+          reason = doa4::np::LastResult().why;
+          break;
         case doa4::np::live::End::kWorkerOrder: ending = ov::Ending::kWorkerOrder; break;  // lockstep port B3
         case doa4::np::live::End::kNone: break;
       }
     }
     doa4::NetOverlay::Content c;
-    c.banner = ov::BannerText(in.in_session && doa4::np::BannerWaiting(), ending);
+    c.banner = ov::BannerText(in.in_session && doa4::np::BannerWaiting(), ending, reason);
     c.stats = ov::Describe(in).stats_lines;
     if (rex::cvar::Query<bool>("doa4_show_fps")) c.fps = fps_meter_.Text();
     if (update_notice_shown_) c.notice = doa4::update_notice::DisplayText(update_notice_tag_);
@@ -2096,7 +2103,8 @@ class DeadOrAlive4App : public rex::ReXApp {
   // cannot install the entries would build other tables: it is refused, on the one exit of SetUpSuits.
   struct ColourSetup {
     doa4::colour_costumes::InstallOutcome outcome = doa4::colour_costumes::InstallOutcome::kNotUsable;
-    std::vector<std::string> load_notes;  // Load's notes (Status::notes)
+    bool usable = false;                  // Load's Status::usable: the colour entries could go into the build
+    std::vector<std::string> load_notes;  // Load's notes (Status::notes); when not usable, the last one says why
     std::string error, retry_error;       // the overlay install's, and the retry's without the colour entries
     bool test_unusable = false;           // DOA4_COLOURS_TEST_UNUSABLE
     bool test_unequal = false;            // DOA4_COLOURS_TEST_UNEQUAL
@@ -2109,8 +2117,8 @@ class DeadOrAlive4App : public rex::ReXApp {
     // "refused: " line (np::RefuseRun). The test switch DOA4_COLOURS_TEST_UNEQUAL skips it on purpose.
     if (colour.test_unequal) return;
     if (doa4::colour_costumes::MustRefuse(kind_, colour.outcome)) {
-      doa4::np::RefuseRun(doa4::colour_costumes::RefusalMessage(colour.outcome, colour.load_notes, colour.error,
-                                                                colour.retry_error, colour.test_unusable));
+      doa4::np::RefuseRun(doa4::colour_costumes::RefusalMessage(colour.outcome, colour.usable, colour.load_notes,
+                                                                colour.error, colour.retry_error, colour.test_unusable));
     }
   }
 
@@ -2212,6 +2220,7 @@ class DeadOrAlive4App : public rex::ReXApp {
       REXLOG_WARN("[doa4][COLOURS] test switch DOA4_COLOURS_TEST_UNEQUAL: the colour rows stay out of this process's tables; "
                   "it is not refused");
     }
+    colour->usable = colours.usable;  // after the switch: what the build below is given
     // Review Focus 2: a session process never completes a swap (s.complete_swap is false there). The hand-off's checksum names
     // the import the lobby process loaded, and the session must load that same import, so nothing may replace it here. In a
     // process that is not a session the finished import is put in place BEFORE LoadImport opens the folder (LoadImport holds

@@ -40,12 +40,15 @@ bool RowsOn(ProcessKind kind, bool vanilla);
 bool MustRefuse(ProcessKind kind, InstallOutcome outcome);
 // What the refused process says (np::RefuseRun's reason): "colour costumes: this PC cannot build the 0.3.8 costume
 // tables: <cause>; check the game files (chrthree.afs) and restart". The cause: "test switch
-// DOA4_COLOURS_TEST_UNUSABLE" when test_unusable; else for kNotUsable the first of load_notes (Status::notes), or "the
-// colour slots were not loaded" when there is none; for kDropped `error`; for kFailed `error` + " / " + `retry_error`
-// (`error` alone when there was no second try: retry_error empty); for kInstalled nothing (never asked for). An empty
-// `error` reads "the overlay install failed".
-std::string RefusalMessage(InstallOutcome outcome, const std::vector<std::string>& load_notes, std::string_view error,
-                           std::string_view retry_error, bool test_unusable);
+// DOA4_COLOURS_TEST_UNUSABLE" when test_unusable; else for kNotUsable the LAST of load_notes (Status::notes: Load pushes
+// the note that says why nothing is usable right before it returns; the notes before it say why a stand-in was
+// needed), or "the colour slots were not loaded" when there is none; for kDropped `error`; for kFailed with the colour
+// slots usable (colours_usable: Status::usable) `error` + " / " + `retry_error` (`error` alone when retry_error is
+// empty), and for kFailed with them not usable that kNotUsable cause + " / " + `error` (there was no second try, and
+// the install error alone would not say that the colour slots could not be loaded); for kInstalled nothing (never
+// asked for). An empty `error` reads "the overlay install failed". colours_usable is read for kFailed only.
+std::string RefusalMessage(InstallOutcome outcome, bool colours_usable, const std::vector<std::string>& load_notes,
+                           std::string_view error, std::string_view retry_error, bool test_unusable);
 
 // The free bytes std::filesystem::space reported, for MakeOptions::free_bytes. UINT64_MAX when the query could not be
 // answered (`ec` set, or `available` at the value space() gives on an error, uintmax_t(-1), which is not 0): a query
