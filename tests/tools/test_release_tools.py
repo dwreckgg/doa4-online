@@ -809,7 +809,7 @@ def test_pgo_workflow_wiring(root):
     check(m is not None and i_flag is not None and i_check < i_flag < i_cmake, f"workflow Configure: the flag line sits between the check and cmake: {i_flag}")
     check(f'set "{var}="' in lines[i_check:i_flag or 0], f"workflow Configure: {var} is cleared before the flag line")
     cm = lines[i_cmake]
-    check(f'"-DCMAKE_C_FLAGS=-march=x86-64-v3%{var}%"' in cm and f'"-DCMAKE_CXX_FLAGS=-march=x86-64-v3%{var}%"' in cm,
+    check(f'"-DCMAKE_C_FLAGS=-march=x86-64-v2%{var}%"' in cm and f'"-DCMAKE_CXX_FLAGS=-march=x86-64-v2%{var}%"' in cm,
           f"workflow Configure: cmake passes %{var}% in both C and C++ flags: {cm}")
     check("profile" not in cm, f"workflow Configure: the cmake line names no profile itself: {cm}")
 
@@ -871,12 +871,28 @@ def test_pgo_np_build_wiring(root):
     check(not any(l.rstrip().endswith("(") for l in lines), "np_build.bat: no parenthesised block (no errorlevel read inside one)")
 
 
+def check_no_v3_build_route():
+    """No build route may name the AVX2 CPU level; hits under tests/host/ and two measurement notes are exempt."""
+    needle = "x86-64-v" + "3"  # built at run time so this file does not match itself
+    r = subprocess.run(["git", "grep", "-n", "-I", needle, "--", ".", ":!thirdparty", ":!generated"],
+                       cwd=REPO, capture_output=True, text=True)
+    hits = [l for l in r.stdout.splitlines()
+            if not l.split(":")[0].startswith("tests/host/")
+            and l.split(":")[0] not in ("src/net/np_core.cpp", "tests/host/suitconv_fp_control.cpp")]
+    check(not hits, f"no {needle} build route outside the exempt files: {hits}")
+
+
+def test_no_v3_build_route(root):
+    check_no_v3_build_route()
+
+
+
 # ---- the wiring under real cmd: the workflow step's own lines and np_build.bat configure, cmake replaced by a recorder
 
 WF_STEP = "Configure, build, host tests"
 WF_VSDEVCMD = r'set "DOA4_VSDEVCMD=%VS%\Common7\Tools\VsDevCmd.bat"'
 BAT_VSDEVCMD = r'"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\VsDevCmd.bat"'
-PLAIN = "-march=x86-64-v3"
+PLAIN = "-march=x86-64-v2"
 SHLINK = "-Wl,/force:unresolved -Wl,/export:__llvm_profile_dump"
 GUARD = "pgo: use line read but no flag set"
 NAMES = "-mllvm -static-func-full-module-prefix=false"  # path-free profile names for file-local functions

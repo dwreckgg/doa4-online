@@ -520,7 +520,7 @@ function Test-DOA4Avx2 {
     if ($has) { return [pscustomobject]@{ Supported = $true; Detail = 'CPU has AVX2' } }
     return [pscustomobject]@{
         Supported = $false
-        Detail = 'This CPU does not support AVX2. The game is built for x86-64-v3 (Intel Haswell / AMD Zen or newer) and cannot run on this PC.'
+        Detail = 'This CPU does not support AVX2. The game is built for x86-64-v2 (Intel Haswell / AMD Zen or newer) and cannot run on this PC.'
     }
 }
 
@@ -1300,7 +1300,7 @@ function Get-DOA4BuildScript {
         'if not exist "out\build\win-amd64-release\build.ninja" set "DOA4_CONFIGURE=1"',
         'if defined DOA4_CONFIGURE (',
         '  echo [launcher] configuring',
-        '  cmake --preset win-amd64-release "-DREXSDK_DIR=%DOA4_SDK_FWD%" "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3" 2>&1',
+        '  cmake --preset win-amd64-release "-DREXSDK_DIR=%DOA4_SDK_FWD%" "-DCMAKE_C_FLAGS=-march=x86-64-v2" "-DCMAKE_CXX_FLAGS=-march=x86-64-v2" 2>&1',
         ')',
         'if errorlevel 1 exit /b 1',
         'echo [launcher] building',
