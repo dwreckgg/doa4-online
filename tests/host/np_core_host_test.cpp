@@ -1026,9 +1026,10 @@ static void TestMixedMasksOnlyWhenMixed() {
         CHECK(r[4].masks[i].length == 8);
       }
     }
-    const std::vector<std::pair<uint32_t, uint32_t>> six = {{0x82B747D8, 8},   {0x82F6C9D0, 8},    {0x830ADBCC, 0x1C},
-                                                            {0x831A7AC0, 4},   {0x8357A560, 0x400}, {0x8357D520, 4}};
-    CHECK(SweepRanges(state) == six);
+    const std::vector<std::pair<uint32_t, uint32_t>> seven = {{0x82B747D8, 8},   {0x82F6C9D0, 8},    {0x830ADBCC, 0x1C},
+                                                              {0x831A7AC0, 4},   {0x8357A560, 0x400}, {0x8357C190, 4},
+                                                              {0x8357D520, 4}};
+    CHECK(SweepRanges(state) == seven);
   }
   // kMixed: exactly ruling 15's list, in this order, and no sweep.
   CHECK(!SweepOn(SuitSession::kMixed));
