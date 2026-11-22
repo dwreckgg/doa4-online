@@ -199,9 +199,11 @@ function New-TReleaseTable {
 }
 
 # Fake tool set: everything present unless named in -Missing; -ClangVersion for a wrong
-# LLVM; -NoAvx2 for an old CPU. VsDevCmd.bat is created under -VsRoot.
+# LLVM; -NoSse42 for a CPU below x86-64-v2 (a Core 2: SSE4.1, no SSE4.2, no POPCNT);
+# -CpuMacros to set clang's -march=native lines directly. The default is an AVX2 PC.
+# The lines copy real clang's -dM -E output. VsDevCmd.bat is created under -VsRoot.
 function New-FakeTools {
-    param([string]$VsRoot, [string[]]$Missing = @(), [string]$ClangVersion = '23.1.4', [switch]$NoAvx2, [string]$OtherVsVersion = '')
+    param([string]$VsRoot, [string[]]$Missing = @(), [string]$ClangVersion = '23.1.4', [switch]$NoSse42, [string[]]$CpuMacros = $null, [string]$OtherVsVersion = '')
     $vsPath = Join-Path $VsRoot 'BuildTools'
     [void](New-Item -ItemType Directory -Force -Path (Join-Path $vsPath 'Common7\Tools'))
     Set-Content -LiteralPath (Join-Path $vsPath 'Common7\Tools\VsDevCmd.bat') -Value '@echo off' -Encoding ASCII
@@ -213,9 +215,10 @@ function New-FakeTools {
     $clangRules = @()
     if ($Missing -contains 'llvm') { $clangRules += @{ Match = '.'; NotFound = $true } }
     $clangRules += @{ Match = '^--version$'; Output = @("clang version $ClangVersion (https://github.com/llvm/llvm-project abc)", 'Target: x86_64-pc-windows-msvc') }
-    $avxOut = @('#define __AVX__ 1', '#define __SSE4_2__ 1')
-    if (-not $NoAvx2) { $avxOut += '#define __AVX2__ 1' }
-    $clangRules += @{ Match = '-march=native'; Output = $avxOut }
+    $cpuOut = if ($null -ne $CpuMacros) { $CpuMacros }
+        elseif ($NoSse42) { @('#define __SSE3__ 1', '#define __SSSE3__ 1', '#define __SSE4_1__ 1') }
+        else { @('#define __AVX2__ 1', '#define __AVX__ 1', '#define __POPCNT__ 1', '#define __SSE4_1__ 1', '#define __SSE4_2__ 1') }
+    $clangRules += @{ Match = '-march=native'; Output = $cpuOut }
     $clang = New-FakeCommand 'clang' $clangRules
     $vsRules = @()
     if ($Missing -contains 'vs') {

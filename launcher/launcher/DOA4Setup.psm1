@@ -508,19 +508,21 @@ function Install-DOA4Tools {
     return $codes
 }
 
-# AVX2 through clang's own CPU detection (-march=native), which works on every Windows
-# version, unlike IsProcessorFeaturePresent(PF_AVX2...). Supported is $null when unknown.
-function Test-DOA4Avx2 {
+# The game is built for x86-64-v2: the CPU needs SSE4.2 and POPCNT. Asked through clang's
+# own CPU detection (-march=native), which works on every Windows version, unlike
+# IsProcessorFeaturePresent. Supported is $null when unknown.
+function Test-DOA4CpuLevel {
     param([Parameter(Mandatory = $true)][hashtable]$Cmd)
     $r = & $Cmd.clang @('-dM', '-E', '-march=native', '-x', 'c', '-')
     if ($r.NotFound -or $r.ExitCode -ne 0) {
         return [pscustomobject]@{ Supported = $null; Detail = 'could not ask clang about this CPU' }
     }
-    $has = @($r.Output | Where-Object { $_ -match '^#define __AVX2__ 1\s*$' }).Count -gt 0
-    if ($has) { return [pscustomobject]@{ Supported = $true; Detail = 'CPU has AVX2' } }
+    $sse42 = @($r.Output | Where-Object { $_ -match '^#define __SSE4_2__ 1\s*$' }).Count -gt 0
+    $popcnt = @($r.Output | Where-Object { $_ -match '^#define __POPCNT__ 1\s*$' }).Count -gt 0
+    if ($sse42 -and $popcnt) { return [pscustomobject]@{ Supported = $true; Detail = 'CPU has SSE4.2 and POPCNT' } }
     return [pscustomobject]@{
         Supported = $false
-        Detail = 'This CPU does not support AVX2. The game is built for x86-64-v2 (Intel Haswell / AMD Zen or newer) and cannot run on this PC.'
+        Detail = 'This CPU does not support SSE4.2. The game is built for x86-64-v2 (Intel Core from 2008 (Nehalem) / AMD FX from 2011 (Bulldozer) or newer) and cannot run on this PC.'
     }
 }
 
@@ -1434,9 +1436,9 @@ function Invoke-DOA4Install {
         Set-DOA4Step $Ctx $step 'done' ('symlink stubs replaced: {0}; CMake include fix: {1}' -f $stubs.Fixed, $cm)
 
         $step = 'Build'
-        $avx = Test-DOA4Avx2 -Cmd $Ctx.Cmd
-        if ($avx.Supported -eq $false) { Set-DOA4Step $Ctx $step 'failed' $avx.Detail; return New-DOA4StepResult $false $step $avx.Detail $Ctx }
-        if ($null -eq $avx.Supported) { Write-DOA4Log $Ctx "  AVX2: $($avx.Detail); building anyway" }
+        $cpu = Test-DOA4CpuLevel -Cmd $Ctx.Cmd
+        if ($cpu.Supported -eq $false) { Set-DOA4Step $Ctx $step 'failed' $cpu.Detail; return New-DOA4StepResult $false $step $cpu.Detail $Ctx }
+        if ($null -eq $cpu.Supported) { Write-DOA4Log $Ctx "  CPU level: $($cpu.Detail); building anyway" }
         Set-DOA4Step $Ctx $step 'running' 'the first build takes a long time'
         Invoke-DOA4Build -Ctx $Ctx -VsDevCmd $vs.VsDevCmd | Out-Null
         Set-DOA4Step $Ctx $step 'done'
@@ -1629,8 +1631,8 @@ function Invoke-DOA4Update {
         }
 
         $step = 'Build'
-        $avx = Test-DOA4Avx2 -Cmd $Ctx.Cmd
-        if ($avx.Supported -eq $false) { Set-DOA4Step $Ctx $step 'failed' $avx.Detail; return New-DOA4StepResult $false $step $avx.Detail $Ctx }
+        $cpu = Test-DOA4CpuLevel -Cmd $Ctx.Cmd
+        if ($cpu.Supported -eq $false) { Set-DOA4Step $Ctx $step 'failed' $cpu.Detail; return New-DOA4StepResult $false $step $cpu.Detail $Ctx }
         Set-DOA4Step $Ctx $step 'running'
         Invoke-DOA4Build -Ctx $Ctx -VsDevCmd $vs.VsDevCmd | Out-Null
         Set-DOA4Step $Ctx $step 'done'
