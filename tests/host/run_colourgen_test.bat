@@ -1,7 +1,7 @@
 @echo off
 rem Builds and runs the colour generator host test (the Alpha-152 recolour, doa4_colourgen_alpha.cpp; the Spartan-458
 rem repaint, doa4_colourgen_spartan.cpp; DXT1 and tiling, doa4_colourgen_dxt.cpp) with clang-cl (no CMake), under the
-rem converter's floating-point flags for every translation unit (x86-64-v3 with FMA switched off, no contraction, no
+rem converter's floating-point flags for every translation unit (x86-64-v2 with FMA switched off, no contraction, no
 rem fast-math, no errno). The generator objects and the converter objects they link (num, tpr) go to
 rem %TEMP%\doa4_colourgen_test\obj\, where suitconv_fp_scan.py scans them before the test runs: the scan's folder search
 rem picks only doa4_suitconv_* objects, so every doa4_colourgen_*.obj found there is passed to it by name (a wildcard
@@ -23,7 +23,7 @@ if defined DOA4_COLOURGEN_OUT set "OUT=%DOA4_COLOURGEN_OUT%"
 if not exist "%OUT%\obj" mkdir "%OUT%\obj"
 if not exist "%OUT%\testobj" mkdir "%OUT%\testobj"
 set "SRC=%~dp0..\..\src"
-set FPFLAGS=/clang:-march=x86-64-v3 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
+set FPFLAGS=/clang:-march=x86-64-v2 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
 set CXXFLAGS=/nologo /std:c++latest /EHsc /O2 %FPFLAGS%
 set "LOG=%OUT%\colourgen_build.log"
 for %%f in (doa4_suitconv_num doa4_suitconv_tpr) do if exist "%OUT%\obj\%%f.obj" del /q "%OUT%\obj\%%f.obj"
