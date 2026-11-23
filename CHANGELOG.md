@@ -19,6 +19,10 @@
   not affected.
 
 ### Fixed
+- **Controller settings changed during an online session are kept.** Button remaps, the keyboard keys, "Use keyboard
+  as controller" and the new vibration boxes, changed in the Esc menu's Controls tab while playing online, were put
+  back to what they were when the session ended. They are your own settings and now stay. Everything the host's
+  game decides for the session is still never saved into your settings.
 - **Story mode fades: no half-second still picture** ([issue #23](https://github.com/dwreckgg/doa4-online/issues/23)).
   The cross-fade after YOU LOSE / CONTINUE? (and other fades drawn the same way) now fades into the next round
   instead of holding the old picture for about half a second and then cutting. If a picture looks wrong,

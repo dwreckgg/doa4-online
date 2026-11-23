@@ -1599,9 +1599,10 @@ void MenuDialog::SetAndSave(std::string_view name, std::string_view value, bool 
     status_ = fmt::format("Could not set {} to {}.", name, value);
     return;
   }
-  std::string error =
-      SaveTomlKey(host_.config_path, name, quote ? TomlString(value) : std::string(value));
+  const std::string literal = quote ? TomlString(value) : std::string(value);
+  std::string error = SaveTomlKey(host_.config_path, name, literal);
   status_ = error.empty() ? std::string() : "Could not save settings: " + error;
+  if (error.empty() && host_.note_saved) host_.note_saved(name, literal);  // Task 2b: kept past a session's restore
 }
 
 }  // namespace doa4

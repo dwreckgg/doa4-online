@@ -2560,6 +2560,57 @@ static std::map<std::string, CvarDef> ScanCvars(const std::filesystem::path& roo
   return defs;
 }
 
+// Task 2b: the controller keys a session keeps in the player's config (the Esc menu's Controls tab saves) are exactly
+// these 31, and every one is the player's own: not carried, family "input", never trusted. A carried or trusted key here
+// would let a host-imposed value persist after the session (carry 2b).
+static void TestSessionLocalKeys() {
+  Group("session-local keys: the Controls tab's saves, all not carried");
+  std::vector<std::string> want = {"pad_remap_p1", "pad_remap_p2", "pad_remap_p3", "pad_remap_p4",
+                                   "pad_vibration_p1", "pad_vibration_p2", "pad_vibration_p3", "pad_vibration_p4",
+                                   "mnk_mode", "mnk_user_index"};
+  for (const char* k : {"a", "b", "x", "y", "left_shoulder", "right_shoulder", "left_trigger", "right_trigger", "back",
+                        "start", "guide", "lstick_press", "rstick_press", "lstick_up", "lstick_down", "lstick_left",
+                        "lstick_right", "dpad_up", "dpad_down", "dpad_left", "dpad_right"}) {
+    want.push_back(std::string("keybind_") + k);
+  }
+  CHECK(want.size() == 31);
+  std::set<std::string> carried(kSdkNames, kSdkNames + kSdkCount);
+  for (const std::string& n : want) {
+    g_ctx = n;
+    CHECK(ho::IsSessionLocalKey(n));
+    const NotCarried* nc = nullptr;
+    for (const NotCarried& e : kSdkNotCarried) {
+      if (n == e.name) nc = &e;
+    }
+    CHECK(nc != nullptr && std::string(nc->family) == "input");
+    CHECK(!carried.count(n));
+    CHECK(!IsTrusted(n));
+  }
+  g_ctx.clear();
+  // every carried and every trusted name is refused (the whole lists, not a sample)
+  for (const std::string& n : carried) {
+    g_ctx = n;
+    CHECK(!ho::IsSessionLocalKey(n));
+  }
+  for (const Trusted& t : kTrusted) {
+    g_ctx = t.name;
+    CHECK(!ho::IsSessionLocalKey(t.name));
+  }
+  g_ctx.clear();
+  // near misses and other menu saves
+  for (const char* n : {"resolution_scale", "audio_volume", "doa4_bust_age", "mnk_sensitivity", "input_backend",
+                        "pad_fresh_read", "pad_remap_p5", "pad_vibration_p0", "keybind_", "keybind_a ", "PAD_REMAP_P1",
+                        "doa4_photo_dir", "swap_post_effect", ""}) {
+    g_ctx = n;
+    CHECK(!ho::IsSessionLocalKey(n));
+  }
+  g_ctx.clear();
+  // exactly 31 among every name the census knows
+  size_t accepted = 0;
+  for (const NotCarried& e : kSdkNotCarried) accepted += ho::IsSessionLocalKey(e.name) ? 1 : 0;
+  CHECK(accepted == 31);
+}
+
 static void TestSdkNames(const std::string& sdk_src, const std::string& port_src) {
   Group("census: every cvar the SDK and the port define is classified, every classified name is defined, the total is pinned");
   CHECK(!sdk_src.empty() && !port_src.empty());  // the runner passes --sdk-src and --port-src; a missing one is a failure, not a skip
@@ -2751,6 +2802,7 @@ int main(int argc, char** argv) {
   TestTrustClass();
   TestSettingsInHandoff();
   TestPeerAndRelease();
+  TestSessionLocalKeys();
   TestSdkNames(sdk_src, port_src);
   std::printf("%s: %d checks, %d failures\n", g_failures ? "FAILED" : "PASSED", g_checks, g_failures);
   return g_failures ? 1 : 0;
