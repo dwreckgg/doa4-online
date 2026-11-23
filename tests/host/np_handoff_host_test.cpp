@@ -245,6 +245,10 @@ static const NotCarried kSdkNotCarried[] = {
     {"pad_remap_p2", "input"},
     {"pad_remap_p3", "input"},
     {"pad_remap_p4", "input"},
+    {"pad_vibration_p1", "input"},
+    {"pad_vibration_p2", "input"},
+    {"pad_vibration_p3", "input"},
+    {"pad_vibration_p4", "input"},
     {"perf_log_csv", "log"},
     {"physical_protect_timing", "log"},  // 0.3.8: only logs the physical protect stats line
     {"pre_mask_resolve_l2_block", "gpu-render"},
@@ -351,7 +355,7 @@ static constexpr size_t kSdkCount = sizeof(kSdkNames) / sizeof(kSdkNames[0]);
 static constexpr size_t kSdkNotCarriedCount = sizeof(kSdkNotCarried) / sizeof(kSdkNotCarried[0]);
 static constexpr size_t kPortNotCarriedCount = sizeof(kPortNotCarried) / sizeof(kPortNotCarried[0]);
 static constexpr size_t kTrustedCount = sizeof(kTrusted) / sizeof(kTrusted[0]);
-static constexpr size_t kSdkTotal = 209;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend)
+static constexpr size_t kSdkTotal = 213;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend, +4 pad vibration)
 
 // The expected names: the carried list, then the Extras tweak cvars of the tweaks module.
 // The port's own carried settings beyond the tweaks: they change guest memory and are no trust matter (np_handoff.cpp
@@ -2556,6 +2560,57 @@ static std::map<std::string, CvarDef> ScanCvars(const std::filesystem::path& roo
   return defs;
 }
 
+// Task 2b: the controller keys a session keeps in the player's config (the Esc menu's Controls tab saves) are exactly
+// these 31, and every one is the player's own: not carried, family "input", never trusted. A carried or trusted key here
+// would let a host-imposed value persist after the session (carry 2b).
+static void TestSessionLocalKeys() {
+  Group("session-local keys: the Controls tab's saves, all not carried");
+  std::vector<std::string> want = {"pad_remap_p1", "pad_remap_p2", "pad_remap_p3", "pad_remap_p4",
+                                   "pad_vibration_p1", "pad_vibration_p2", "pad_vibration_p3", "pad_vibration_p4",
+                                   "mnk_mode", "mnk_user_index"};
+  for (const char* k : {"a", "b", "x", "y", "left_shoulder", "right_shoulder", "left_trigger", "right_trigger", "back",
+                        "start", "guide", "lstick_press", "rstick_press", "lstick_up", "lstick_down", "lstick_left",
+                        "lstick_right", "dpad_up", "dpad_down", "dpad_left", "dpad_right"}) {
+    want.push_back(std::string("keybind_") + k);
+  }
+  CHECK(want.size() == 31);
+  std::set<std::string> carried(kSdkNames, kSdkNames + kSdkCount);
+  for (const std::string& n : want) {
+    g_ctx = n;
+    CHECK(ho::IsSessionLocalKey(n));
+    const NotCarried* nc = nullptr;
+    for (const NotCarried& e : kSdkNotCarried) {
+      if (n == e.name) nc = &e;
+    }
+    CHECK(nc != nullptr && std::string(nc->family) == "input");
+    CHECK(!carried.count(n));
+    CHECK(!IsTrusted(n));
+  }
+  g_ctx.clear();
+  // every carried and every trusted name is refused (the whole lists, not a sample)
+  for (const std::string& n : carried) {
+    g_ctx = n;
+    CHECK(!ho::IsSessionLocalKey(n));
+  }
+  for (const Trusted& t : kTrusted) {
+    g_ctx = t.name;
+    CHECK(!ho::IsSessionLocalKey(t.name));
+  }
+  g_ctx.clear();
+  // near misses and other menu saves
+  for (const char* n : {"resolution_scale", "audio_volume", "doa4_bust_age", "mnk_sensitivity", "input_backend",
+                        "pad_fresh_read", "pad_remap_p5", "pad_vibration_p0", "keybind_", "keybind_a ", "PAD_REMAP_P1",
+                        "doa4_photo_dir", "swap_post_effect", ""}) {
+    g_ctx = n;
+    CHECK(!ho::IsSessionLocalKey(n));
+  }
+  g_ctx.clear();
+  // exactly 31 among every name the census knows
+  size_t accepted = 0;
+  for (const NotCarried& e : kSdkNotCarried) accepted += ho::IsSessionLocalKey(e.name) ? 1 : 0;
+  CHECK(accepted == 31);
+}
+
 static void TestSdkNames(const std::string& sdk_src, const std::string& port_src) {
   Group("census: every cvar the SDK and the port define is classified, every classified name is defined, the total is pinned");
   CHECK(!sdk_src.empty() && !port_src.empty());  // the runner passes --sdk-src and --port-src; a missing one is a failure, not a skip
@@ -2572,6 +2627,13 @@ static void TestSdkNames(const std::string& sdk_src, const std::string& port_src
   CHECK(sdk.count("headless"));          // defined, deliberately not carried (the session forces it)
   CHECK(port.count("doa4_tag_all_stages"));
   CHECK(!sdk.count("no_such_cvar_xyz") && !port.count("no_such_cvar_xyz"));
+  // the per-slot vibration switch (issue #25): on by default, as the game shipped; each player's own (not carried)
+  for (const char* n : {"pad_vibration_p1", "pad_vibration_p2", "pad_vibration_p3", "pad_vibration_p4"}) {
+    g_ctx = n;
+    const auto it = sdk.find(n);
+    CHECK(it != sdk.end() && it->second.default_token == "true");
+  }
+  g_ctx.clear();
 
   // the two lists: no repeats, no overlap, and together the pinned total
   std::set<std::string> carried(kSdkNames, kSdkNames + kSdkCount), not_carried;
@@ -2740,6 +2802,7 @@ int main(int argc, char** argv) {
   TestTrustClass();
   TestSettingsInHandoff();
   TestPeerAndRelease();
+  TestSessionLocalKeys();
   TestSdkNames(sdk_src, port_src);
   std::printf("%s: %d checks, %d failures\n", g_failures ? "FAILED" : "PASSED", g_checks, g_failures);
   return g_failures ? 1 : 0;

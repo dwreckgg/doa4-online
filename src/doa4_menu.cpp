@@ -21,6 +21,7 @@
 #include <rex/cvar.h>
 #include <rex/input/input_system.h>
 #include <rex/input/pad_remap.h>
+#include <rex/input/pad_vibration.h>
 #include <rex/logging.h>
 #include <rex/ui/d3d12/d3d12_presenter.h>
 #include <rex/ui/display_mode.h>
@@ -447,6 +448,7 @@ float MenuDialog::WidestRow() {
   w.push_back(row({button("Change..."), text(online_view::kLockedText), button("Open folder")}));
   // Controls
   w.push_back(toggles(std::array<std::string, 4>{"Player 1", "Player 2", "Player 3", "Player 4"}));
+  w.push_back(toggle("Vibration (Player 4)"));
   w.push_back(text(kNoControllerNote));
   w.push_back(text(kButtonNotesNote));
   for (const auto& note : kButtonNotes) w.push_back(table(text(note[1])));
@@ -687,6 +689,23 @@ void MenuDialog::DrawPadSection() {
       slot_ = slot;
       pad_connected_ = false;
       if (listen_ == Listen::kPad) listen_ = Listen::kNone;
+    }
+  }
+  // Issue #25: this slot's rumble on or off (SDK pad_vibration_pN; every backend, so above the SDL-only note). Saved at
+  // once; turning it off also stops a rumble already running (SDL keeps the motors on until the next call).
+  {
+    const std::string_view cvar = rex::input::kPadVibrationCvars[slot_];
+    bool vibration = rex::cvar::Query<bool>(cvar);
+    const std::string label = fmt::format("Vibration (Player {})", slot_ + 1);
+    if (ImGui::Checkbox(label.c_str(), &vibration)) {
+      SetAndSave(cvar, vibration ? "true" : "false", false);
+      rex::input::InputSystem* input = host_.input ? host_.input() : nullptr;
+      if (!vibration && input) {
+        rex::input::X_INPUT_VIBRATION stop;
+        stop.left_motor_speed = uint16_t(0);
+        stop.right_motor_speed = uint16_t(0);
+        input->SetState(static_cast<uint32_t>(slot_), &stop);
+      }
     }
   }
   if (rex::cvar::Query<std::string>("input_backend") != "sdl") {
@@ -1580,9 +1599,10 @@ void MenuDialog::SetAndSave(std::string_view name, std::string_view value, bool 
     status_ = fmt::format("Could not set {} to {}.", name, value);
     return;
   }
-  std::string error =
-      SaveTomlKey(host_.config_path, name, quote ? TomlString(value) : std::string(value));
+  const std::string literal = quote ? TomlString(value) : std::string(value);
+  std::string error = SaveTomlKey(host_.config_path, name, literal);
   status_ = error.empty() ? std::string() : "Could not save settings: " + error;
+  if (error.empty() && host_.note_saved) host_.note_saved(name, literal);  // Task 2b: kept past a session's restore
 }
 
 }  // namespace doa4

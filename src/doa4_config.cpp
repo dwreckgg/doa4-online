@@ -142,4 +142,11 @@ std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
   return SaveTomlKeys(path, {{key, value_literal}});
 }
 
+std::string ConfigAfterSession(std::string_view snapshot,
+                               const std::vector<std::pair<std::string, std::string>>& kept) {
+  std::string text(snapshot);
+  for (const auto& [key, value_literal] : kept) text = UpsertTomlKey(text, key, value_literal);
+  return text;
+}
+
 }  // namespace doa4

@@ -96,6 +96,11 @@ std::string Unpack(std::span<const uint8_t> bytes, Handoff* out);
 // once (GuestSettingValue, np::SessionBust, AgeWanted) and a player's own values come back when the session ends.
 // doa4_suits_full_bust is no longer read; it stays carried so old recordings and hand-offs, which hold its line, still apply.
 const std::vector<std::string>& GuestSettingNames();
+// The keys a session keeps in the player's config when the Esc menu saves them during the session (the Controls tab:
+// pad_remap_p1..p4, pad_vibration_p1..p4, the 21 keybind_* rows, mnk_mode, mnk_user_index). Every one is the player's
+// own (not carried; the host test pins them against the census), so keeping it cannot persist a host-imposed value.
+// Everything else is restored from the session-start snapshot (carry 2b).
+bool IsSessionLocalKey(std::string_view name);
 // The value of `name` in a guest settings text (the name ends at the first '='), or nothing when no line carries it.
 std::optional<std::string> GuestSettingValue(std::string_view text, std::string_view name);
 // The same for a guest settings text kept as one meta value (np_session GuestMeta: the lines joined by ';', "(none)" when

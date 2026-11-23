@@ -9,6 +9,8 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace doa4 {
 
@@ -41,5 +43,13 @@ std::string SaveTomlKeys(const std::filesystem::path& path,
 // SaveTomlKeys with the one key.
 std::string SaveTomlKey(const std::filesystem::path& path, std::string_view key,
                         std::string_view value_literal);
+
+// The config a netplay session leaves behind: `snapshot` (the file at session
+// start, "" if there was none) with each kept (key, value_literal) applied by
+// UpsertTomlKey in list order. The list is the player's own controller saves
+// made with the Esc menu during the session, in the order they were made, so a
+// key the snapshot lacked lands where the save put it.
+std::string ConfigAfterSession(std::string_view snapshot,
+                               const std::vector<std::pair<std::string, std::string>>& kept);
 
 }  // namespace doa4

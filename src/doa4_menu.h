@@ -65,6 +65,9 @@ struct MenuHost {
   std::string* saved_speakers = nullptr;
   // The runtime's input system, or null (before the runtime exists).
   std::function<rex::input::InputSystem*()> input;
+  // Called by SetAndSave after it wrote `key = value_literal` to config_path (Task 2b): the app keeps the player's own
+  // controller saves so a netplay session's config restore (CheckConfigUnchanged) puts them back. May be empty.
+  std::function<void(std::string_view key, std::string_view value_literal)> note_saved;
   // Runs `fn` on the UI thread after the current frame: window changes and
   // closing the menu must not happen while the menu is drawing.
   std::function<void(std::function<void()> fn)> defer;

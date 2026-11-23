@@ -11,6 +11,8 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
+#include <vector>
 
 static int g_failures = 0;
 #define CHECK(cond)                                               \
@@ -23,6 +25,24 @@ static int g_failures = 0;
 
 using doa4::TomlString;
 using doa4::UpsertTomlKey;
+
+// The config a session leaves behind (Task 2b): the session-start snapshot with the kept controller saves replayed in
+// the order they were made, so a key the snapshot lacked lands where the menu's save put it.
+static void TestConfigAfterSession() {
+  using Kept = std::vector<std::pair<std::string, std::string>>;
+  const std::string snap = "a = 1\nb = 2\n[t]\nx = 1\n";
+  // replace, insert before the table, and a later save of the same key wins in place
+  CHECK(doa4::ConfigAfterSession(snap, Kept{{"pad_remap_p1", "\"A=B\""}, {"b", "3"}, {"pad_remap_p1", "\"\""}}) ==
+        "a = 1\nb = 3\npad_remap_p1 = \"\"\n[t]\nx = 1\n");
+  // two missing keys keep their save order (a replay in another order would swap the two new lines)
+  CHECK(doa4::ConfigAfterSession(snap, Kept{{"z", "1"}, {"y", "2"}}) == "a = 1\nb = 2\nz = 1\ny = 2\n[t]\nx = 1\n");
+  // nothing kept: the snapshot, byte for byte (CRLF kept)
+  CHECK(doa4::ConfigAfterSession("a = 1\r\n", Kept{}) == "a = 1\r\n");
+  // no config at session start: only the kept lines
+  CHECK(doa4::ConfigAfterSession("", Kept{{"mnk_mode", "true"}}) == "mnk_mode = true\n");
+  // the last of three entries is applied too
+  CHECK(doa4::ConfigAfterSession("", Kept{{"a", "1"}, {"b", "2"}, {"c", "3"}}) == "a = 1\nb = 2\nc = 3\n");
+}
 
 static void TestUpsert() {
   // Empty file.
@@ -273,6 +293,7 @@ static void TestGameFilesSurvivesTheSdkWriter() {
 }
 
 int main() {
+  TestConfigAfterSession();
   TestUpsert();
   TestTomlString();
   try {

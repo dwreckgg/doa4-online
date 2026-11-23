@@ -491,6 +491,19 @@ std::string Unpack(std::span<const uint8_t> bytes, Handoff* out) {
 
 const std::vector<std::string>& GuestSettingNames() { return Reg().names; }
 
+bool IsSessionLocalKey(std::string_view name) {
+  static constexpr std::array<std::string_view, 31> kKeys = {
+      "pad_remap_p1",          "pad_remap_p2",          "pad_remap_p3",         "pad_remap_p4",
+      "pad_vibration_p1",      "pad_vibration_p2",      "pad_vibration_p3",     "pad_vibration_p4",
+      "mnk_mode",              "mnk_user_index",        "keybind_a",            "keybind_b",
+      "keybind_x",             "keybind_y",             "keybind_left_shoulder", "keybind_right_shoulder",
+      "keybind_left_trigger",  "keybind_right_trigger", "keybind_back",         "keybind_start",
+      "keybind_guide",         "keybind_lstick_press",  "keybind_rstick_press", "keybind_lstick_up",
+      "keybind_lstick_down",   "keybind_lstick_left",   "keybind_lstick_right", "keybind_dpad_up",
+      "keybind_dpad_down",     "keybind_dpad_left",     "keybind_dpad_right"};
+  return std::find(kKeys.begin(), kKeys.end(), name) != kKeys.end();
+}
+
 const std::vector<TrustedSetting>& TrustedSettings() { return Reg().trusted_list; }
 
 std::string CaptureGuestSettings(const std::function<std::string(const std::string& name)>& query) {

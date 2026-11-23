@@ -541,6 +541,7 @@ class DeadOrAlive4App : public rex::ReXApp {
       SetEnvironmentVariableW(L"DOA4_NP_HANDOFF", nullptr);  // the offline relaunch at the end must not inherit it
       _wputenv(L"DOA4_NP_HANDOFF=");
       ReadHandoff(path);
+      TestMenuSave();
     }
     doa4::np::SetSwitchContext(session_.has_value(), !test_dir_.empty());
     doa4::np::PrepareReplayRules();
@@ -1834,6 +1835,9 @@ class DeadOrAlive4App : public rex::ReXApp {
       rex::Runtime* rt = runtime();
       return rt ? dynamic_cast<rex::input::InputSystem*>(rt->input_system()) : nullptr;
     };
+    host.note_saved = [this](std::string_view key, std::string_view value_literal) {
+      NoteSessionLocalSave(key, value_literal);
+    };
     host.defer = [this](std::function<void()> fn) {
       app_context().CallInUIThreadDeferred(std::move(fn));
     };
@@ -1930,9 +1934,35 @@ class DeadOrAlive4App : public rex::ReXApp {
     }
   }
 
+  // Task 2b (the user, 2026-11-22: controller settings changed online must save): the menu reports each save it wrote;
+  // only the player's own controller keys are kept. Recorded in every process (cheap); only a session process restores.
+  void NoteSessionLocalSave(std::string_view key, std::string_view value_literal) {
+    if (!doa4::np::handoff::IsSessionLocalKey(key)) return;
+    std::lock_guard<std::mutex> lock(session_saves_mutex_);
+    session_saves_.emplace_back(std::string(key), std::string(value_literal));
+  }
+
+  // DOA4_NP_TEST_MENU_SAVE=<name>=<value> (test dir only, a session process, after the host's settings are applied): the
+  // save the Esc menu's SetAndSave makes for an unquoted value (the cvar, the config line, NoteSessionLocalSave), standing
+  // in for a player's click during a session, so a two-copy run can show Task 2b's keep (or, for another key, the restore).
+  void TestMenuSave() {
+    if (test_dir_.empty() || !session_) return;
+    const char* t = std::getenv("DOA4_NP_TEST_MENU_SAVE");
+    if (!t || !*t) return;
+    const std::string text(t);
+    const size_t eq = text.find('=');
+    if (eq == std::string::npos || eq == 0) return;
+    const std::string name = text.substr(0, eq), value = text.substr(eq + 1);
+    std::string error = rex::cvar::SetFlagByName(name, value) ? std::string() : std::string("the cvar refused it");
+    if (error.empty()) error = doa4::SaveTomlKey(ConfigPath(), name, value);
+    if (error.empty()) NoteSessionLocalSave(name, value);
+    doa4::np::EarlyLog("[doa4][NET] test: menu save " + name + " = " + value + (error.empty() ? "" : ": " + error));
+  }
+
   // Carry 2b: a session applies the host's guest settings to the cvars; nothing may save them into the player's config
   // (the settings overlay's "Save to config", a menu save). The file must be byte-identical after the session: if it is
   // not, the snapshot taken at OnPostInitLogging is written back and a WARN line goes to np_log (the harness fails it).
+  // Task 2b: the exception is the player's own controller saves (NoteSessionLocalSave), replayed onto the snapshot.
   void CheckConfigUnchanged() {
     std::error_code ec;
     std::string now;
@@ -1944,16 +1974,34 @@ class DeadOrAlive4App : public rex::ReXApp {
         now.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
       }
     }
-    if (has == toml_had_ && now == toml_snapshot_) return;
-    if (toml_had_) {  // fix round M3: a temp file, then a rename over the config
+    // Task 2b: the player's own controller saves made with the Esc menu during the session (IsSessionLocalKey: never a
+    // carried or trusted key) are replayed onto the snapshot in save order; every other change is still undone.
+    std::vector<std::pair<std::string, std::string>> kept;
+    {
+      std::lock_guard<std::mutex> lock(session_saves_mutex_);
+      kept = session_saves_;
+    }
+    if (kept.empty()) {
+      if (has == toml_had_ && now == toml_snapshot_) return;
+      if (toml_had_) {  // fix round M3: a temp file, then a rename over the config
+        const std::filesystem::path tmp = ConfigPath().wstring() + L".np_restore";
+        {
+          std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+          out << toml_snapshot_;
+        }
+        MoveFileExW(tmp.c_str(), ConfigPath().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+      } else {
+        std::filesystem::remove(ConfigPath(), ec);
+      }
+    } else {
+      const std::string expected = doa4::ConfigAfterSession(toml_had_ ? toml_snapshot_ : std::string(), kept);
+      if (has && now == expected) return;  // only the player's own controller saves changed: keep them, no WARN
       const std::filesystem::path tmp = ConfigPath().wstring() + L".np_restore";
       {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        out << toml_snapshot_;
+        out << expected;
       }
       MoveFileExW(tmp.c_str(), ConfigPath().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-    } else {
-      std::filesystem::remove(ConfigPath(), ec);
     }
     doa4::np::LogLine("WARN session: the config file " + doa4::Utf8Generic(ConfigPath()) +
                       " changed during the session (host-imposed settings must never be saved): restored");
@@ -1982,6 +2030,10 @@ class DeadOrAlive4App : public rex::ReXApp {
   std::atomic<bool> lobby_watch_stop_{false};
   std::string toml_snapshot_;
   bool toml_had_ = false;
+  // Task 2b: (key, value literal) of each Esc-menu save of a session-local controller key, in save order (UI thread
+  // writes, CheckConfigUnchanged reads at relaunch or shutdown).
+  std::mutex session_saves_mutex_;
+  std::vector<std::pair<std::string, std::string>> session_saves_;
   bool guest_touched_ = false;   // a host-imposed setting was applied in this process (fix round I1)
   bool launch_refused_ = false;  // the session start was aborted: no runtime / no module launch (I1, I2)
   // The start-up update notice (Task 15). update_relaunch_*: set once in NetplayAtStart; the rest on the UI thread.
