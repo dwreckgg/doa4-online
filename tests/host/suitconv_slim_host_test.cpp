@@ -230,6 +230,20 @@ static std::vector<Case> Cases() {
   // the current map grammar: a 0xDX entry (24-bit code) in the main group and two '60 NN' state groups before the
   // copy groups (as Helena's reference hel05 holds them)
   cs.push_back(ReadCase("strip_states", StatesModel()));
+  // fix round 1, I1: a copy's buffer base past the data end (VB4 at 0x10000, the kept VB3 at 0x11000, data ending at
+  // 0xF800): both spans pass the 4 KiB check and the strip slices x.data[p:a] past its end, which Python clamps
+  cs.push_back(ReadCase("strip_base_past_end", FrontWith([](synth::Model& m) {
+    m.vbufs[4].base = 0x10000;
+    m.vbufs[3].base = 0x11000;
+  })));
+  // fix round 1, I2: kept objects on buffer indices above a copy's, so the kept indices are renumbered (not the
+  // identity): copy 4 on VB1 and IB0, kept object 1 on VB4, kept object 0 on IB4
+  cs.push_back(ReadCase("strip_renumber", FrontWith([](synth::Model& m) {
+    m.objects[4].vb = 1;
+    m.objects[1].vb = 4;
+    m.objects[4].ib = 0;
+    m.objects[0].ib = 4;
+  })));
   {
     Case c = ReadCase("ref_map_unknown", Front());  // an entry byte 0xB0 (top bit set, not 0x9X / 0xAX / 0xDX)
     c.cat = synth::Model::MakeCatWith({0x90, 0x01, 0x00, 0xB0, 0x00, 0x00, 0x00});
@@ -373,7 +387,9 @@ static const Expected kExpected[] = {
     {"ref_top_ids", "REFUSED ref_top_ids: old copies 4..6 are not the top 3 ids of the 8 nodes/objects"},
     {"ref_user0", "REFUSED ref_user0: USER0 [7, 4, 2, 5, 7, 6, 7, 13, 1, 2, 3, 16] does not describe its resource list [7, 4, 2, 4, 7, 6, 7, 13, 1, 2, 3, 16]"},
     {"ref_users", "REFUSED USER resources at [0, 1, 2, 4], expected 0..3"},
+    {"strip_base_past_end", "OK fnv=5a8cedd8414d5bdb len=49152 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_front", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
+    {"strip_renumber", "OK fnv=5d3a8f26b074fee2 len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_states", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,d41410:0,9003:2,9004:3] s10[9003:2] s11[9004:3,d01410:1] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_trail_ordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_trail_unordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
@@ -446,6 +462,12 @@ static void TestStripRemovesCopies() {
     CHECKF(StripOr(name, m.MakeTpr(), m.MakeCat()) == want, "%s: not the model built without copies", name);
     CheckCase(name);
   }
+  CheckCase("strip_base_past_end");
+  CheckCase("strip_renumber");
+  // fixture guard (I2): in strip_renumber a kept object uses a buffer index above a copy's, for VBs and for IBs
+  synth::Model r = Front();
+  r.objects[4].vb = 1, r.objects[1].vb = 4, r.objects[4].ib = 0, r.objects[0].ib = 4;
+  CHECK(r.objects[1].vb > r.objects[4].vb && r.objects[0].ib > r.objects[4].ib);
 }
 
 static void TestStripNotTrailing() {

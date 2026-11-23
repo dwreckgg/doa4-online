@@ -53,7 +53,8 @@ struct Tex {
 };
 
 inline void Fill(Bytes& data, uint32_t at, uint32_t n, uint8_t seed) {
-  for (uint32_t k = 0; k < n; ++k) data.at(at + k) = static_cast<uint8_t>((k * 7u + seed) % 251u + 1u);
+  for (uint32_t k = 0; k < n; ++k)  // bytes past the data end are not written (a base may lie past it)
+    if (uint64_t(at) + k < data.size()) data[at + k] = static_cast<uint8_t>((k * 7u + seed) % 251u + 1u);
 }
 
 struct Model {

@@ -181,13 +181,20 @@ void RemoveResources(tpr::Xpr& x, const std::set<size_t>& drop, const std::strin
       if (e <= v) s += e - a;
     return v - s;
   };
+  // x.data[p:a] and x.data[p:] as Python slices them: both ends clamped to the data's length. A span's base and end
+  // come from descriptors and may lie past the data end (a base above len(data) whose next base is higher still).
+  const auto slice = [&x, data_len](Bytes& out, int64_t from, int64_t to) {
+    from = std::min(from, data_len);
+    to = std::min(to, data_len);
+    if (to > from) out.insert(out.end(), x.data.begin() + from, x.data.begin() + to);
+  };
   Bytes data;
   int64_t p = 0;
   for (const auto& [a, e] : spans) {
-    if (a > p) data.insert(data.end(), x.data.begin() + p, x.data.begin() + a);  // x.data[p:a]
+    slice(data, p, a);
     p = e;
   }
-  if (p < data_len) data.insert(data.end(), x.data.begin() + p, x.data.end());
+  slice(data, p, data_len);
   for (size_t i = 0; i < x.res.size(); ++i) {
     if (drop.count(i)) continue;
     auto& r = x.res[i];
@@ -243,7 +250,8 @@ Bytes MapInPlace(std::span<const uint8_t> c, const Bytes& new_map, const std::ve
     Fail("cat directory " + DirRepr(ents) + " not of the converter shape: new type-2 map " +
          Dec(static_cast<int64_t>(new_map.size())) + " bytes is longer than the old map " + Dec(old) + " bytes");
   }
-  Bytes out(c.begin(), c.begin() + 0x18);
+  const auto head18 = Reader(c).Slice(0, 0x18);  // c[:0x18], clamped
+  Bytes out(head18.begin(), head18.end());
   out.insert(out.end(), new_map.begin(), new_map.end());
   out.insert(out.end(), static_cast<size_t>(old - static_cast<int64_t>(new_map.size())), uint8_t(0));
   const auto rest = Reader(c).From(end);
@@ -316,7 +324,8 @@ Bytes CatWithMapBytes(std::span<const uint8_t> c, const Bytes& new_map) {
   const int64_t dA = static_cast<int64_t>(Al(e2, 8)) - a0;
   const int64_t nB = static_cast<int64_t>(Al(x + dA, 16));
   const int64_t dB = nB - B;
-  Bytes out(c.begin(), c.begin() + 0x18);
+  const auto head18 = Reader(c).Slice(0, 0x18);  // c[:0x18], clamped
+  Bytes out(head18.begin(), head18.end());
   out.insert(out.end(), new_map.begin(), new_map.end());
   out.resize(static_cast<size_t>(Al(e2, 8)), 0);
   {
