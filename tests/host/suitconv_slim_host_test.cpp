@@ -884,9 +884,20 @@ static std::vector<GridCase> GridCases() {
       M("pos_inf", {T(1, C(1, inf, 0, 0), C(2, 1, 0, 0), C(3, 0, 1, 0))}, 1.0),
       M("pos_nan_first", {T(1, C(1, nan, 0, 0), C(2, 1, 0, 0), C(3, 0, 1, 0))}, 1.0),
       M("h_zero", QuadTris(), 0.0),
+      // fix round 1 (ChooseH's count-only probes): several keys sharing positions, a -0.0 beside 0.0 (one cell: the
+      // first face is degenerate, count 3 at every h), and an infinity (the probe gives way to Merge, which raises)
+      Ch("choose_keyed_grid", GridKeyed({5, 9, 2}), 60),
+      Ch("choose_negzero",
+         {T(1, C(1, 0.0, 0, 0, 1), C(2, -0.0, 0, 0, 2), C(3, 0, 2, 0, 3)),
+          T(1, C(1, 0.0, 0, 0, 1), C(4, 2, 0, 0, 4), C(3, 0, 2, 0, 3))},
+         3),
+      Ch("choose_inf", {T(1, C(1, inf, 0, 0), C(2, 1, 0, 0), C(3, 0, 1, 0))}, 5),
+      // a degenerate face whose cell no kept face references (u6, u7 at H_HI) must not count
+      Ch("choose_unreferenced", UnrefTris(), 3),
   };
 }
-// Pasted verbatim from (2026-11-23):
+// Pasted verbatim from (2026-11-23; the four choose_inf / choose_keyed_grid / choose_negzero / choose_unreferenced rows
+// added in fix round 1 from the same command, the other 25 unchanged):
 //   tests/host/run_suitconv_slim_test.bat --dump DIR
 //   py -3 -I tests/host/slim_expect.py --grid <doax2_work>/physics_spike/scripts DIR/grid
 // (py -3 = CPython 3.14.7, whose ZeroDivisionError text is "division by zero"; older ones say "float division by zero")
@@ -898,6 +909,10 @@ static const Expected kGridExpected[] = {
     {"choose_empty", "REFUSED origin: no triangles"},
     {"choose_grid_25", "h=3f926e978d52c7b0 lo=3f926e978d4ec8b6 n=25 fnv=6aa665befd4df7e5"},
     {"choose_grid_30", "h=3f926e978d52c7b0 lo=3f926e978d4ec8b6 n=25 fnv=6aa665befd4df7e5"},
+    {"choose_inf", "REFUSED OverflowError: cannot convert float infinity to integer"},
+    {"choose_keyed_grid", "h=3f970a3d70a675c0 lo=3f970a3d70a276c7 n=38 fnv=97a10f8ea9e34b98"},
+    {"choose_negzero", "h=3f50624dd2f1a9fc lo=3f50624dd2f1a9fc n=3 fnv=6da4117c7f0e7acc"},
+    {"choose_unreferenced", "h=3fe9555555555570 lo=3fe9555555553578 n=3 fnv=0dde03b502129eeb"},
     {"empty_key_grid", "n=3 fnv=d2eb8400e834b41d"},
     {"empty_key_identity", "n=3 fnv=d2eb8400e834b41d"},
     {"grid_at_hi", "n=0 fnv=cbf29ce484222325"},
@@ -1175,9 +1190,20 @@ static void TestGridRefusals() {
   CheckGridCase("pos_inf");
   CheckGridCase("pos_nan_first");
   CheckGridCase("h_zero");
+  CheckGridCase("choose_keyed_grid");
+  CheckGridCase("choose_negzero");
+  CheckGridCase("choose_inf");
+  CheckGridCase("choose_unreferenced");
   // Deviation (int64_t cells): a finite quotient past int64_t's range, where Python carries a big int, is refused.
   const Run big = MergeRun({T(1, C(1, 1e300, 0, 0), C(2, 0, 0, 0), C(3, 0, 1, 0))}, 0.001);
   CHECKF(!big.ok && big.error.rfind("grid cell out of range", 0) == 0, "got \"%s\"", big.error.c_str());
+  // The same deviation inside ChooseH: x = 1e17 fits int64_t at h >= 0.0109 but not at H_LO, the first probe after
+  // H_HI; the count-only probe gives way to Merge, which refuses (slim.py would go on with big ints and return h ~0.5).
+  const Run big_choose = ChooseRun({T(1, C(1, 0, 0, 0), C(2, 1e17, 0, 0), C(3, 0, 2, 0)),
+                                    T(1, C(1, 0, 0, 0), C(4, 0.5, 0, 0), C(3, 0, 2, 0))},
+                                   3);
+  CHECKF(!big_choose.ok && big_choose.error.rfind("grid cell out of range", 0) == 0, "got \"%s\"",
+         big_choose.error.c_str());
   // Every dumped case has its row, and every row its case.
   size_t rows = 0;
   for (const auto& r : kGridExpected) {
