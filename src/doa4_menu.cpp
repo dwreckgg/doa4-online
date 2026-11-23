@@ -139,6 +139,9 @@ constexpr std::array<KeyRow, 21> kKeyRows = {{
 
 constexpr ImVec4 kErrorColor(1.0f, 0.45f, 0.4f, 1.0f);
 constexpr ImVec4 kNoteColor(1.0f, 0.85f, 0.4f, 1.0f);
+// Beside the Extras tab's "Vanilla DoA4 content only" box (the user's text, 2026-11-23).
+constexpr const char* kVanillaNote =
+    "(Turns off all custom costumes not included inside the retail DoA4 game files)";
 constexpr ImVec4 kDoneColor(0.45f, 0.9f, 0.5f, 1.0f);
 
 struct UnlockRow {
@@ -472,7 +475,8 @@ float MenuDialog::WidestRow() {
   w.push_back(text(kWipeQuestion));
   w.push_back(row({button("Yes, wipe unlocks"), button("Cancel")}));
   w.push_back(text("Waiting for the game to save..."));
-  w.push_back(row({toggle("Vanilla DoA4 content only"), text("Applies after a restart"), button("Restart now")}));
+  w.push_back(toggle("Vanilla DoA4 content only"));  // kVanillaNote beside it is wrapped: not measured
+  w.push_back(row({text("Applies after a restart"), button("Restart now")}));
   for (const tweaks::Tweak& t : tweaks::AllTweaks()) w.push_back(toggle(t.label));
   for (const bool running : {false, true}) w.push_back(text(AlphaRestartNote(running)));  // the "Restart now" button: above
   w.push_back(toggle("Age:"));
@@ -805,9 +809,15 @@ void MenuDialog::DrawExtrasTab() {
       }
     }
     ImGui::EndDisabled();
+    // What the box does, beside it (the user's words, 2026-11-23). Grey and wrapped: it follows the window's width and
+    // is not measured by WidestRow, so it never widens the menu.
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", kVanillaNote);
+    ImGui::PopStyleColor();
     // The same note and "Restart now" as the Alpha-152 box: while the saved setting differs from the running one.
+    // On the line below the box (its own line, since the note above takes the rest of the box's line).
     if (rex::cvar::Query<bool>("doa4_vanilla_only") != vanilla_running) {
-      ImGui::SameLine();
       ImGui::TextColored(kNoteColor, "Applies after a restart");
       ImGui::SameLine();
       ImGui::BeginDisabled(extras_locked);
