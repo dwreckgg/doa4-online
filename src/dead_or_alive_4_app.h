@@ -541,6 +541,7 @@ class DeadOrAlive4App : public rex::ReXApp {
       SetEnvironmentVariableW(L"DOA4_NP_HANDOFF", nullptr);  // the offline relaunch at the end must not inherit it
       _wputenv(L"DOA4_NP_HANDOFF=");
       ReadHandoff(path);
+      TestMenuSave();
     }
     doa4::np::SetSwitchContext(session_.has_value(), !test_dir_.empty());
     doa4::np::PrepareReplayRules();
@@ -1939,6 +1940,23 @@ class DeadOrAlive4App : public rex::ReXApp {
     if (!doa4::np::handoff::IsSessionLocalKey(key)) return;
     std::lock_guard<std::mutex> lock(session_saves_mutex_);
     session_saves_.emplace_back(std::string(key), std::string(value_literal));
+  }
+
+  // DOA4_NP_TEST_MENU_SAVE=<name>=<value> (test dir only, a session process, after the host's settings are applied): the
+  // save the Esc menu's SetAndSave makes for an unquoted value (the cvar, the config line, NoteSessionLocalSave), standing
+  // in for a player's click during a session, so a two-copy run can show Task 2b's keep (or, for another key, the restore).
+  void TestMenuSave() {
+    if (test_dir_.empty() || !session_) return;
+    const char* t = std::getenv("DOA4_NP_TEST_MENU_SAVE");
+    if (!t || !*t) return;
+    const std::string text(t);
+    const size_t eq = text.find('=');
+    if (eq == std::string::npos || eq == 0) return;
+    const std::string name = text.substr(0, eq), value = text.substr(eq + 1);
+    std::string error = rex::cvar::SetFlagByName(name, value) ? std::string() : std::string("the cvar refused it");
+    if (error.empty()) error = doa4::SaveTomlKey(ConfigPath(), name, value);
+    if (error.empty()) NoteSessionLocalSave(name, value);
+    doa4::np::EarlyLog("[doa4][NET] test: menu save " + name + " = " + value + (error.empty() ? "" : ": " + error));
   }
 
   // Carry 2b: a session applies the host's guest settings to the cvars; nothing may save them into the player's config
