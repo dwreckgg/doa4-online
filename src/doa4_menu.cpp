@@ -1,6 +1,7 @@
 // In-game menu (Escape): Game, Controls, Photo, Extras and Online tabs. See doa4_menu.h.
 
 #include "doa4_menu.h"
+#include "doa4_vanilla.h"
 
 #include <imgui.h>
 
@@ -139,6 +140,9 @@ constexpr std::array<KeyRow, 21> kKeyRows = {{
 
 constexpr ImVec4 kErrorColor(1.0f, 0.45f, 0.4f, 1.0f);
 constexpr ImVec4 kNoteColor(1.0f, 0.85f, 0.4f, 1.0f);
+// Beside the Extras tab's "Vanilla DoA4 content only" box (the user's text, 2026-11-23).
+constexpr const char* kVanillaNote =
+    "(Turns off all custom costumes not included inside the retail DoA4 game files)";
 constexpr ImVec4 kDoneColor(0.45f, 0.9f, 0.5f, 1.0f);
 
 struct UnlockRow {
@@ -245,6 +249,8 @@ bool MenuDialog::SuitsImportEnabled(std::string* why) const {
     reason = "no import in this build";
   } else if (host_.suits_import->busy()) {
     reason = "an import is running";
+  } else if (vanilla::Running()) {
+    reason = vanilla::kOffText;  // the button greyed in vanilla mode; the files on disk stay as they are
   } else if (Locked(online_view::Control::kExtras)) {
     reason = online_view::kLockedText;
   } else if (host_.online.state) {
@@ -471,6 +477,8 @@ float MenuDialog::WidestRow() {
   w.push_back(text(kWipeQuestion));
   w.push_back(row({button("Yes, wipe unlocks"), button("Cancel")}));
   w.push_back(text("Waiting for the game to save..."));
+  w.push_back(toggle("Vanilla DoA4 content only"));  // kVanillaNote beside it is wrapped: not measured
+  w.push_back(row({text("Applies after a restart"), button("Restart now")}));
   for (const tweaks::Tweak& t : tweaks::AllTweaks()) w.push_back(toggle(t.label));
   for (const bool running : {false, true}) w.push_back(text(AlphaRestartNote(running)));  // the "Restart now" button: above
   w.push_back(toggle("Age:"));
@@ -804,10 +812,45 @@ void MenuDialog::DrawKeyboardSection() {
 }
 
 void MenuDialog::DrawExtrasTab() {
-  ImGui::SeparatorText("Unlocks");
   // In an online session nothing here may touch the player's real save or the guest's tables (spec 6).
   const bool extras_locked = Locked(online_view::Control::kExtras);
+  // Vanilla mode as this process latched it at start-up (doa4_vanilla.h); the box below changes the saved setting only.
+  const bool vanilla_running = vanilla::Running();
+  ImGui::SeparatorText("Extras");
   if (extras_locked) ImGui::TextColored(kNoteColor, "%s", online_view::kLockedText);
+  {
+    bool saved = rex::cvar::Query<bool>("doa4_vanilla_only");
+    ImGui::BeginDisabled(extras_locked);
+    if (ImGui::Checkbox("Vanilla DoA4 content only", &saved)) {
+      // The doa4_skip_intro writer: the cvar and the toml key, nothing else; it applies at the next start.
+      if (SetPresentationSetting("doa4_vanilla_only", saved ? "true" : "false", false)) {
+        REXLOG_INFO("[doa4][VANILLA] doa4_vanilla_only = {}: saved for the next start", saved);
+      }
+    }
+    ImGui::EndDisabled();
+    // What the box does, beside it (the user's words, 2026-11-23). Grey and wrapped: it follows the window's width and
+    // is not measured by WidestRow, so it never widens the menu.
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", kVanillaNote);
+    ImGui::PopStyleColor();
+    // The same note and "Restart now" as the Alpha-152 box: while the saved setting differs from the running one.
+    // On the line below the box (its own line, since the note above takes the rest of the box's line).
+    if (rex::cvar::Query<bool>("doa4_vanilla_only") != vanilla_running) {
+      ImGui::TextColored(kNoteColor, "Applies after a restart");
+      ImGui::SameLine();
+      ImGui::BeginDisabled(extras_locked);
+      if (ImGui::Button("Restart now##vanilla")) {
+        Restart(online_view::Control::kExtras);
+      }
+      ImGui::EndDisabled();
+      if (const char* warning = UnsavedUnlocksWarning(*host_.extras)) {
+        ImGui::TextColored(kErrorColor, "%s", warning);
+      }
+    }
+  }
+
+  ImGui::SeparatorText("Unlocks");
   const std::optional<uint32_t> profile =
       host_.guest ? unlocks::FindProfile(*host_.guest) : std::nullopt;
   if (!profile) {

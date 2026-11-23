@@ -1,5 +1,7 @@
-// The colour costumes of the local offline build: seven compiled-in slots (Alpha-152: red takes over COS. 2's list entry,
-// blue and lilac appended; Spartan-458: four appended), each a body .tpr served in an avt.afs creature-placeholder entry.
+// The colour costumes, in every process of the build (lobby, online session, record, replay; which process makes the
+// files, puts the rows in its tables or must refuse to run is decided in doa4_colour_make.h): seven compiled-in slots
+// (Alpha-152: red takes over COS. 2's list entry, blue and lilac appended; Spartan-458: four appended), each a body
+// .tpr served in an avt.afs creature-placeholder entry.
 // This module is the one place that knows the slots: the slot table, loading the seven texture files from a private
 // folder (a stand-in per slot that fails), the overlay replacements, the costume-table rows for costumes::Apply, the
 // first-read labels and Alpha's colour rows. "Bytes for slot X, or a stand-in": the upstream step later swaps only the
@@ -9,7 +11,9 @@
 // wrong is served its stand-in (Alpha: her retail entry 22, file 427; Spartan: the retail tpr of the slot it was built
 // on), so it still loads. The manifest names files only; each slot's size and SHA-1 are compiled in, so a hand-edited
 // manifest cannot approve a wrong file. When a needed stand-in cannot be read from the game folder, nothing is installed
-// (`usable` false): a record naming an entry that is not overlaid would load another character's file.
+// (`usable` false): a record naming an entry that is not overlaid would load another character's file. A stand-in whose
+// entry in the game's archive has another size than the slot's file counts as not readable, so one such stand-in that
+// is needed also installs nothing.
 //
 // Manifest (manifest.txt in the folder): one line per slot, "<slot name> <file name>", the two separated by spaces or
 // tabs. Lines end in LF or CR LF; a UTF-8 byte-order mark at the start is skipped; blank lines and lines starting with '#'
@@ -58,9 +62,6 @@ using SlotTable = std::array<SlotDef, kSlotCount>;
 // Alpha's rows first (red replaces costume 1; blue, lilac append), then Spartan's four (append).
 const SlotTable& Slots();
 
-// The colour slots are an offline feature: true only with no netplay session and DOA4_NP "" or "record".
-bool Enabled(bool session, std::string_view np_mode);
-
 // The colour folder (plan D1): `override_utf8` (the toml's doa4_colour_costumes_dir) when it is not empty, else
 // <user data>/colour_costumes; made absolute, so the start-up line names the folder that was really read.
 std::filesystem::path ColourFolder(const std::filesystem::path& user_data, std::string_view override_utf8);
@@ -71,7 +72,7 @@ std::filesystem::path ColourFolder(const std::filesystem::path& user_data, std::
 enum class InstallOutcome : uint8_t {
   kInstalled,  // the colour entries are overlaid (with the swimsuits): their costume rows go to costumes::Apply
   kDropped,    // the try with them failed, the one without them worked: swimsuits as usual, no colour rows
-  kNotUsable,  // no colour entries were in the build (off, or not usable): swimsuits as usual, no colour rows
+  kNotUsable,  // no colour entries were in the build (not loaded, or not usable): swimsuits as usual, no colour rows
   kFailed,     // nothing was installed: the swimsuits fail as before (ImportStatus::Fail), no colour rows
 };
 // usable: the colour entries were in the first build (Status::usable). build_ok, install_ok: that build and its install
@@ -87,7 +88,7 @@ struct LoadedSlot {
   bool stand_in = false;
 };
 struct Status {
-  bool usable = false;             // every slot has bytes (its file or its stand-in): the slots may be installed
+  bool usable = false;             // every slot has bytes (its file, or its stand-in of the slot's own size): the slots may be installed
   std::vector<LoadedSlot> slots;   // the table's order (empty for a Status that was never loaded)
   std::vector<std::string> notes;  // one line per grain that degraded
   std::string Summary() const;

@@ -11,8 +11,7 @@
 //   DOA4_NP_REC=<file>      recording to replay; the run quits after its last frame. A recording
 //                           made by another build, game data (default.xex), fix set, worker-order
 //                           switch (DOA4_NP_SERIAL), sweep setting or Extras tweak state is refused, and
-//                           so is one made with the local colour costumes (meta colours=1: a replay never
-//                           installs them) and one that cannot be read: np_log.txt gets a "refused: ..." or
+//                           so is one that cannot be read: np_log.txt gets a "refused: ..." or
 //                           "cannot replay ..." line and the host is asked to quit, with no session.
 //                           The worker order the recording ran (its workers= line) is the order the
 //                           replay runs; a recording without that line runs mode 3 with a WARN workers: line
@@ -72,10 +71,6 @@ struct Host {
   // The folder the game runs from (the one holding default.xex): the recording's meta holds a hash of
   // its default.xex, so a replay on another dump of the game is refused.
   std::filesystem::path game_data_root;
-  // The local colour costumes are on in this process (colour_costumes::Enabled, decided by the app from the environment
-  // before Start: SetUpSuits runs later and reads the same decision). A record run then writes colours=1 into its
-  // recording's meta (np_core.h ColoursMetaLine); every other mode ignores it.
-  bool colour_costumes = false;
 
   // ---- online (Task 12) ----
   std::optional<handoff::Handoff> online;            // set when this process was started for a session
@@ -151,12 +146,26 @@ std::optional<uint8_t> SessionMixedSuitHolders();
 bool BannerWaiting();                 // a hold has lasted >= 1 s and is still on (any thread; the overlay's banner)
 int32_t SessionFrame();               // the last frame hook's frame (-1 before the first)
 live::FrameResult LastResult();
+// The reason of an end np::Abort made on this PC (the session was ended here, with a reason written to be shown: this
+// PC cannot build the costume tables, its port did not open); "" for every other end, an internal one included, and
+// while the session runs. The banner shows it; nothing sends it to the other PC.
+std::string AbortReason();
 // Review I2: the other player's game answered as a lobby (the refused-session end); read by the banner.
 bool SessionRefused();
 void RequestLeave();                  // UI: this side leaves at the next frame
 void PeerLeft(int32_t frame, wire::LeaveReason reason);  // the session lobby's on_peer_left (I/O thread)
 // Ends a session that cannot run (before or at its first frame): the terminal lines and the offline relaunch.
 void Abort(const std::string& reason);
+// This process must not run its match (the app's start-up found it cannot build the costume tables the other PC builds:
+// SetUpSuits, after Start). Online: Abort(reason). A record or replay run: the session is switched off as a refused
+// replay's is (its mode off; the recording closed, holding its header and meta and no frame; the three hash files
+// digest.d4d, sweep.d4s and counters.d4k closed and removed, a failed remove being one log line; the determinism layer
+// stopped, the hooks passing through), np_log.txt gets "refused: <reason>", and the host is asked to quit. Any other process (a plain offline game, DOA4_NP set to anything else included): nothing.
+void RefuseRun(const std::string& reason);
+// The frame hook's thread: alpha_colours::ThreadNumber() of the thread that last ran the frame hook of a netplay
+// process (OnFrame stores it at its top, every frame), 0 while none has run: always 0 in a plain offline game, whose
+// frame hook never reaches OnFrame. Read by the hook thread check (doa4_alpha_colours.h).
+uint64_t FrameHookThread();
 struct NetTiming {
   int32_t frame = -1;
   int delay = 0;

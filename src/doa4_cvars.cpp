@@ -2,6 +2,11 @@
 
 #include <rex/cvar.h>
 
+// Extras tab, first row: vanilla mode (doa4_vanilla.h). Latched once at start-up in a lobby process; a match process ignores
+// it. In a lobby it leaves out the colour and swimsuit rows and refuses the import; tweaks and Age follow their own boxes.
+// Never carried into a session (it is neither a tweak nor a carried port setting) and never writes another setting.
+REXCVAR_DEFINE_BOOL(doa4_vanilla_only, false, "DOA4", "Vanilla DoA4 content only (applies at the next start)");
+
 // Extras tab: game tweaks (doa4_tweaks.h). Applied at load (OnPostLoadXexImage).
 REXCVAR_DEFINE_BOOL(doa4_tag_all_stages, false, "DOA4",
                     "All stages in Tag battle (Xenia patch by ryu_highabusa)");
@@ -45,8 +50,9 @@ REXCVAR_DEFINE_STRING(doa4_game_files, "", "DOA4",
 REXCVAR_DEFINE_BOOL(doa4_suits_import_pending, false, "DOA4",
                     "A DOAX2 swimsuit import was started and has not finished; the next start offers it again");
 
-// Colour costumes (doa4_colour_costumes.h, local offline build): the folder holding manifest.txt and the colour files.
-// Empty: <user data>/colour_costumes.
+// Colour costumes (doa4_colour_costumes.h): the folder holding manifest.txt and the colour files. Empty: <user
+// data>/colour_costumes, where a lobby start makes the files this PC lacks; a folder named here is read as it is, in
+// every process, and nothing is made in it.
 REXCVAR_DEFINE_STRING(doa4_colour_costumes_dir, "", "DOA4",
                       "Folder holding the colour costume files (empty: the user data folder's colour_costumes)");
 

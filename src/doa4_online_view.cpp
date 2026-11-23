@@ -203,7 +203,7 @@ Ending PeerLeftEnding(int reason, int32_t frame, bool refused) {
   return Ending::kPeerLeft;  // a Bye (frame -1), kTimeout, kInternal, anything else
 }
 
-std::string BannerText(bool waiting, Ending ending) {
+std::string BannerText(bool waiting, Ending ending, std::string_view reason) {
   switch (ending) {
     case Ending::kDesync: return "The games went out of sync. The session ended; both games restart.";
     case Ending::kLost: return "The other player stopped responding. The session ended; both games restart.";
@@ -212,7 +212,14 @@ std::string BannerText(bool waiting, Ending ending) {
     case Ending::kPeerNotStarted: return "The other player's game did not start the session.";
     case Ending::kFrame0Timeout: return "The other player's game did not come back.";
     case Ending::kLeft: return "You left the session.";
-    case Ending::kInternal: return "The session ended unexpectedly; both games restart.";
+    case Ending::kInternal: {
+      // This PC ended the session itself and holds the reason: the banner names it. No other ending reads `reason`.
+      if (reason.empty()) return "The session ended unexpectedly; both games restart.";
+      std::string text = "The session ended: ";
+      text += reason;
+      text += ". Both games restart.";
+      return text;
+    }
     case Ending::kWorkerOrder: return "This PC could not keep the session's timing. The session ended; both games restart.";
     case Ending::kPeerWorkerOrder:
       return "The other player's PC could not keep the session's timing. The session ended; both games restart.";

@@ -42,6 +42,7 @@ set(DEADORALIVE4_SOURCES
     src/doa4_suits_manifest.cpp
     src/doa4_costumes.cpp
     src/doa4_colour_costumes.cpp
+    src/doa4_colour_make.cpp
     src/doa4_suits.cpp
     src/doa4_suits_hooks.cpp
     src/doa4_suits_labels.cpp
@@ -184,4 +185,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|x64)$")
     list(PREPEND DOA4_SUITCONV_COMPILE_OPTIONS -mno-fma)
 endif()
 set_source_files_properties(${DOA4_SUITCONV_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "${DOA4_SUITCONV_COMPILE_OPTIONS}")
+# Colour generator: a made file is used only when its SHA-1 equals the one compiled into the slot table, so these
+# sources get the converter's floating-point options too (each includes src/doa4_suitconv_fp.h first).
+set(DOA4_COLOURGEN_SOURCES
+    src/doa4_colourgen_alpha.cpp
+    src/doa4_colourgen_spartan.cpp
+    src/doa4_colourgen_dxt.cpp
+)
+target_sources(dead_or_alive_4 PRIVATE ${DOA4_COLOURGEN_SOURCES})
+set_source_files_properties(${DOA4_COLOURGEN_SOURCES} PROPERTIES
     COMPILE_OPTIONS "${DOA4_SUITCONV_COMPILE_OPTIONS}")

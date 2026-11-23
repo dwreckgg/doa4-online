@@ -1,8 +1,9 @@
 // Host test for src/doa4_alpha_colours.h: Alpha-152's colour row written around each fighter's own draw and put back
 // (BeginFighterDraw / EndFighterDraw), the player -> load slot -> model lookup (SlotForPlayer, ModelForPlayer), the
 // game's own "an Alpha is shown" predicate (AlphaShown, AlphaInMatch), the per-player kick-arc trail words (TrailBefore /
-// TrailAfter) and the model -> row map SetUpSuits installs (RowsByModel). All on synthetic guest bytes (a map; unset bytes
-// read 0); no game byte is in this file. Built and run by run_alpha_colours_test.bat. Prints "alpha_colours: N checks run"
+// TrailAfter), the model -> row map SetUpSuits installs (RowsByModel), and the hook thread check's own parts
+// (JudgeHookThread, ThreadNumber, NoteHookSite, BodyDraws; those tests print "-- <name>" when they start). All on
+// synthetic guest bytes (a map; unset bytes read 0); no game byte is in this file. Built and run by run_alpha_colours_test.bat. Prints "alpha_colours: N checks run"
 // before its verdict line.
 //
 // Where the addresses come from (generated code at e4b1cf6, generated/default/dead_or_alive_4_recomp.N.cpp):
@@ -27,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -599,6 +601,100 @@ static void TestGlobalInstalled() {
   CHECK((W(per[0]) ==std::array<uint32_t, 4>{0, 5, 0x100, 10}));
 }
 
+// ---- the hook thread check (colour generator plan Task 6) ---------------------------------------------------------------
+// Each call of the function under test is a statement of its own; each row's comment names the wrong version it excludes.
+
+// The judgement: frame_thread 0 means the frame hook has not run in this process yet.
+static void TestHookThread() {
+  std::printf("-- TestHookThread\n");
+  using H = ac::HookThread;
+  // 0 is unknown whatever this thread is. Excludes: 0 compared like a thread's number (a risk line before any frame).
+  { const H got = ac::JudgeHookThread(0, 5); CHECK(got == H::kUnknown); }
+  // Excludes: equality tested before the 0 (two zeros read as "the frame hook's thread").
+  { const H got = ac::JudgeHookThread(0, 0); CHECK(got == H::kUnknown); }
+  // Equal numbers. Excludes: never judged, and the two answers exchanged.
+  { const H got = ac::JudgeHookThread(3, 3); CHECK(got == H::kFrameThread); }
+  { const H got = ac::JudgeHookThread(7, 7); CHECK(got == H::kFrameThread); }
+  // Different numbers, either way round. Excludes: an ordered comparison (a hook on a lower or higher number passes).
+  { const H got = ac::JudgeHookThread(3, 4); CHECK(got == H::kOtherThread); }
+  { const H got = ac::JudgeHookThread(4, 3); CHECK(got == H::kOtherThread); }
+  // A hook that has run while this thread's own number reads 0. Excludes: a 0 on either side taken for unknown.
+  { const H got = ac::JudgeHookThread(3, 0); CHECK(got == H::kOtherThread); }
+  // Excludes: the numbers compared as 32 bits.
+  { const H got = ac::JudgeHookThread(1, 0x100000001ull); CHECK(got == H::kOtherThread); }
+}
+
+// A thread's number: never 0, the same at every call on one thread, another on another thread.
+static void TestThreadNumber() {
+  std::printf("-- TestThreadNumber\n");
+  const uint64_t mine = ac::ThreadNumber();
+  const uint64_t again = ac::ThreadNumber();
+  uint64_t other = 0, other_again = 0;
+  std::thread t([&other, &other_again] {
+    other = ac::ThreadNumber();
+    other_again = ac::ThreadNumber();
+  });
+  t.join();
+  const uint64_t after = ac::ThreadNumber();
+  CHECK(mine != 0);            // excludes: 0 given out (0 means "no frame hook yet")
+  CHECK(again == mine);        // excludes: a new number at every call
+  CHECK(other != 0);
+  CHECK(other != mine);        // excludes: one number for the whole process
+  CHECK(other_again == other);
+  CHECK(after == mine);        // excludes: the number shared and moved on by the other thread's call
+}
+
+// One hook site: what it has to log at a call, given the frame hook's thread number. The site reads its own thread's
+// number itself, so a caller cannot hand it the frame hook's by mistake.
+static void TestHookSite() {
+  std::printf("-- TestHookSite\n");
+  using N = ac::HookNote;
+  const uint64_t mine = ac::ThreadNumber();
+  uint64_t other = 0;
+  std::thread t([&other] { other = ac::ThreadNumber(); });
+  t.join();
+  CHECK(mine != 0 && other != 0 && other != mine);  // precondition: two threads' numbers
+  {
+    ac::HookSite site;
+    // No frame hook yet: nothing, at every call. Excludes: a line (either one) before any frame.
+    const N unknown1 = ac::NoteHookSite(site, 0);
+    const N unknown2 = ac::NoteHookSite(site, 0);
+    CHECK(unknown1 == N::kNone && unknown2 == N::kNone);
+    // The frame hook ran on this thread: the line once. Excludes: never, and the line at every call.
+    const N same1 = ac::NoteHookSite(site, mine);
+    const N same2 = ac::NoteHookSite(site, mine);
+    CHECK(same1 == N::kFrameThread);
+    CHECK(same2 == N::kNone);
+    // LATER the frame hook's number is another thread's: the risk line, once, although the first line was written.
+    // Excludes: one latch for both lines, and the frame hook's number used as this thread's (that reads "same").
+    const N risk1 = ac::NoteHookSite(site, other);
+    const N risk2 = ac::NoteHookSite(site, other);
+    CHECK(risk1 == N::kSyncRisk);
+    CHECK(risk2 == N::kNone);
+    const N same3 = ac::NoteHookSite(site, mine);
+    CHECK(same3 == N::kNone);  // excludes: the risk line re-arming the first line
+  }
+  {
+    // A second site has latches of its own, and the risk line can come first. Excludes: latches shared by the sites.
+    ac::HookSite site;
+    const N risk = ac::NoteHookSite(site, other);
+    const N same = ac::NoteHookSite(site, mine);
+    CHECK(risk == N::kSyncRisk);
+    CHECK(same == N::kFrameThread);
+  }
+}
+
+// The count of body-hook calls starts at 0 and is one counter for the process.
+static void TestBodyDraws() {
+  std::printf("-- TestBodyDraws\n");
+  const uint64_t before = ac::BodyDraws().load();
+  ac::BodyDraws().fetch_add(1);
+  ac::BodyDraws().fetch_add(1);
+  const uint64_t after = ac::BodyDraws().load();
+  CHECK(before == 0);         // nothing in this test process counted a draw before
+  CHECK(after == 2);          // excludes: a new counter at every call
+}
+
 int main() {
   TestGlobalNotInstalled();
   TestBeginEndRestores();
@@ -616,6 +712,10 @@ int main() {
   TestTrailNotInstalled();
   TestRowsByModel();
   TestGlobalInstalled();
+  TestHookThread();
+  TestThreadNumber();
+  TestHookSite();
+  TestBodyDraws();
   std::printf("alpha_colours: %d checks run\n", g_checks);
   if (g_failures != 0) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);

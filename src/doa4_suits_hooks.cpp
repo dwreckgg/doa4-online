@@ -638,7 +638,9 @@ int AgeWanted() {
       from_session = true;
     } else {
       // 3. Offline: the cvars, live, so the Extras box and slider act at once. Read order: the age, then the box (the
-      // menu writes the box, then the age; Review Focus 1).
+      // menu writes the box, then the age; Review Focus 1). Vanilla mode does not change this: in vanilla mode a lobby
+      // leaves out the colour and swimsuit rows and refuses the import; tweaks and Age follow their own boxes
+      // (doa4_vanilla.h).
       const int32_t raw = rex::cvar::Query<int32_t>("doa4_bust_age");
       const bool box = rex::cvar::Query<bool>("doa4_bust_age_on");
       s = bust::LineSetting(raw, box);

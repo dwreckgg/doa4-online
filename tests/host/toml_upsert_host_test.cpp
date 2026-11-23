@@ -292,6 +292,55 @@ static void TestGameFilesSurvivesTheSdkWriter() {
   }
 }
 
+// Task 7: the vanilla box's writer (SetPresentationSetting -> SaveTomlKey, as doa4_skip_intro's) turned on and then off,
+// on a start file the writer would never produce itself (a comment, a key without spaces, keys out of order, a blank line
+// at the end). Afterwards every start line is there unchanged and in order, and the one other line is the box's own.
+// Excludes: a writer that rewrites (canonicalises, reorders or drops) any other line, and one that adds a second line on
+// the second save instead of replacing its own.
+static void TestVanillaKeySave() {
+  std::printf("-- TestVanillaKeySave\n");
+  auto dir = std::filesystem::temp_directory_path() / "doa4_toml_vanilla_test_data";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  auto path = dir / "dead_or_alive_4.toml";
+  const std::string start =
+      "# my settings\n"
+      "doa4_skip_intro=true\n"
+      "fullscreen = false\n"
+      "  doa4_alpha152 = true\n"
+      "apu = \"any\"\n"
+      "\n";
+  {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << start;
+  }
+  const std::string on_error = doa4::SaveTomlKey(path, "doa4_vanilla_only", "true");
+  CHECK(on_error.empty());
+  const std::string after_on = ReadAll(path);
+  CHECK(after_on == start + "doa4_vanilla_only = true\n");
+  const std::string off_error = doa4::SaveTomlKey(path, "doa4_vanilla_only", "false");
+  CHECK(off_error.empty());
+  const std::string after_off = ReadAll(path);
+  CHECK(after_off == start + "doa4_vanilla_only = false\n");
+  // The same, line by line (a failure here names the kind of change): the start's lines first, in order, then the one.
+  {
+    std::vector<std::string> lines;
+    for (size_t i = 0; i < after_off.size();) {
+      size_t end = after_off.find('\n', i);
+      if (end == std::string::npos) end = after_off.size();
+      lines.push_back(after_off.substr(i, end - i));
+      i = end + 1;
+    }
+    const std::vector<std::string> want = {"# my settings", "doa4_skip_intro=true", "fullscreen = false",
+                                           "  doa4_alpha152 = true", "apu = \"any\"", "", "doa4_vanilla_only = false"};
+    CHECK(lines == want);
+  }
+  auto tmp = path;
+  tmp += ".tmp";
+  CHECK(!std::filesystem::exists(tmp));
+  std::filesystem::remove_all(dir);
+}
+
 int main() {
   TestConfigAfterSession();
   TestUpsert();
@@ -302,6 +351,7 @@ int main() {
     TestSaveTwoKeys();
     TestGameFilesPathRoundTrip();
     TestGameFilesSurvivesTheSdkWriter();
+    TestVanillaKeySave();
   } catch (const std::exception& e) {
     std::printf("FAIL TestSave threw: %s\n", e.what());
     ++g_failures;

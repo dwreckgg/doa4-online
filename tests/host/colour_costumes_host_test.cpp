@@ -5,13 +5,30 @@
 //   DOA4_TEST_IMAGE (doa4_test_image.h): the real file table and costume records for the slot table's file numbers;
 //   DOA4_SUITS_GAME_DIR=<the DOA4 folder> (read-only): with the image, the real stand-ins and avt.afs entries;
 //   DOA4_COLOURS_DIR=<the private colour folder> (read-only): with the image and the game folder, the approved files load.
+// Also src/doa4_colour_make.cpp (making the missing files at a lobby start): KindOf, ShouldMake, MakeDefs, MakeTempTag
+// and MakeMissing against the same synthetic folders with a test generator; each of those tests prints "-- <its name>"
+// when it starts. With the image, the source files of colourgen::kSources are looked up in its file table. And the
+// decisions the app's wiring reads (same header): RowsOn, MustRefuse, FreeBytesFrom, IsPassingNote, RefusalMessage.
 // Set but unusable, a tier FAILS. No game byte and no colour file is in this repository. Built and run by
 // run_colour_costumes_test.bat. Prints "colour_costumes: N checks run" before its verdict line.
 
 #include "../../src/doa4_colour_costumes.h"
+#include "../../src/doa4_colour_make.h"
+#include "../../src/doa4_colourgen.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <bit>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <initializer_list>
+#include <span>
+#include <stdexcept>
+#include <string_view>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,6 +39,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "../../src/doa4_costume_lists.h"
@@ -227,7 +245,10 @@ static void PrintNotes(const char* test, const Status& s) {
 
 // The synthetic stand-in entries' bytes (distinct per entry), and each slot's synthetic colour file (distinct per slot).
 static std::vector<uint8_t> StandInBytes(uint32_t entry) { return Content(int(100 + entry), 3000 + 11 * entry); }
-static std::vector<uint8_t> ColourBytes(size_t slot) { return Content(int(1 + slot), 1000 + 37 * slot); }
+// A colour file has the size of its slot's stand-in entry (a stand-in of another size is not usable: the rule in Load);
+// the seed differs, so its bytes differ from the stand-in's and from every other slot's.
+static std::vector<uint8_t> StandInFor(size_t slot);
+static std::vector<uint8_t> ColourBytes(size_t slot) { return Content(int(1 + slot), StandInFor(slot).size()); }
 
 // Slots() with each size and SHA-1 replaced by the synthetic file's (the file numbers stay the real ones).
 static const SlotTable& TestSlots() {
@@ -306,16 +327,6 @@ static void CheckSlots(const Status& s, const std::set<size_t>& stand_ins) {
 }
 
 // ---- tests ------------------------------------------------------------------------------------------------------------
-
-static void TestEnabledTable() {
-  CHECK(Enabled(false, "") == true);
-  CHECK(Enabled(false, "record") == true);
-  CHECK(Enabled(false, "replay") == false);
-  CHECK(Enabled(false, "hash") == false);
-  CHECK(Enabled(false, "other") == false);
-  CHECK(Enabled(true, "") == false);
-  CHECK(Enabled(true, "record") == false);
-}
 
 static void TestLoadAllGood() {
   World w;
@@ -1097,6 +1108,1658 @@ static void TestSummaryOff() {
   CHECK(EntryLabels(off, g.guest).empty());
 }
 
+// ---- the stand-in size rule in Load -------------------------------------------------------------------------------------
+
+// The synthetic game folder's chrthree.afs again, with some entries replaced.
+static void WriteChrthree(const World& w, uint32_t count, const std::map<uint32_t, std::vector<uint8_t>>& overrides) {
+  std::map<uint32_t, std::vector<uint8_t>> chr;
+  for (const auto& [file, entry] : kChrthreeEntry) {
+    if (entry < count) chr[entry] = StandInBytes(entry);
+  }
+  for (const auto& [entry, bytes] : overrides) chr[entry] = bytes;
+  Write(w.game / "chrthree.afs", Archive(count, chr));
+}
+
+// A stand-in entry of another size than the slot's file is not usable (a slot record sized for the file would read past
+// it or short of it). The wrong version this excludes: Load serving whatever the archive holds at that entry.
+static void TestStandInWrongSizeNotUsable() {
+  std::printf("-- TestStandInWrongSizeNotUsable\n");
+  FakeGuest g = PlantedGuest();
+  const uint64_t size = TestSlots()[3].size;  // spartan_h3_pink: stand-in file 439, entry 34
+  std::vector<uint8_t> shorter = StandInBytes(34);
+  shorter.pop_back();
+  CHECK(shorter.size() + 1 == size);  // precondition: one byte short of the slot's size
+  {
+    World w;
+    WriteChrthree(w, 48, {{34, shorter}});
+    CHECK(fs::remove(w.File(3)));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    PrintNotes("TestStandInWrongSizeNotUsable", s);
+    const std::string want = "its stand-in is " + std::to_string(size - 1) + " bytes, not " + std::to_string(size);
+    CHECK(!s.usable);
+    CHECK(NotesNaming(s, want) == 1);
+    CHECK(s.notes.size() == 2 && Contains(NoteAt(s, 1), "spartan_h3_pink") && Contains(NoteAt(s, 1), "file 439") &&
+          Contains(NoteAt(s, 1), want));
+    CHECK(TableExtras(s).empty());
+  }
+  {
+    // One byte longer: refused the same way (the rule is "differs", not "shorter").
+    std::vector<uint8_t> longer = StandInBytes(34);
+    longer.push_back(0);
+    World w;
+    WriteChrthree(w, 48, {{34, longer}});
+    CHECK(fs::remove(w.File(3)));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(!s.usable && NotesNaming(s, "its stand-in is " + std::to_string(size + 1) + " bytes, not " + std::to_string(size)) == 1);
+  }
+  {
+    // Control: the same archive with the slot's good file present: the stand-in is never read.
+    World w;
+    WriteChrthree(w, 48, {{34, shorter}});
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable && s.notes.empty());
+    CheckSlots(s, {});
+  }
+  {
+    // Control: the entry at the right size with other bytes: usable, the slot shows that stand-in.
+    std::vector<uint8_t> other = StandInBytes(34);
+    other[5] ^= 0x33;
+    World w;
+    WriteChrthree(w, 48, {{34, other}});
+    CHECK(fs::remove(w.File(3)));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable);
+    CHECK(s.slots.size() == kSlotCount && s.slots[3].stand_in && Holds(s.slots[3].tpr, other));
+  }
+}
+
+// ---- making the missing files (doa4_colour_make.cpp) --------------------------------------------------------------------
+// A slot's synthetic source is its stand-in entry (StandInFor). The generator and free_bytes below are fakes. The real
+// generator (colourgen::Make) refuses a source it cannot read with a reason and is not expected to throw; the fake can
+// refuse, throw, return wrong bytes or a short result, sleep, and act as another process between a slot's making and its
+// write (`post`). The real free_bytes is std::filesystem::space; the fake returns what a test sets, or throws.
+
+namespace cg = doa4::colourgen;
+using Defs = std::array<MakeDef, kSlotCount>;
+
+static const Defs& TestDefs() {
+  static const Defs defs = [] {
+    static std::vector<std::string> shas;
+    shas.reserve(kSlotCount);
+    Defs d{};
+    for (size_t i = 0; i < kSlotCount; ++i) {
+      const std::vector<uint8_t> source = StandInFor(i);
+      shas.push_back(Sha(source));
+      d[i] = MakeDef{Slots()[i].name, Slots()[i].stand_in_file, source.size(), shas.back().c_str()};
+    }
+    return d;
+  }();
+  return defs;
+}
+
+static size_t SlotIndex(std::string_view name) {
+  for (size_t i = 0; i < kSlotCount; ++i) {
+    if (name == Slots()[i].name) return i;
+  }
+  return kSlotCount;
+}
+static std::string SlotName(size_t i) { return Slots()[i].name; }
+
+using Made = std::optional<std::vector<uint8_t>>;
+struct Gen {
+  std::array<std::atomic<int>, kSlotCount> calls{};
+  std::atomic<int> unknown{0};
+  // Runs after the slot's bytes were computed (result set) or its source was refused (result empty, *why set).
+  std::function<void(size_t slot, Made& result, std::string* why)> post;
+  Made Run(std::string_view slot, std::span<const uint8_t> source, std::string* why) {
+    const size_t i = SlotIndex(slot);
+    if (i == kSlotCount) {
+      unknown.fetch_add(1);
+      if (why) *why = "unknown slot";
+      return std::nullopt;
+    }
+    calls[i].fetch_add(1);
+    const std::vector<uint8_t> want = StandInFor(i);
+    Made result;
+    if (source.size() == want.size() && std::equal(source.begin(), source.end(), want.begin())) {
+      result = ColourBytes(i);
+    } else if (why) {
+      *why = "not this slot's source";
+    }
+    if (post) post(i, result, why);
+    return result;
+  }
+  Generator Fn() {
+    return [this](std::string_view slot, std::span<const uint8_t> source, std::string* why) { return Run(slot, source, why); };
+  }
+  int Calls(size_t i) const { return i < kSlotCount ? calls[i].load() : -1; }
+  int Total() const {
+    int n = unknown.load();
+    for (const std::atomic<int>& c : calls) n += c.load();
+    return n;
+  }
+};
+
+static constexpr uint64_t kPlenty = uint64_t(1) << 40;
+static MakeOptions Opt(Gen& gen, std::vector<size_t>* starts = nullptr) {
+  static int counter = 0;
+  MakeOptions o;
+  o.generate = gen.Fn();
+  o.free_bytes = [](const fs::path&) { return kPlenty; };
+  o.temp_tag = "4242-" + std::to_string(++counter);
+  if (starts) o.on_start = [starts](size_t n) { starts->push_back(n); };
+  return o;
+}
+static size_t SlotNotes(const MakeReport& r);
+// MakeMissing in a statement of its own. An exception that escapes it is a failed check, and so is a report whose
+// notes do not hold exactly one note per slot not made (two checks per call).
+static MakeReport RunMake(const World& w, FakeGuest& g, const MakeOptions& o, const SlotTable& t = TestSlots(),
+                          const Defs& d = TestDefs()) {
+  MakeReport r;
+  bool escaped = false;
+  try {
+    r = MakeMissing(t, d, w.colours, w.game, g.guest, o);
+  } catch (...) {
+    escaped = true;
+  }
+  CHECK(!escaped);
+  CHECK(SlotNotes(r) == r.not_made);  // one note names each slot that was not made, and no other slot
+  return r;
+}
+static void PrintMake(const char* test, const MakeReport& r) {
+  std::printf("  %s: good %zu made %zu not made %zu\n", test, r.good, r.made, r.not_made);
+  for (const std::string& note : r.notes) std::printf("  %s note: %s\n", test, note.c_str());
+}
+static std::string RNote(const MakeReport& r, size_t i) { return i < r.notes.size() ? r.notes[i] : std::string(); }
+static bool StartsWith(const std::string& text, const std::string& start) { return text.rfind(start, 0) == 0; }
+// The cause of a slot's note (the text after "<slot>: "), or "" when no note starts with the slot's name.
+static std::string Cause(const MakeReport& r, size_t slot) {
+  const std::string start = SlotName(slot) + ": ";
+  for (const std::string& note : r.notes) {
+    if (StartsWith(note, start)) return note.substr(start.size());
+  }
+  return {};
+}
+static size_t SlotNotes(const MakeReport& r) {
+  size_t n = 0;
+  for (const std::string& note : r.notes) {
+    for (size_t i = 0; i < kSlotCount; ++i) n += StartsWith(note, SlotName(i) + ": ") ? 1 : 0;
+  }
+  return n;
+}
+
+struct FileState {
+  std::vector<uint8_t> bytes;
+  fs::file_time_type time;
+  bool operator==(const FileState&) const = default;
+};
+static std::map<std::string, FileState> Snapshot(const fs::path& dir) {
+  std::map<std::string, FileState> out;
+  std::error_code ec;
+  for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    const fs::path p = it->path();
+    std::error_code tec;
+    out[doa4::Utf8(p.filename())] = FileState{ReadAll(p), fs::last_write_time(p, tec)};
+  }
+  return out;
+}
+static bool Kept(const std::map<std::string, FileState>& before, const std::map<std::string, FileState>& after,
+                 const std::string& name) {
+  const auto b = before.find(name), a = after.find(name);
+  return b != before.end() && a != after.end() && b->second == a->second;
+}
+static size_t TmpCount(const fs::path& dir) {
+  size_t n = 0;
+  for (const auto& [name, state] : Snapshot(dir)) n += name.size() >= 4 && name.compare(name.size() - 4, 4, ".tmp") == 0 ? 1 : 0;
+  return n;
+}
+static size_t GoodFiles(const World& w) {
+  size_t n = 0;
+  for (size_t i = 0; i < kSlotCount; ++i) n += ReadAll(w.File(i)) == ColourBytes(i) ? 1 : 0;
+  return n;
+}
+static void SetAge(const fs::path& p, int minutes) {
+  std::error_code ec;
+  fs::last_write_time(p, fs::file_time_type::clock::now() - std::chrono::minutes(minutes), ec);
+  CHECK(!ec);
+}
+static std::string Text(const fs::path& p) {
+  const std::vector<uint8_t> b = ReadAll(p);
+  return std::string(b.begin(), b.end());
+}
+// manifest.txt as the writer must make it (*shape): one '#' line first, LF line ends, no CR, no other comment or empty
+// line. Returns the lines after the comment.
+static std::vector<std::string> ManifestBody(const fs::path& dir, bool* shape) {
+  const std::string text = Text(dir / "manifest.txt");
+  std::vector<std::string> lines;
+  for (size_t start = 0; start < text.size();) {
+    size_t end = text.find('\n', start);
+    if (end == std::string::npos) end = text.size();
+    lines.push_back(text.substr(start, end - start));
+    start = end + 1;
+  }
+  *shape = !text.empty() && text.back() == '\n' && text.find('\r') == std::string::npos && !lines.empty() &&
+           !lines[0].empty() && lines[0][0] == '#';
+  if (!lines.empty()) lines.erase(lines.begin());
+  for (const std::string& line : lines) {
+    if (line.empty() || line[0] == '#') *shape = false;
+  }
+  return lines;
+}
+static std::vector<std::string> StdLines() {
+  std::vector<std::string> lines;
+  for (size_t i = 0; i < kSlotCount; ++i) lines.push_back(SlotName(i) + " " + SlotName(i) + ".tpr");
+  return lines;
+}
+static void RemoveFiles(const World& w, std::initializer_list<size_t> slots) {
+  size_t removed = 0;
+  for (size_t i : slots) removed += fs::remove(w.File(i)) ? 1 : 0;
+  CHECK(removed == slots.size());
+}
+static void RemoveAllFiles(const World& w) { RemoveFiles(w, {0, 1, 2, 3, 4, 5, 6}); }
+static HANDLE Hold(const fs::path& p, DWORD share) {
+  const HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  CHECK(h != INVALID_HANDLE_VALUE);
+  return h;
+}
+static void Release(HANDLE h) {
+  if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+}
+
+static void TestKindOf() {
+  std::printf("-- TestKindOf\n");
+  CHECK(KindOf(false, "") == ProcessKind::kLobby);
+  CHECK(KindOf(false, "record") == ProcessKind::kMatch);
+  CHECK(KindOf(false, "replay") == ProcessKind::kMatch);
+  CHECK(KindOf(false, "hash") == ProcessKind::kMatch);
+  // Any other DOA4_NP value is a match process too: it makes nothing and ignores vanilla mode, and np::RefuseRun does
+  // nothing in it (np::Start starts no session for such a value: it is a plain offline game).
+  CHECK(KindOf(false, "x") == ProcessKind::kMatch);
+  CHECK(KindOf(true, "") == ProcessKind::kMatch);
+  CHECK(KindOf(true, "record") == ProcessKind::kMatch);
+  CHECK(KindOf(true, "replay") == ProcessKind::kMatch);
+  CHECK(KindOf(true, "hash") == ProcessKind::kMatch);
+  CHECK(KindOf(true, "x") == ProcessKind::kMatch);
+}
+
+static void TestShouldMake() {
+  std::printf("-- TestShouldMake\n");
+  CHECK(ShouldMake(ProcessKind::kLobby, false, false) == true);
+  CHECK(ShouldMake(ProcessKind::kLobby, true, false) == false);
+  CHECK(ShouldMake(ProcessKind::kLobby, false, true) == false);
+  CHECK(ShouldMake(ProcessKind::kLobby, true, true) == false);
+  CHECK(ShouldMake(ProcessKind::kMatch, false, false) == false);
+  CHECK(ShouldMake(ProcessKind::kMatch, true, false) == false);
+  CHECK(ShouldMake(ProcessKind::kMatch, false, true) == false);
+  CHECK(ShouldMake(ProcessKind::kMatch, true, true) == false);
+}
+
+// ---- the decisions the app's wiring reads (colour generator plan Task 6) ------------------------------------------------
+// Each call of the function under test is a statement of its own; each row's comment names the wrong version it excludes.
+
+// The colour rows are in the costume tables of every process, except a lobby process in vanilla mode.
+static void TestRowsOn() {
+  std::printf("-- TestRowsOn\n");
+  // Excludes: rows only in a match process (the kind read without the vanilla flag).
+  { const bool on = RowsOn(ProcessKind::kLobby, false); CHECK(on == true); }
+  // The one false row. Excludes: always on (vanilla mode ignored).
+  { const bool on = RowsOn(ProcessKind::kLobby, true); CHECK(on == false); }
+  // Excludes: off in a match process (the offline-only rule this replaces).
+  { const bool on = RowsOn(ProcessKind::kMatch, false); CHECK(on == true); }
+  // Excludes: vanilla mode alone switches the rows off (the kind not read): a vanilla-mode player's match process
+  // would build other tables than the other PC's.
+  { const bool on = RowsOn(ProcessKind::kMatch, true); CHECK(on == true); }
+}
+
+// Which rows go into the costume tables (Task 7, R-f): a lobby process in vanilla mode gets neither the colour rows nor the
+// imported suits' rows (retail tables); a match process ignores vanilla mode. The overlays are not decided here.
+static void TestVanillaLeavesRowsOut() {
+  std::printf("-- TestVanillaLeavesRowsOut\n");
+  using O = InstallOutcome;
+  // A vanilla lobby with the entries installed: no rows at all. Excludes: the suits' rows always on (v6), the colour rows
+  // gated without RowsOn (v7), and the stub's "both on".
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, true, O::kInstalled, false);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == false);
+  }
+  // The same lobby without vanilla mode: both. Excludes: rows off whenever the lobby is asked (kind read alone).
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, false, O::kInstalled, false);
+    CHECK(c.colour_rows == true);
+    CHECK(c.offline_suit_rows == true);
+  }
+  // A match process with the saved box on: both, as without it. Excludes: vanilla read without the kind (a vanilla
+  // player's match process would build other tables than the other PC's).
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kMatch, true, O::kInstalled, false);
+    CHECK(c.colour_rows == true);
+    CHECK(c.offline_suit_rows == true);
+  }
+  // Entries not installed: no colour rows, the suits' rows as before. Excludes: colour rows without Installed (a record
+  // naming an entry that is not overlaid), and the suits' rows tied to the colour outcome.
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, false, O::kNotUsable, false);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == true);
+  }
+  // The test switch DOA4_COLOURS_TEST_UNEQUAL: no colour rows; the suits' rows follow RowsOn alone, on and off.
+  // Excludes: the switch dropped from the colour gate, and the switch read into the suits' rows.
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, false, O::kInstalled, true);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == true);
+  }
+  {
+    const TableRowsChoice c = ChooseTableRows(ProcessKind::kLobby, true, O::kInstalled, true);
+    CHECK(c.colour_rows == false);
+    CHECK(c.offline_suit_rows == false);
+  }
+}
+
+// A match process that did not install the colour entries must not run; a lobby process is never refused.
+static void TestMustRefuse() {
+  std::printf("-- TestMustRefuse\n");
+  using O = InstallOutcome;
+  // A lobby process, each outcome. Excludes: the outcome read without the kind (three rows), and "always".
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kInstalled); CHECK(refuse == false); }
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kDropped); CHECK(refuse == false); }
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kNotUsable); CHECK(refuse == false); }
+  { const bool refuse = MustRefuse(ProcessKind::kLobby, O::kFailed); CHECK(refuse == false); }
+  // A match process. Excludes: the kind read without the outcome (every match process refused).
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kInstalled); CHECK(refuse == false); }
+  // Excludes: kDropped taken for installed (the swimsuits went in, the colour entries did not), and "never".
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kDropped); CHECK(refuse == true); }
+  // Excludes: only a failed install refuses (a Load that was not usable passes).
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kNotUsable); CHECK(refuse == true); }
+  // Excludes: only "the colours are missing" refuses (a failed install of everything passes).
+  { const bool refuse = MustRefuse(ProcessKind::kMatch, O::kFailed); CHECK(refuse == true); }
+}
+
+// std::filesystem::space answers an error with every member at the largest value, not 0: a query that cannot be
+// answered must not refuse the making ("no space"), and a full disk must.
+static_assert(sizeof(std::uintmax_t) == sizeof(uint64_t) &&
+                  static_cast<uint64_t>(static_cast<std::uintmax_t>(-1)) == UINT64_MAX,
+              "here the sentinel uintmax_t(-1) IS UINT64_MAX: the sentinel row below cannot tell a version without the "
+              "sentinel test from the right one");
+static void TestFreeBytesFrom() {
+  std::printf("-- TestFreeBytesFrom\n");
+  const auto space = [](std::uintmax_t available) {
+    fs::space_info info{};
+    info.capacity = 5000;
+    info.free = 4000;
+    info.available = available;
+    return info;
+  };
+  const std::error_code none;
+  const std::error_code failed = std::make_error_code(std::errc::no_such_file_or_directory);
+  CHECK(!none && bool(failed));  // precondition: the two codes are an answer and an error
+  // An error with a number in the member. Excludes: the error code not read (1000 would be compared with the sizes).
+  { const uint64_t got = FreeBytesFrom(space(1000), failed); CHECK(got == UINT64_MAX); }
+  // An error with 0 in the member. Excludes: "0 free on error", which would report "no space" for every slot.
+  { const uint64_t got = FreeBytesFrom(space(0), failed); CHECK(got == UINT64_MAX); }
+  // No error, the sentinel. (See the static_assert: equal with or without the sentinel test on this platform.)
+  { const uint64_t got = FreeBytesFrom(space(static_cast<std::uintmax_t>(-1)), none); CHECK(got == UINT64_MAX); }
+  // No error, a full disk. Excludes: 0 taken for "unknown" (a full disk must refuse).
+  { const uint64_t got = FreeBytesFrom(space(0), none); CHECK(got == 0); }
+  // No error, a number. Excludes: `free` (4000) or `capacity` (5000) read in place of `available`.
+  { const uint64_t got = FreeBytesFrom(space(123456), none); CHECK(got == 123456); }
+}
+
+// The one note that can appear for a moment when two copies of the game start together.
+static void TestIsPassingNote() {
+  std::printf("-- TestIsPassingNote\n");
+  // The text, written here on its own (MakeMissing's note, pinned in TestManifestRereadFails too).
+  CHECK(kManifestUnreadableNote == "manifest: cannot write: the current one cannot be read");
+  // Excludes: never (every note a warning).
+  { const bool passing = IsPassingNote(kManifestUnreadableNote); CHECK(passing == true); }
+  // A refused write shares the first 24 bytes. Excludes: a match on "manifest: " or on "manifest: cannot write: ".
+  { const bool passing = IsPassingNote("manifest: cannot write: access denied"); CHECK(passing == false); }
+  // Excludes: a match on the start of the text (starts_with).
+  { const bool passing = IsPassingNote(std::string(kManifestUnreadableNote) + " "); CHECK(passing == false); }
+  // Excludes: a match on the end of the text.
+  { const bool passing = IsPassingNote("x" + std::string(kManifestUnreadableNote)); CHECK(passing == false); }
+  // The other manifest note, and a slot's note. Excludes: a match on "manifest: ", and "always".
+  { const bool passing = IsPassingNote("manifest: alpha_lilac not listed"); CHECK(passing == false); }
+  { const bool passing = IsPassingNote("alpha_red: source differs"); CHECK(passing == false); }
+  { const bool passing = IsPassingNote(""); CHECK(passing == false); }
+}
+
+// What a refused match process says: the cause by outcome, then what repairs it.
+static void TestRefusalMessage() {
+  std::printf("-- TestRefusalMessage\n");
+  using O = InstallOutcome;
+  const std::string head = "colour costumes: this PC cannot build the 0.3.8 costume tables: ";
+  const std::string tail = "; check the game files (chrthree.afs) and restart";
+  // The remedy follows the outcome: a build or install that failed (kDropped, kFailed) can come from a swimsuit
+  // archive as well as from a game file, so its remedy names both and no one file.
+  const std::string tail_install = "; check the game files and the swimsuit import, then restart";
+  // Load's notes in the order Load pushes them: why a stand-in was needed first, the cause of "not usable" last.
+  const std::vector<std::string> notes = {"the colour folder is missing; every slot shows its stand-in",
+                                          "alpha_red: its stand-in cannot be read; no colour slot is installed"};
+  const std::vector<std::string> no_notes;
+  // The whole text, literally. kNotUsable names the LAST note. Excludes: the first note (it says why a stand-in was
+  // needed, not why none could be read), every note joined, the install error in the note's place, another wording
+  // of the start or the end.
+  {
+    const std::string got = RefusalMessage(O::kNotUsable, false, notes, "an install error", "a retry error", false);
+    CHECK(got == "colour costumes: this PC cannot build the 0.3.8 costume tables: alpha_red: its stand-in cannot be read; "
+                 "no colour slot is installed; check the game files (chrthree.afs) and restart");
+  }
+  // kNotUsable with no note. Excludes: an empty cause, and a read of the last note of an empty list.
+  {
+    const std::string got = RefusalMessage(O::kNotUsable, false, no_notes, "an install error", "a retry error", false);
+    CHECK(got == head + "the colour slots were not loaded" + tail);
+  }
+  // kDropped names the install error. Excludes: the note (kNotUsable's source), and the retry's error (the retry worked).
+  // The whole text of the second remedy, literally. Excludes: one remedy for every outcome (chrthree.afs named for a
+  // failure a swimsuit archive can cause).
+  {
+    const std::string got = RefusalMessage(O::kDropped, true, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "an install error" + tail_install);
+    CHECK(got == "colour costumes: this PC cannot build the 0.3.8 costume tables: an install error; check the game files "
+                 "and the swimsuit import, then restart");
+  }
+  // kDropped with no error text. Excludes: an empty cause.
+  {
+    const std::string got = RefusalMessage(O::kDropped, true, notes, "", "a retry error", false);
+    CHECK(got == head + "the overlay install failed" + tail_install);
+  }
+  // kDropped with the usable flag off: the flag is read for kFailed only. Excludes: the colour cause put in front
+  // whenever the flag is off, whatever the outcome.
+  {
+    const std::string got = RefusalMessage(O::kDropped, false, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "an install error" + tail_install);
+  }
+  // kFailed with the colour slots usable names both tries. Excludes: the first error alone, the retry's alone, the
+  // two in the other order, and the colour cause put in front although the slots were usable.
+  {
+    const std::string got = RefusalMessage(O::kFailed, true, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "an install error / a retry error" + tail_install);
+  }
+  // kFailed, usable, with no first error text. Excludes: an empty first half (" / a retry error").
+  {
+    const std::string got = RefusalMessage(O::kFailed, true, notes, "", "a retry error", false);
+    CHECK(got == head + "the overlay install failed / a retry error" + tail_install);
+  }
+  // kFailed, usable, with no retry text. Excludes: a cause that ends in " / " with nothing after it.
+  {
+    const std::string got = RefusalMessage(O::kFailed, true, notes, "an install error", "", false);
+    CHECK(got == head + "an install error" + tail_install);
+  }
+  // kFailed with the colour slots NOT usable (Load was not usable and the swimsuits' install failed: there was no
+  // second try): the colour cause as for kNotUsable, then the install error. A retry text is given here although
+  // none exists then. Excludes: the usable flag not read ("an install error / a retry error", which never says the
+  // colour slots could not be loaded), and the retry text appended.
+  {
+    const std::string got = RefusalMessage(O::kFailed, false, notes, "an install error", "a retry error", false);
+    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / an install error" + tail_install);
+  }
+  // The same with no note, and with no error text. Excludes: an empty half on either side of " / ".
+  {
+    const std::string got = RefusalMessage(O::kFailed, false, no_notes, "an install error", "a retry error", false);
+    CHECK(got == head + "the colour slots were not loaded / an install error" + tail_install);
+  }
+  {
+    const std::string got = RefusalMessage(O::kFailed, false, notes, "", "", false);
+    CHECK(got == head + "alpha_red: its stand-in cannot be read; no colour slot is installed / the overlay install failed" + tail_install);
+  }
+  // The test switch beats a real note, and every outcome's own cause, and keeps the first remedy whatever the
+  // outcome. Excludes: the switch not read, and (the kFailed row) the outcome's remedy under the switch.
+  {
+    const std::string got = RefusalMessage(O::kNotUsable, false, notes, "an install error", "a retry error", true);
+    CHECK(got == head + "test switch DOA4_COLOURS_TEST_UNUSABLE" + tail);
+  }
+  {
+    const std::string got = RefusalMessage(O::kFailed, false, no_notes, "an install error", "a retry error", true);
+    CHECK(got == head + "test switch DOA4_COLOURS_TEST_UNUSABLE" + tail);
+  }
+  // kInstalled has no cause (the app never asks for it). Excludes: another outcome's cause borrowed for it.
+  {
+    const std::string got = RefusalMessage(O::kInstalled, true, notes, "an install error", "a retry error", false);
+    CHECK(got == head + tail);
+  }
+}
+
+// The refusal's cause when the notes come from their producer: Load on a folder set that is not usable for one reason
+// (a stand-in of the wrong size) and degraded for another (no colour folder at all). Load says the benign thing
+// first and the cause last; the message must name the cause. Excludes: the first note taken for the cause.
+static void TestRefusalNamesLoadsCause() {
+  std::printf("-- TestRefusalNamesLoadsCause\n");
+  FakeGuest g = PlantedGuest();
+  const uint64_t size = TestSlots()[3].size;  // spartan_h3_pink: stand-in file 439, entry 34
+  std::vector<uint8_t> shorter = StandInBytes(34);
+  shorter.pop_back();
+  World w;
+  WriteChrthree(w, 48, {{34, shorter}});
+  std::error_code ec;
+  fs::remove_all(w.colours, ec);
+  CHECK(!ec && !fs::exists(w.colours));  // precondition: there is no colour folder
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  PrintNotes("TestRefusalNamesLoadsCause", s);
+  const std::string cause = "its stand-in is " + std::to_string(size - 1) + " bytes, not " + std::to_string(size);
+  // preconditions: not usable; at least two notes; the first is the folder's, the last the stand-in's
+  CHECK(!s.usable);
+  CHECK(s.notes.size() >= 2 && Contains(NoteAt(s, 0), "is missing; every slot shows its stand-in") &&
+        !Contains(NoteAt(s, 0), cause));
+  CHECK(!s.notes.empty() && Contains(s.notes.back(), cause) && Contains(s.notes.back(), "no colour slot is installed"));
+  const std::string got = RefusalMessage(InstallOutcome::kNotUsable, s.usable, s.notes, "", "", false);
+  CHECK(Contains(got, cause));
+  CHECK(!Contains(got, "is missing; every slot shows its stand-in"));
+  CHECK(!s.notes.empty() &&
+        got == "colour costumes: this PC cannot build the 0.3.8 costume tables: " + s.notes.back() +
+                   "; check the game files (chrthree.afs) and restart");
+}
+
+// MakeDefs() against the real slot table and colourgen::kSources, and against this file's own ledger rows (kStandInLedger:
+// written on their own, so a row copied wrongly into kSources and from there into MakeDefs shows).
+static void TestMakeDefsCoverSlots() {
+  std::printf("-- TestMakeDefsCoverSlots\n");
+  const Defs& d = MakeDefs();
+  const SlotTable& t = Slots();
+  CHECK(std::size(cg::kSources) == kSlotCount);
+  for (size_t i = 0; i < kSlotCount; ++i) {
+    const cg::SourceDef& s = cg::kSources[i];
+    CHECK(d[i].slot && std::string_view(d[i].slot) == t[i].name && std::string_view(d[i].slot) == s.slot);
+    CHECK(d[i].source_file == t[i].stand_in_file && d[i].source_file == s.file);
+    CHECK(d[i].source_size == s.size);
+    CHECK(d[i].source_sha1 && std::string_view(d[i].source_sha1) == s.sha1);
+    CHECK(d[i].source_file == kStandInLedger[i].file && d[i].source_size == kStandInLedger[i].size && d[i].source_sha1 &&
+          std::string_view(d[i].source_sha1) == kStandInLedger[i].sha1);
+  }
+}
+
+// Image tier: the five distinct source files of kSources are where kSources says, in the image's own file table.
+static void TestSourcesOnImage() {
+  std::printf("-- TestSourcesOnImage\n");
+  FakeGuest g = ImageGuest();
+  std::set<uint16_t> files;
+  for (const cg::SourceDef& s : cg::kSources) {
+    if (!files.insert(s.file).second) continue;
+    const auto loc = costumes::FileLocation(g.guest, s.file);
+    CHECK(loc && std::string(loc->archive) == "chrthree.afs" && loc->entry == s.afs_entry);
+  }
+  CHECK(files.size() == 5);
+}
+
+// M2: every slot good and named: nothing is touched. The start manifest is one the writer never produces (CR LF ends, no
+// comment line, the slots in reverse order), so a rewrite cannot leave the same bytes.
+static void TestAllGoodTouchesNothing() {
+  std::printf("-- TestAllGoodTouchesNothing\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  std::string manifest;
+  for (size_t i = kSlotCount; i-- > 0;) manifest += SlotName(i) + " " + SlotName(i) + ".tpr\r\n";
+  WriteText(w.colours / "manifest.txt", manifest);
+  Write(w.colours / "alpha_red.tpr.x.tmp", Content(9, 40));
+  SetAge(w.colours / "alpha_red.tpr.x.tmp", 120);  // old enough for the sweep, if the sweep ran
+  {
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);  // precondition: this manifest names seven good files
+    CHECK(s.usable && s.notes.empty());
+    CheckSlots(s, {});
+  }
+  const std::map<std::string, FileState> before = Snapshot(w.colours);
+  CHECK(before.size() == 9);
+  Gen gen;
+  std::vector<size_t> starts;
+  const MakeOptions o = Opt(gen, &starts);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestAllGoodTouchesNothing", r);
+  const std::map<std::string, FileState> after = Snapshot(w.colours);
+  CHECK(r.good == 7 && r.made == 0 && r.not_made == 0);  // it looked: seven good
+  CHECK(r.notes.empty());
+  CHECK(after == before);  // the file list, every file's bytes, every write time
+  CHECK(after.count("alpha_red.tpr.x.tmp") == 1);
+  CHECK(Text(w.colours / "manifest.txt") == manifest);
+  CHECK(gen.Total() == 0);
+  CHECK(starts.empty());
+}
+
+static void TestMakesAllFromEmpty() {
+  std::printf("-- TestMakesAllFromEmpty\n");
+  FakeGuest g = PlantedGuest();
+  {
+    World w;
+    fs::remove_all(w.colours);
+    CHECK(!fs::exists(w.colours));
+    Gen gen;
+    std::vector<size_t> starts;
+    const MakeOptions o = Opt(gen, &starts);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestMakesAllFromEmpty", r);
+    CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);
+    CHECK(r.notes.empty());
+    CHECK(starts.size() == 1 && starts[0] == 7);
+    for (size_t i = 0; i < kSlotCount; ++i) {
+      CHECK(ReadAll(w.File(i)) == ColourBytes(i));
+      CHECK(gen.Calls(i) == 1);
+    }
+    CHECK(Snapshot(w.colours).size() == 8);  // seven files and the manifest
+    CHECK(TmpCount(w.colours) == 0);
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape);
+    CHECK(lines == StdLines());
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);  // the production reader of the manifest
+    CHECK(s.usable && s.notes.empty());
+    CheckSlots(s, {});
+    CHECK(s.Summary() == "colour costumes: 7 slots, 7 from files, 0 stand-ins");
+  }
+  {
+    // A temp_tag that is not "digits and '-' only" cannot take a write out of the folder.
+    World w;
+    fs::remove_all(w.colours);
+    const std::map<std::string, FileState> game_before = Snapshot(w.game);
+    Gen gen;
+    MakeOptions o = Opt(gen);
+    o.temp_tag = "..\\..\\x/9-1";
+    const MakeReport r = RunMake(w, g, o);
+    CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);
+    CHECK(Snapshot(w.root).size() == 2);  // game and colour_costumes: nothing beside them
+    CHECK(Snapshot(w.game) == game_before);
+    CHECK(Snapshot(w.colours).size() == 8 && TmpCount(w.colours) == 0);
+  }
+}
+
+static void TestMakesOnlyMissing() {
+  std::printf("-- TestMakesOnlyMissing\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveFiles(w, {1, 5});
+  const std::map<std::string, FileState> before = Snapshot(w.colours);
+  Gen gen;
+  std::vector<size_t> starts;
+  const MakeOptions o = Opt(gen, &starts);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestMakesOnlyMissing", r);
+  const std::map<std::string, FileState> after = Snapshot(w.colours);
+  CHECK(r.good == 5 && r.made == 2 && r.not_made == 0);
+  CHECK(r.notes.empty());
+  CHECK(starts.size() == 1 && starts[0] == 2);
+  for (size_t i = 0; i < kSlotCount; ++i) {
+    const bool missing = i == 1 || i == 5;
+    CHECK(gen.Calls(i) == (missing ? 1 : 0));
+    if (!missing) CHECK(Kept(before, after, SlotName(i) + ".tpr"));  // bytes and write time
+  }
+  CHECK(ReadAll(w.File(1)) == ColourBytes(1) && ReadAll(w.File(5)) == ColourBytes(5));
+  CHECK(TmpCount(w.colours) == 0);
+  bool shape = false;
+  const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+  CHECK(shape && lines == StdLines());
+}
+
+static void TestWrongFileRemade() {
+  std::printf("-- TestWrongFileRemade\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  std::vector<uint8_t> other = ColourBytes(2);  // the same size, other bytes
+  other[other.size() / 2] ^= 0x5A;
+  Write(w.File(2), other);
+  std::vector<uint8_t> longer = ColourBytes(4);  // another size
+  longer.push_back(0);
+  Write(w.File(4), longer);
+  Gen gen;
+  std::vector<size_t> starts;
+  const MakeOptions o = Opt(gen, &starts);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestWrongFileRemade", r);
+  CHECK(r.good == 5 && r.made == 2 && r.not_made == 0);
+  CHECK(r.notes.empty());
+  CHECK(starts.size() == 1 && starts[0] == 2);
+  CHECK(gen.Calls(2) == 1 && gen.Calls(4) == 1 && gen.Total() == 2);
+  CHECK(ReadAll(w.File(2)) == ColourBytes(2));
+  CHECK(ReadAll(w.File(4)) == ColourBytes(4));
+  CHECK(TmpCount(w.colours) == 0);
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  CHECK(s.usable && s.notes.empty());
+  CheckSlots(s, {});
+}
+
+static void TestCrashLeftoverIgnored() {
+  std::printf("-- TestCrashLeftoverIgnored\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveFiles(w, {2});
+  const std::vector<uint8_t> junk = Content(77, 50);
+  const fs::path fresh = w.colours / "alpha_lilac.tpr.123-9.tmp";    // a sweep form, just written: stays
+  const fs::path half = w.colours / "spartan_h2_cyan.tpr.5-5.tmp";   // a sweep form, 30 minutes old: stays
+  const fs::path old_slot = w.colours / "alpha_blue.tpr.77-1.tmp";   // a sweep form, two hours old: deleted
+  const fs::path old_manifest = w.colours / "manifest.txt.9-9.tmp";  // a sweep form, two hours old: deleted
+  const fs::path old_notes = w.colours / "notes.tmp";                // two hours old, not a sweep form: stays
+  const fs::path old_other = w.colours / "other.tpr.1.tmp";          // two hours old, not a slot's name: stays
+  for (const fs::path& p : {fresh, half, old_slot, old_manifest, old_notes, old_other}) Write(p, junk);
+  SetAge(half, 30);
+  for (const fs::path& p : {old_slot, old_manifest, old_notes, old_other}) SetAge(p, 120);
+  Gen gen;
+  const MakeOptions o = Opt(gen);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestCrashLeftoverIgnored", r);
+  CHECK(r.good == 6 && r.made == 1 && r.not_made == 0);
+  CHECK(r.notes.empty());
+  CHECK(gen.Calls(2) == 1 && gen.Total() == 1);  // the slot was made from its source,
+  CHECK(ReadAll(w.File(2)) == ColourBytes(2));   // not taken from the leftover
+  CHECK(ReadAll(fresh) == junk);
+  CHECK(ReadAll(half) == junk);
+  CHECK(!fs::exists(old_slot));
+  CHECK(!fs::exists(old_manifest));
+  CHECK(ReadAll(old_notes) == junk);
+  CHECK(ReadAll(old_other) == junk);
+}
+
+// M1's second half: a good <slot>.tpr without a manifest line is adopted; only the manifest is owed.
+static void TestFileWithoutLineAdopted() {
+  std::printf("-- TestFileWithoutLineAdopted\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  std::string manifest;
+  for (size_t i = 0; i < kSlotCount; ++i) {
+    if (i != 4) manifest += SlotName(i) + " " + SlotName(i) + ".tpr\n";
+  }
+  WriteText(w.colours / "manifest.txt", manifest);
+  const std::map<std::string, FileState> before = Snapshot(w.colours);
+  Gen gen;
+  std::vector<size_t> starts;
+  const MakeOptions o = Opt(gen, &starts);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestFileWithoutLineAdopted", r);
+  const std::map<std::string, FileState> after = Snapshot(w.colours);
+  CHECK(r.good == 7 && r.made == 0 && r.not_made == 0);
+  CHECK(r.notes.empty());
+  CHECK(gen.Total() == 0);
+  CHECK(starts.empty());
+  bool shape = false;
+  const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+  CHECK(shape && lines == StdLines());
+  size_t kept = 0;
+  for (size_t i = 0; i < kSlotCount; ++i) kept += Kept(before, after, SlotName(i) + ".tpr") ? 1 : 0;
+  CHECK(kept == kSlotCount);
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  CHECK(s.usable && s.notes.empty());
+  CheckSlots(s, {});
+}
+
+static void TestSourceWrongHash() {
+  std::printf("-- TestSourceWrongHash\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveAllFiles(w);
+  std::vector<uint8_t> other = StandInBytes(34);  // spartan_h3_pink's source: the right size, one byte changed
+  other[5] ^= 0x33;
+  WriteChrthree(w, 48, {{34, other}});
+  CHECK(other.size() == TestDefs()[3].source_size);  // precondition: only the SHA-1 can tell
+  Gen gen;
+  const MakeOptions o = Opt(gen);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestSourceWrongHash", r);
+  CHECK(r.good == 0 && r.made == 6 && r.not_made == 1);
+  CHECK(r.notes.size() == 1 && Cause(r, 3) == "source differs");
+  CHECK(gen.Calls(3) == 0);  // a source that differs is never passed to the generator
+  CHECK(gen.Total() == 6);
+  CHECK(!fs::exists(w.File(3)));
+  CHECK(GoodFiles(w) == 6);
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  CHECK(s.usable);
+  CHECK(s.slots.size() == kSlotCount && s.slots[3].stand_in && Holds(s.slots[3].tpr, other));
+  CHECK(s.Summary() == "colour costumes: 7 slots, 6 from files, 1 stand-ins");
+}
+
+static void TestSourceWrongSize() {
+  std::printf("-- TestSourceWrongSize\n");
+  FakeGuest g = PlantedGuest();
+  {
+    World w;
+    RemoveAllFiles(w);
+    std::vector<uint8_t> shorter = StandInBytes(34);
+    shorter.pop_back();
+    WriteChrthree(w, 48, {{34, shorter}});
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestSourceWrongSize", r);
+    CHECK(r.good == 0 && r.made == 6 && r.not_made == 1);
+    CHECK(r.notes.size() == 1 && Cause(r, 3) == "source differs");
+    CHECK(gen.Calls(3) == 0 && gen.Total() == 6);
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(!s.usable);  // the slot has no file and its stand-in is of another size
+    CHECK(NotesNaming(s, "its stand-in is") == 1);
+  }
+  {
+    // The size is checked on its own, not only through the SHA-1: the right source against a def one byte larger.
+    World w;
+    RemoveAllFiles(w);
+    Defs d = TestDefs();
+    d[5].source_size += 1;
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o, TestSlots(), d);
+    CHECK(r.good == 0 && r.made == 6 && r.not_made == 1 && Cause(r, 5) == "source differs");
+    CHECK(gen.Calls(5) == 0 && gen.Total() == 6);
+  }
+}
+
+static void TestSourceMissing() {
+  std::printf("-- TestSourceMissing\n");
+  FakeGuest g = PlantedGuest();
+  {
+    // The archive has 40 entries: orchid's source (entry 40) and cyan's (42) are past its end.
+    World w(40);
+    RemoveAllFiles(w);
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestSourceMissing (a)", r);
+    CHECK(r.good == 0 && r.made == 5 && r.not_made == 2);
+    CHECK(r.notes.size() == 2 && Cause(r, 4) == "source missing" && Cause(r, 6) == "source missing");
+    CHECK(gen.Calls(4) == 0 && gen.Calls(6) == 0 && gen.Total() == 5);
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(!s.usable);
+  }
+  {
+    // No chrthree.afs at all.
+    World w(48, false);
+    RemoveAllFiles(w);
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestSourceMissing (b)", r);
+    CHECK(r.good == 0 && r.made == 0 && r.not_made == 7);
+    size_t missing = 0;
+    for (size_t i = 0; i < kSlotCount; ++i) missing += Cause(r, i) == "source missing" ? 1 : 0;
+    CHECK(r.notes.size() == 7 && missing == 7);
+    CHECK(gen.Total() == 0);
+    CHECK(GoodFiles(w) == 0 && TmpCount(w.colours) == 0);
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(!s.usable);
+  }
+  {
+    // A source file number with no place in the game's file table.
+    World w;
+    RemoveAllFiles(w);
+    Defs d = TestDefs();
+    d[2].source_file = 1700;
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o, TestSlots(), d);
+    CHECK(r.good == 0 && r.made == 6 && r.not_made == 1 && Cause(r, 2) == "source missing");
+    CHECK(gen.Calls(2) == 0 && gen.Total() == 6);
+  }
+}
+
+static void TestMadeFileFailsHashNotWritten() {
+  std::printf("-- TestMadeFileFailsHashNotWritten\n");
+  FakeGuest g = PlantedGuest();
+  {
+    // The generator flips one byte of alpha_blue's file and returns spartan_h2_orange's one byte short.
+    World w;
+    RemoveAllFiles(w);
+    Gen gen;
+    gen.post = [](size_t i, Made& result, std::string*) {
+      if (!result) return;
+      if (i == 1) (*result)[result->size() / 2] ^= 1;
+      if (i == 5) result->pop_back();
+    };
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestMadeFileFailsHashNotWritten", r);
+    CHECK(r.good == 0 && r.made == 5 && r.not_made == 2);
+    CHECK(r.notes.size() == 2 && Cause(r, 1) == "made file fails its check" && Cause(r, 5) == "made file fails its check");
+    CHECK(!fs::exists(w.File(1)) && !fs::exists(w.File(5)));
+    CHECK(TmpCount(w.colours) == 0);
+    CHECK(Snapshot(w.colours).size() == 6);  // five files and the manifest
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines.size() == 5);
+  }
+  {
+    // The size is checked on its own, not only through the SHA-1: the table's size one more than the made bytes.
+    World w;
+    SlotTable t = TestSlots();
+    t[4].size += 1;
+    const std::map<std::string, FileState> before = Snapshot(w.colours);
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o, t);
+    PrintMake("TestMadeFileFailsHashNotWritten (size)", r);
+    CHECK(r.good == 6 && r.made == 0 && r.not_made == 1);
+    CHECK(Cause(r, 4) == "made file fails its check");
+    CHECK(gen.Calls(4) == 1);  // it was made, then refused
+    CHECK(Kept(before, Snapshot(w.colours), SlotName(4) + ".tpr"));
+    CHECK(TmpCount(w.colours) == 0);
+  }
+}
+
+static void TestGeneratorRefuses() {
+  std::printf("-- TestGeneratorRefuses\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveFiles(w, {0, 3});
+  Gen gen;
+  gen.post = [](size_t i, Made& result, std::string* why) {
+    if (i != 3) return;
+    result.reset();
+    if (why) *why = "texture 11: format 20\x01" " not DXT1";  // a control byte: the note must carry it escaped
+  };
+  std::vector<size_t> starts;
+  const MakeOptions o = Opt(gen, &starts);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestGeneratorRefuses", r);
+  CHECK(r.good == 5 && r.made == 1 && r.not_made == 1);
+  CHECK(r.notes.size() == 1 && Cause(r, 3) == "generator: texture 11: format 20\\x01 not DXT1");
+  CHECK(starts.size() == 1 && starts[0] == 2);
+  CHECK(!fs::exists(w.File(3)) && ReadAll(w.File(0)) == ColourBytes(0));
+}
+
+static void TestGeneratorThrows() {
+  std::printf("-- TestGeneratorThrows\n");
+  FakeGuest g = PlantedGuest();
+  for (unsigned threads : {1u, 4u}) {
+    World w;
+    RemoveAllFiles(w);
+    Gen gen;
+    gen.post = [](size_t i, Made&, std::string*) {
+      if (i == 2) throw std::runtime_error("boom 7");
+      if (i == 5) throw 42;
+    };
+    MakeOptions o = Opt(gen);
+    o.threads = threads;
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestGeneratorThrows", r);
+    CHECK(r.good == 0 && r.made == 5 && r.not_made == 2);
+    CHECK(r.notes.size() == 2 && Cause(r, 2) == "generator: boom 7");
+    CHECK(StartsWith(Cause(r, 5), "generator: "));
+    CHECK(!fs::exists(w.File(2)) && !fs::exists(w.File(5)));
+    CHECK(ReadAll(w.File(6)) == ColourBytes(6));  // the slots after the throws are made
+    CHECK(TmpCount(w.colours) == 0);
+  }
+}
+
+static void TestNoSpace() {
+  std::printf("-- TestNoSpace\n");
+  FakeGuest g = PlantedGuest();
+  const uint64_t size4 = TestSlots()[4].size;
+  {
+    // One byte under the bound: the file's size + 65,536 is needed.
+    World w;
+    RemoveFiles(w, {4});
+    Gen gen;
+    int asked = 0;
+    fs::path asked_of;
+    MakeOptions o = Opt(gen);
+    o.free_bytes = [&](const fs::path& p) {
+      ++asked;
+      asked_of = p;
+      return size4 + 65535;
+    };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestNoSpace (under)", r);
+    CHECK(r.good == 6 && r.made == 0 && r.not_made == 1);
+    CHECK(r.notes.size() == 1 && Cause(r, 4) == "no space");
+    CHECK(gen.Total() == 0);
+    CHECK(!fs::exists(w.File(4)));
+    CHECK(asked == 1 && asked_of == w.colours);
+  }
+  {
+    // Exactly the bound: made.
+    World w;
+    RemoveFiles(w, {4});
+    Gen gen;
+    MakeOptions o = Opt(gen);
+    o.free_bytes = [&](const fs::path&) { return size4 + 65536; };
+    const MakeReport r = RunMake(w, g, o);
+    CHECK(r.good == 6 && r.made == 1 && r.not_made == 0);
+    CHECK(r.notes.empty());
+    CHECK(ReadAll(w.File(4)) == ColourBytes(4));
+  }
+  {
+    // Cumulative: all seven missing and room for exactly the first two (each alone would fit).
+    World w;
+    RemoveAllFiles(w);
+    Gen gen;
+    int asked = 0;
+    const uint64_t room = TestSlots()[0].size + TestSlots()[1].size + 65536;
+    MakeOptions o = Opt(gen);
+    o.free_bytes = [&](const fs::path&) {
+      ++asked;
+      return room;
+    };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestNoSpace (cumulative)", r);
+    CHECK(r.good == 0 && r.made == 2 && r.not_made == 5);
+    size_t refused = 0;
+    for (size_t i = 2; i < kSlotCount; ++i) refused += Cause(r, i) == "no space" ? 1 : 0;
+    CHECK(r.notes.size() == 5 && refused == 5);
+    CHECK(gen.Calls(0) == 1 && gen.Calls(1) == 1 && gen.Total() == 2);
+    CHECK(asked == 1);  // the free space is read once a call
+    CHECK(ReadAll(w.File(0)) == ColourBytes(0) && ReadAll(w.File(1)) == ColourBytes(1));
+    CHECK(GoodFiles(w) == 2);
+  }
+}
+
+static void TestFolderIsAFile() {
+  std::printf("-- TestFolderIsAFile\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  fs::remove_all(w.colours);
+  const std::vector<uint8_t> junk = Content(3, 20);
+  Write(w.colours, junk);
+  CHECK(fs::is_regular_file(w.colours));
+  Gen gen;
+  const MakeOptions o = Opt(gen);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestFolderIsAFile", r);
+  CHECK(r.good == 0 && r.made == 0 && r.not_made == 7);
+  size_t cannot = 0;
+  for (size_t i = 0; i < kSlotCount; ++i) cannot += StartsWith(Cause(r, i), "cannot write: ") ? 1 : 0;
+  CHECK(cannot == 7);
+  CHECK(ReadAll(w.colours) == junk);
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  CHECK(s.usable);
+  CheckSlots(s, {0, 1, 2, 3, 4, 5, 6});
+}
+
+// The target is a WRONG file that another program holds open without delete sharing: the rename is refused, the slot is
+// not made, the temporary is removed and the wrong file keeps its bytes. First with read sharing only (the brief's
+// row), then with write sharing too: there a writer that wrote in place would get through, only the rename is refused.
+static void TestTargetHeldOpen() {
+  std::printf("-- TestTargetHeldOpen\n");
+  FakeGuest g = PlantedGuest();
+  for (DWORD share : {DWORD(FILE_SHARE_READ), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE)}) {
+    World w;
+    std::vector<uint8_t> wrong = ColourBytes(3);
+    wrong[7] ^= 0x40;
+    Write(w.File(3), wrong);
+    const HANDLE held = Hold(w.File(3), share);
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestTargetHeldOpen", r);
+    CHECK(r.good == 6 && r.made == 0 && r.not_made == 1);
+    CHECK(r.notes.size() == 1 && StartsWith(Cause(r, 3), "cannot write: "));
+    CHECK(gen.Calls(3) == 1);  // it was made: only the write failed
+    CHECK(TmpCount(w.colours) == 0);
+    CHECK(ReadAll(w.File(3)) == wrong);
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines.size() == 6);  // one line per slot good on disk
+    Release(held);
+  }
+}
+
+// While this call was making a slot, another process put the good file in place and holds it open: the rename is
+// refused, the target passes its check, the slot counts as good.
+static void TestRenameOntoHeldGoodFile() {
+  std::printf("-- TestRenameOntoHeldGoodFile\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveFiles(w, {3});
+  HANDLE held = INVALID_HANDLE_VALUE;
+  Gen gen;
+  gen.post = [&](size_t i, Made& result, std::string*) {
+    if (i != 3 || !result) return;
+    Write(w.File(3), ColourBytes(3));
+    held = CreateFileW(w.File(3).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                       nullptr);
+  };
+  const MakeOptions o = Opt(gen);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestRenameOntoHeldGoodFile", r);
+  CHECK(held != INVALID_HANDLE_VALUE);  // precondition: the target was held when the rename came
+  CHECK(r.good == 7 && r.made == 0 && r.not_made == 0);
+  CHECK(r.notes.empty());
+  CHECK(gen.Calls(3) == 1);
+  CHECK(TmpCount(w.colours) == 0);
+  bool shape = false;
+  const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+  CHECK(shape && lines == StdLines());
+  Release(held);
+}
+
+static void TestManifestWriteFails() {
+  std::printf("-- TestManifestWriteFails\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveAllFiles(w);
+  WriteText(w.colours / "manifest.txt", "# held\n");
+  const HANDLE held = Hold(w.colours / "manifest.txt", FILE_SHARE_READ);  // no write, no delete: it cannot be replaced
+  Gen gen;
+  const MakeOptions o = Opt(gen);
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestManifestWriteFails", r);
+  CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);  // the made slots still count as made
+  CHECK(r.notes.size() == 1 && StartsWith(RNote(r, 0), "manifest: cannot write: "));
+  // WHICH refusal: the manifest could be read again (the hold shares reading) and the write was tried and refused, so
+  // the note carries the system's text. Excludes: the re-read judged unreadable (kManifestUnreadableNote, the rule of
+  // TestManifestRereadFails), which shares the prefix above and writes nothing either.
+  CHECK(RNote(r, 0).size() > std::string("manifest: cannot write: ").size());
+  CHECK(RNote(r, 0) != kManifestUnreadableNote);
+  CHECK(Text(w.colours / "manifest.txt") == "# held\n");
+  CHECK(TmpCount(w.colours) == 0);
+  CHECK(GoodFiles(w) == 7);
+  {
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);  // the manifest names nothing: Load is as before
+    CHECK(s.usable);
+    CheckSlots(s, {0, 1, 2, 3, 4, 5, 6});
+  }
+  Release(held);
+  Gen gen2;
+  std::vector<size_t> starts2;
+  const MakeOptions o2 = Opt(gen2, &starts2);
+  const MakeReport r2 = RunMake(w, g, o2);
+  PrintMake("TestManifestWriteFails (second call)", r2);
+  CHECK(r2.good == 7 && r2.made == 0 && r2.not_made == 0);  // all seven adopted
+  CHECK(r2.notes.empty());
+  CHECK(gen2.Total() == 0);
+  CHECK(starts2.empty());
+  bool shape = false;
+  const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+  CHECK(shape && lines == StdLines());
+  const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+  CHECK(s.usable && s.notes.empty());
+  CheckSlots(s, {});
+}
+
+// Nothing escapes MakeMissing (RunMake's own check). A throwing free_bytes stops the call: seven "not attempted" notes
+// and the thrown text; a throwing on_start does not stop it. Load afterwards is as it would have been.
+static void TestNothingEscapes() {
+  std::printf("-- TestNothingEscapes\n");
+  FakeGuest g = PlantedGuest();
+  {
+    // free_bytes throws: the call stops there. Every slot not decided by then is "not attempted" (in the table's order),
+    // and one note carries the thrown text.
+    World w;
+    RemoveAllFiles(w);
+    Gen gen;
+    MakeOptions o = Opt(gen);
+    o.free_bytes = [](const fs::path&) -> uint64_t { throw std::runtime_error("space boom"); };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestNothingEscapes (free_bytes)", r);
+    std::vector<std::string> want;
+    for (size_t i = 0; i < kSlotCount; ++i) want.push_back(SlotName(i) + ": not attempted: the call stopped first");
+    want.push_back("stopped: space boom");
+    CHECK(r.good == 0 && r.made == 0 && r.not_made == 7);
+    CHECK(r.notes == want);
+    CHECK(gen.Total() == 0);
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable && s.slots.size() == kSlotCount);
+  }
+  {
+    // The same stop with five slots good on disk and two missing: the five stay good, and only the two undecided
+    // slots are "not attempted", in the table's order. Excludes: a stop that forgets what was already decided (seven
+    // not made, or good 0), a note for a good slot, and the two notes in another order.
+    World w;
+    RemoveFiles(w, {1, 5});
+    Gen gen;
+    MakeOptions o = Opt(gen);
+    o.free_bytes = [](const fs::path&) -> uint64_t { throw std::runtime_error("space boom"); };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestNothingEscapes (free_bytes, five good)", r);
+    const std::vector<std::string> want = {SlotName(1) + ": not attempted: the call stopped first",
+                                           SlotName(5) + ": not attempted: the call stopped first", "stopped: space boom"};
+    CHECK(r.good == 5 && r.made == 0 && r.not_made == 2);
+    CHECK(r.notes == want);
+    CHECK(gen.Total() == 0);
+    CHECK(GoodFiles(w) == 5 && !fs::exists(w.File(1)) && !fs::exists(w.File(5)));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable);
+    CheckSlots(s, {1, 5});
+  }
+  {
+    // on_start is a notification: what it throws becomes one note and the making goes on.
+    World w;
+    RemoveAllFiles(w);
+    Gen gen;
+    MakeOptions o = Opt(gen);
+    o.on_start = [](size_t) { throw std::runtime_error("start boom"); };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestNothingEscapes (on_start)", r);
+    CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);
+    CHECK(r.notes == std::vector<std::string>{"on_start: start boom"});
+    CHECK(GoodFiles(w) == 7);
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable && s.slots.size() == kSlotCount && s.notes.empty());
+  }
+  {
+    World w;
+    RemoveAllFiles(w);
+    Gen gen;
+    MakeOptions o = Opt(gen);
+    o.on_start = [](size_t) { throw 7; };  // not a std::exception: no text to carry
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestNothingEscapes (on_start, an int)", r);
+    CHECK(r.good == 0 && r.made == 7 && r.not_made == 0);
+    CHECK(r.notes.size() == 1 && StartsWith(RNote(r, 0), "on_start: "));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable && s.slots.size() == kSlotCount && s.notes.empty());
+  }
+}
+
+// R1: the manifest that is there cannot be read at the moment it is to be replaced (another program holds it): it is
+// not replaced. Excluded wrong version: a manifest written from "no lines", which drops the line of a good file kept
+// under another name. The hold is taken inside the generator, so the first read of the call still worked. First with
+// no sharing at all, then with delete sharing only. Measured on Windows 11: either hold also refuses the replacement
+// itself, so here the unchanged-bytes checks hold for the wrong version too; what separates the two is the note (the
+// wrong version tries the write and reports the system's refusal). The wrong version loses lines only when the hold
+// ends between its read and its rename, which no fixture here can place.
+static void TestManifestRereadFails() {
+  std::printf("-- TestManifestRereadFails\n");
+  FakeGuest g = PlantedGuest();
+  std::vector<std::string> start = StdLines();
+  start[0] = "alpha_red custom_red.tpr";
+  const std::string start_text = ManifestOf(start, "\n");
+  const auto arrange = [&start_text](const World& w) {
+    fs::rename(w.File(0), w.colours / "custom_red.tpr");
+    RemoveFiles(w, {1, 5});
+    WriteText(w.colours / "manifest.txt", start_text);
+  };
+  for (DWORD share : {DWORD(0), DWORD(FILE_SHARE_DELETE)}) {
+    World w;
+    arrange(w);
+    HANDLE held = INVALID_HANDLE_VALUE;
+    Gen gen;
+    gen.post = [&](size_t, Made&, std::string*) {
+      if (held != INVALID_HANDLE_VALUE) return;
+      held = CreateFileW((w.colours / "manifest.txt").c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+    };
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestManifestRereadFails", r);
+    CHECK(held != INVALID_HANDLE_VALUE);  // precondition: the manifest was held when it was read again
+    Release(held);
+    CHECK(r.good == 5 && r.made == 2 && r.not_made == 0);  // the two made files still count as made
+    CHECK(r.notes == std::vector<std::string>{"manifest: cannot write: the current one cannot be read"});
+    CHECK(Text(w.colours / "manifest.txt") == start_text);
+    CHECK(Contains(Text(w.colours / "manifest.txt"), "alpha_red custom_red.tpr\n"));
+    CHECK(ReadAll(w.File(1)) == ColourBytes(1) && ReadAll(w.File(5)) == ColourBytes(5));
+    CHECK(TmpCount(w.colours) == 0);
+  }
+  {
+    // Control: the same world without the hold: a manifest of seven lines that still names custom_red.tpr.
+    World w;
+    arrange(w);
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    CHECK(r.good == 5 && r.made == 2 && r.not_made == 0 && r.notes.empty());
+    std::vector<std::string> want = StdLines();
+    want[0] = "alpha_red custom_red.tpr";
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want);
+  }
+}
+
+// R2: a slot that counts as good or made, but has no file that passes when the manifest is written, gets no line and
+// one note that says so; the counts stay. Here a slot that was good at the start loses its file while another slot is
+// being made. Control: without the loss, no such note.
+static void TestGoodSlotLosesItsFile() {
+  std::printf("-- TestGoodSlotLosesItsFile\n");
+  FakeGuest g = PlantedGuest();
+  for (bool lose : {true, false}) {
+    World w;
+    RemoveFiles(w, {4});
+    Gen gen;
+    gen.post = [&](size_t i, Made&, std::string*) {
+      if (!lose || i != 4) return;
+      std::error_code ec;
+      fs::remove(w.File(2), ec);
+    };
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestGoodSlotLosesItsFile", r);
+    std::vector<std::string> want_notes;
+    std::vector<std::string> want_lines = StdLines();
+    if (lose) {
+      want_notes.push_back("manifest: alpha_lilac not listed");
+      want_lines.erase(want_lines.begin() + 2);
+    }
+    CHECK(fs::exists(w.File(2)) == !lose);                 // precondition: the file went only in the first pass
+    CHECK(r.good == 6 && r.made == 1 && r.not_made == 0);  // the counts are as they were
+    CHECK(r.notes == want_notes);
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want_lines);
+  }
+  {
+    // The same rule for a slot MADE in this call, and two such notes in the table's order. Nothing a caller supplies
+    // runs between a slot's write and the manifest, so the loss is produced by the slot table: a table (one the game
+    // never has) in which slots 5 and 6 carry the file names of slots 3 and 4. Each of the four is made and written
+    // in the table's order, so 5's bytes replace 3's file and 6's replace 4's: when the manifest is written, 3 and 4
+    // count as made and their file no longer passes. Excludes: the note only for a slot that was good at the start
+    // (the "made" half of the condition dropped), and the two notes in another order (by name, orchid comes first).
+    World w;
+    RemoveFiles(w, {3, 4, 5, 6});
+    CHECK(fs::remove(w.colours / "manifest.txt"));  // no line for any slot: each is judged by <slot>.tpr alone
+    SlotTable table = TestSlots();
+    table[5].name = table[3].name;
+    table[6].name = table[4].name;
+    std::array<int, kSlotCount> made{};
+    Gen unused;
+    MakeOptions o = Opt(unused);
+    o.generate = [&made](std::string_view, std::span<const uint8_t> source, std::string* why) -> Made {
+      for (size_t i = 3; i < kSlotCount; ++i) {  // the four sources differ in size: the source tells the slot
+        const std::vector<uint8_t> want = StandInFor(i);
+        if (source.size() == want.size() && std::equal(source.begin(), source.end(), want.begin())) {
+          ++made[i];
+          return ColourBytes(i);
+        }
+      }
+      if (why) *why = "not a source of this test";
+      return std::nullopt;
+    };
+    const MakeReport r = RunMake(w, g, o, table);
+    PrintMake("TestGoodSlotLosesItsFile (made slots)", r);
+    CHECK((made == std::array<int, kSlotCount>{0, 0, 0, 1, 1, 1, 1}));  // precondition: each of the four was made once
+    // precondition: the shared files hold the later slots' bytes, which the earlier slots' checks refuse
+    CHECK(ReadAll(w.File(3)) == ColourBytes(5) && ReadAll(w.File(4)) == ColourBytes(6));
+    CHECK(ColourBytes(5).size() != ColourBytes(3).size() && ColourBytes(6).size() != ColourBytes(4).size());
+    CHECK(r.good == 3 && r.made == 4 && r.not_made == 0);  // the counts are as they were when each was written
+    const std::vector<std::string> want_notes = {"manifest: " + SlotName(3) + " not listed",
+                                                 "manifest: " + SlotName(4) + " not listed"};
+    CHECK(r.notes == want_notes);
+    CHECK(SlotName(4) < SlotName(3));  // precondition: the table's order is not the names' order
+    const std::vector<std::string> want_lines = {SlotName(0) + " " + SlotName(0) + ".tpr", SlotName(1) + " " + SlotName(1) + ".tpr",
+                                                 SlotName(2) + " " + SlotName(2) + ".tpr", SlotName(3) + " " + SlotName(3) + ".tpr",
+                                                 SlotName(4) + " " + SlotName(4) + ".tpr"};
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want_lines);  // the two shared names are listed once each, for slots 5 and 6
+  }
+}
+
+// R3: a slot whose usable line names a failing file is still good when <slot>.tpr passes: only the manifest is owed.
+// One line names a file with other bytes, one a file that is not there. With no free space at all the result is the
+// same: nothing is made, so nothing needs space.
+static void TestLineNamesFailingFileButDefaultIsGood() {
+  std::printf("-- TestLineNamesFailingFileButDefaultIsGood\n");
+  FakeGuest g = PlantedGuest();
+  for (bool no_space : {false, true}) {
+    World w;
+    std::vector<uint8_t> bad = ColourBytes(1);
+    bad[3] ^= 0x11;
+    Write(w.colours / "bad.tpr", bad);
+    std::vector<std::string> start = StdLines();
+    start[1] = "alpha_blue bad.tpr";
+    start[5] = "spartan_h2_orange gone.tpr";
+    WriteText(w.colours / "manifest.txt", ManifestOf(start, "\n"));
+    const std::map<std::string, FileState> before = Snapshot(w.colours);
+    Gen gen;
+    std::vector<size_t> starts;
+    MakeOptions o = Opt(gen, &starts);
+    if (no_space) o.free_bytes = [](const fs::path&) { return uint64_t(0); };
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestLineNamesFailingFileButDefaultIsGood", r);
+    const std::map<std::string, FileState> after = Snapshot(w.colours);
+    CHECK(r.good == 7 && r.made == 0 && r.not_made == 0);
+    CHECK(r.notes.empty());
+    CHECK(gen.Total() == 0);
+    CHECK(starts.empty());
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == StdLines());  // both lines now name <slot>.tpr
+    size_t kept = 0;
+    for (size_t i = 0; i < kSlotCount; ++i) kept += Kept(before, after, SlotName(i) + ".tpr") ? 1 : 0;
+    CHECK(kept == kSlotCount);  // no file was written again
+  }
+}
+
+// The temporary file's name carries the call's temp_tag: a DIRECTORY planted at exactly that name stops that slot's
+// write (and stays, with its file); a call with another tag makes the slot. Excluded wrong version: a temporary name
+// that ignores temp_tag.
+static void TestTempTagNamesTheTemporary() {
+  std::printf("-- TestTempTagNamesTheTemporary\n");
+  World w;
+  FakeGuest g = PlantedGuest();
+  RemoveFiles(w, {1, 4});
+  const fs::path planted = w.colours / "alpha_blue.tpr.31-7.tmp";
+  const std::vector<uint8_t> junk = Content(5, 30);
+  fs::create_directories(planted);
+  Write(planted / "keep.bin", junk);
+  CHECK(fs::is_directory(planted) && ReadAll(planted / "keep.bin") == junk);
+  Gen gen;
+  MakeOptions o = Opt(gen);
+  o.temp_tag = "31-7";
+  const MakeReport r = RunMake(w, g, o);
+  PrintMake("TestTempTagNamesTheTemporary", r);
+  CHECK(r.good == 5 && r.made == 1 && r.not_made == 1);
+  CHECK(r.notes.size() == 1 && StartsWith(Cause(r, 1), "cannot write: "));
+  CHECK(gen.Calls(1) == 1);  // it was made: only its temporary could not be written
+  CHECK(!fs::exists(w.File(1)));
+  CHECK(fs::is_directory(planted) && ReadAll(planted / "keep.bin") == junk);
+  CHECK(ReadAll(w.File(4)) == ColourBytes(4));
+  Gen gen2;
+  MakeOptions o2 = Opt(gen2);
+  o2.temp_tag = "31-8";
+  const MakeReport r2 = RunMake(w, g, o2);
+  PrintMake("TestTempTagNamesTheTemporary (another tag)", r2);
+  CHECK(r2.good == 6 && r2.made == 1 && r2.not_made == 0 && r2.notes.empty());
+  CHECK(ReadAll(w.File(1)) == ColourBytes(1));
+  CHECK(fs::is_directory(planted) && ReadAll(planted / "keep.bin") == junk);
+}
+
+// Two makers (two processes at one lobby start) on one folder, each with its own temp_tag. Both are held inside their
+// generators until each has entered all seven (so both saw the folder empty and both write every file); the wait gives
+// up after 10 s, which fails a check.
+static void TestTwoMakersOneFolder() {
+  std::printf("-- TestTwoMakersOneFolder\n");
+  World w;
+  FakeGuest guests[2] = {PlantedGuest(), PlantedGuest()};
+  RemoveAllFiles(w);
+  CHECK(fs::remove(w.colours / "manifest.txt"));
+  struct Barrier {
+    std::mutex m;
+    std::condition_variable cv;
+    int entered[2] = {0, 0};
+    bool expired = false;
+  } b;
+  Gen gens[2];
+  MakeOptions opts[2];
+  for (int m = 0; m < 2; ++m) {
+    gens[m].post = [&b, m](size_t, Made&, std::string*) {
+      std::unique_lock<std::mutex> lock(b.m);
+      ++b.entered[m];
+      b.cv.notify_all();
+      const bool met = b.cv.wait_for(lock, std::chrono::seconds(10), [&b] {
+        return (b.entered[0] >= int(kSlotCount) && b.entered[1] >= int(kSlotCount)) || b.expired;
+      });
+      if (!met) {
+        b.expired = true;
+        b.cv.notify_all();
+      }
+    };
+    opts[m] = Opt(gens[m]);
+    opts[m].threads = unsigned(kSlotCount);
+    opts[m].temp_tag = m ? "22-2" : "11-1";
+  }
+  const SlotTable& slots = TestSlots();
+  const Defs& defs = TestDefs();
+  MakeReport reports[2];
+  bool escaped[2] = {false, false};
+  auto run = [&](int m) {
+    try {
+      reports[m] = MakeMissing(slots, defs, w.colours, w.game, guests[m].guest, opts[m]);
+    } catch (...) {
+      escaped[m] = true;
+    }
+  };
+  std::thread other(run, 1);
+  run(0);
+  other.join();
+  PrintMake("TestTwoMakersOneFolder (0)", reports[0]);
+  PrintMake("TestTwoMakersOneFolder (1)", reports[1]);
+  CHECK(!escaped[0] && !escaped[1]);
+  CHECK(!b.expired);
+  CHECK(b.entered[0] == int(kSlotCount) && b.entered[1] == int(kSlotCount));
+  // Per maker, the designed outcome of two copies writing one folder (the design's degrade row "cannot write: ...
+  // file held by another running copy: stand-in this run; made at a later start; one log line"): every slot is
+  // good, made or not made; a slot may be not made ONLY because its write was refused while the other maker held
+  // the file, and then exactly one note says so, "<slot>: cannot write: <the system's text>". The manifest notes
+  // are allowed too (any note that starts with "manifest: "): two makers meet at the manifest as well, and by design
+  // one of them may find it unreadable for a moment (kManifestUnreadableNote), have its write refused, or leave a
+  // slot unlisted. Every other note fails: another cause for a slot (nothing here is short of space or of a
+  // source), a second note for one slot, a note of neither form. "No slot not made" is not asserted: it holds only
+  // by timing (a refused rename whose re-check is refused too is rare, and designed).
+  for (int m = 0; m < 2; ++m) {
+    CHECK(gens[m].Total() == int(kSlotCount));
+    CHECK(reports[m].good + reports[m].made + reports[m].not_made == kSlotCount);
+    size_t refused_writes = 0, manifest_notes = 0, other_notes = 0;
+    for (const std::string& note : reports[m].notes) {
+      bool refused_write = false;
+      for (size_t i = 0; i < kSlotCount; ++i) {
+        const std::string start = SlotName(i) + ": cannot write: ";
+        refused_write = refused_write || (StartsWith(note, start) && note.size() > start.size());
+      }
+      (refused_write ? refused_writes : StartsWith(note, "manifest: ") ? manifest_notes : other_notes) += 1;
+    }
+    // Excludes: a slot under contention reported with another cause ("no space", ...), and a note of neither form.
+    CHECK(other_notes == 0);
+    CHECK(refused_writes == reports[m].not_made);  // one such note per slot not made; excludes a second for one slot
+    (void)manifest_notes;  // allowed in any number: counted only to say what the third class is not
+    CHECK(SlotNotes(reports[m]) == reports[m].not_made);  // RunMake's check, for these calls made outside it
+  }
+  // The folder's outcome is strict whatever each maker reported: seven good files, no temporary, the standard lines.
+  CHECK(GoodFiles(w) == 7);
+  CHECK(TmpCount(w.colours) == 0);
+  bool shape = false;
+  const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+  CHECK(shape && lines == StdLines());
+}
+
+// M6: four workers give the files, counts and notes of one. Slot 3's source differs; the generator refuses slots 0 and
+// 2; the space is enough for slots 0 to 4 (so 1 and 4 are made, 5 and 6 are not). The generator sleeps (7 - i) x 20 ms
+// for slot i, so with four workers slot 2's refusal is known before slot 0's: notes kept in the order they arise would
+// differ from one worker's. (The sleeps only order the finishes; no time is compared with a bound.)
+static void TestThreadsSameResult() {
+  std::printf("-- TestThreadsSameResult\n");
+  struct Result {
+    MakeReport r;
+    std::map<std::string, std::vector<uint8_t>> files;
+    std::vector<size_t> order;
+  };
+  auto run = [](unsigned threads) {
+    World w;
+    FakeGuest g = PlantedGuest();
+    RemoveAllFiles(w);
+    std::vector<uint8_t> other = StandInBytes(34);
+    other[5] ^= 0x33;
+    WriteChrthree(w, 48, {{34, other}});
+    Gen gen;
+    std::mutex m;
+    std::vector<size_t> order;
+    gen.post = [&](size_t i, Made& result, std::string* why) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20 * (7 - int(i))));
+      if (i == 0 || i == 2) {
+        result.reset();
+        if (why) *why = "refused " + std::to_string(i);
+      }
+      std::lock_guard<std::mutex> lock(m);
+      order.push_back(i);
+    };
+    MakeOptions o = Opt(gen);
+    o.threads = threads;
+    o.temp_tag = "5-5";
+    uint64_t room = 65536;
+    for (size_t i = 0; i <= 4; ++i) room += TestSlots()[i].size;
+    o.free_bytes = [room](const fs::path&) { return room; };
+    Result out;
+    out.r = RunMake(w, g, o);
+    PrintMake("TestThreadsSameResult", out.r);
+    for (const auto& [name, state] : Snapshot(w.colours)) out.files[name] = state.bytes;
+    out.order = order;
+    return out;
+  };
+  const Result one = run(1);
+  const Result four = run(4);
+  const std::vector<size_t> table_order = {0, 1, 2, 4};
+  const std::vector<std::string> want_notes = {"alpha_red: generator: refused 0", "alpha_lilac: generator: refused 2",
+                                               "spartan_h3_pink: source differs", "spartan_h2_orange: no space",
+                                               "spartan_h2_cyan: no space"};
+  CHECK(one.order == table_order);                              // one worker: the generator ran in table order
+  // Precondition: on four workers the generator of slot 2 finished before the generator of slot 0 (the two refusing
+  // slots), so notes kept in the order they arise would name slot 2 first.
+  const auto finished_at = [&four](size_t slot) {
+    return size_t(std::find(four.order.begin(), four.order.end(), slot) - four.order.begin());
+  };
+  CHECK(four.order.size() == 4 && finished_at(2) < finished_at(0) && finished_at(0) < four.order.size());
+  CHECK(one.r.good == 0 && one.r.made == 2 && one.r.not_made == 5);
+  CHECK(one.r.notes == want_notes);
+  CHECK(four.r.notes == want_notes);  // table order, whatever finished first
+  CHECK(four.r.good == one.r.good && four.r.made == one.r.made && four.r.not_made == one.r.not_made);
+  CHECK(one.files.size() == 3 && one.files.count("alpha_blue.tpr") == 1 && one.files.count("spartan_h3_orchid.tpr") == 1);
+  CHECK(four.files == one.files);
+}
+
+static void TestManifestKeepsGoodNames() {
+  std::printf("-- TestManifestKeepsGoodNames\n");
+  FakeGuest g = PlantedGuest();
+  {
+    // A good file under another name keeps its line; a line naming a missing file gets <slot>.tpr once that is made.
+    World w;
+    fs::rename(w.File(0), w.colours / "custom_red.tpr");
+    RemoveFiles(w, {1, 5});
+    std::vector<std::string> start = StdLines();
+    start[0] = "alpha_red custom_red.tpr";
+    start[5] = "spartan_h2_orange gone.tpr";
+    WriteText(w.colours / "manifest.txt", ManifestOf(start, "\n"));
+    Gen gen;
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestManifestKeepsGoodNames", r);
+    CHECK(r.good == 5 && r.made == 2 && r.not_made == 0);
+    CHECK(r.notes.empty());
+    CHECK(gen.Calls(0) == 0 && gen.Calls(1) == 1 && gen.Calls(5) == 1 && gen.Total() == 2);
+    std::vector<std::string> want = StdLines();
+    want[0] = "alpha_red custom_red.tpr";
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want);
+    CHECK(!fs::exists(w.File(0)));  // red was not made again under its own name
+    CHECK(ReadAll(w.File(5)) == ColourBytes(5));
+    const Status s = Load(TestSlots(), w.colours, w.game, g.guest);
+    CHECK(s.usable && s.notes.empty());
+    CheckSlots(s, {});
+  }
+  {
+    // A line another process wrote for a good file while this call was making its files is kept: the manifest is read
+    // again just before it is replaced.
+    World w;
+    RemoveFiles(w, {1, 4});
+    Gen gen;
+    gen.post = [&](size_t i, Made&, std::string*) {
+      if (i != 4) return;
+      Write(w.colours / "custom_blue.tpr", ColourBytes(1));
+      std::vector<std::string> theirs = StdLines();
+      theirs[1] = "alpha_blue custom_blue.tpr";
+      WriteText(w.colours / "manifest.txt", ManifestOf(theirs, "\n"));
+    };
+    const MakeOptions o = Opt(gen);
+    const MakeReport r = RunMake(w, g, o);
+    PrintMake("TestManifestKeepsGoodNames (another process)", r);
+    CHECK(r.good == 5 && r.made == 2 && r.not_made == 0);
+    std::vector<std::string> want = StdLines();
+    want[1] = "alpha_blue custom_blue.tpr";
+    bool shape = false;
+    const std::vector<std::string> lines = ManifestBody(w.colours, &shape);
+    CHECK(shape && lines == want);
+  }
+}
+
+static void TestMakeTempTag() {
+  std::printf("-- TestMakeTempTag\n");
+  const std::string a = MakeTempTag();
+  const std::string b = MakeTempTag();
+  auto plain = [](const std::string& tag) {
+    if (tag.empty()) return false;
+    for (char c : tag) {
+      if (!((c >= '0' && c <= '9') || c == '-')) return false;
+    }
+    return true;
+  };
+  CHECK(plain(a) && plain(b));
+  CHECK(a != b);
+  CHECK(StartsWith(a, std::to_string(GetCurrentProcessId()) + "-") && a.size() > std::to_string(GetCurrentProcessId()).size() + 1);
+}
+
 static std::optional<fs::path> EnvPath(const wchar_t* name) {
   wchar_t buf[4096];
   const DWORD len = GetEnvironmentVariableW(name, buf, DWORD(std::size(buf)));
@@ -1143,7 +2806,6 @@ int main() {
   std::string why;
   const std::optional<doa4_test::CostumeImage> image = doa4_test::LoadCostumeImage(&why);
 
-  TestEnabledTable();
   TestSlotTableValues();
   TestAlphaRows();
   TestSummaryOff();
@@ -1164,10 +2826,48 @@ int main() {
   TestAppendedModels();
   TestNotesPrintable();
   TestColourFolder();
+  TestStandInWrongSizeNotUsable();
+  TestKindOf();
+  TestShouldMake();
+  TestRowsOn();
+  TestVanillaLeavesRowsOut();
+  TestMustRefuse();
+  TestFreeBytesFrom();
+  TestIsPassingNote();
+  TestRefusalMessage();
+  TestRefusalNamesLoadsCause();
+  TestMakeDefsCoverSlots();
+  TestAllGoodTouchesNothing();
+  TestMakesAllFromEmpty();
+  TestMakesOnlyMissing();
+  TestWrongFileRemade();
+  TestCrashLeftoverIgnored();
+  TestFileWithoutLineAdopted();
+  TestSourceWrongHash();
+  TestSourceWrongSize();
+  TestSourceMissing();
+  TestMadeFileFailsHashNotWritten();
+  TestGeneratorRefuses();
+  TestGeneratorThrows();
+  TestNoSpace();
+  TestFolderIsAFile();
+  TestTargetHeldOpen();
+  TestRenameOntoHeldGoodFile();
+  TestManifestWriteFails();
+  TestNothingEscapes();
+  TestManifestRereadFails();
+  TestGoodSlotLosesItsFile();
+  TestLineNamesFailingFileButDefaultIsGood();
+  TestTempTagNamesTheTemporary();
+  TestTwoMakersOneFolder();
+  TestThreadsSameResult();
+  TestManifestKeepsGoodNames();
+  TestMakeTempTag();
 
   if (image) {
     g_image = &*image;
     TestSlotTableOnImage();
+    TestSourcesOnImage();
     TestNotInstalledNoRecords();
     TestAppendedModelsOnImage();
   } else if (doa4_test::ReportNoImage("slot table on the image", why)) {

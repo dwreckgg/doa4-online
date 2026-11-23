@@ -1,6 +1,7 @@
 // The colour-costume slots. See doa4_colour_costumes.h.
 
 #include "doa4_colour_costumes.h"
+#include "doa4_colour_costumes_internal.h"
 
 #include <algorithm>
 #include <fstream>
@@ -26,21 +27,10 @@ constexpr SlotTable kSlots = {
     SlotDef{Slot::kSpartanH2Cyan, "spartan_h2_cyan", 18, -1, 1293, 448, 447, 18741248, "9dde70ca7fc656da0e4026e6c2b0d9d9cc7c5c50"},
 };
 
-// One entry of an open archive as a byte source (the stand-in): reads [offset, offset + size) of the archive.
-class EntrySource final : public afs::Source {
- public:
-  EntrySource(std::shared_ptr<const afs::Source> archive, uint64_t offset, uint64_t size)
-      : archive_(std::move(archive)), offset_(offset), size_(size) {}
-  uint64_t size() const override { return size_; }
-  bool Read(uint64_t offset, void* dst, size_t n) const override {
-    if (offset > size_ || n > size_ - offset) return false;
-    return archive_->Read(offset_ + offset, dst, n);
-  }
+}  // namespace
 
- private:
-  std::shared_ptr<const afs::Source> archive_;
-  uint64_t offset_, size_;
-};
+// Declared in doa4_colour_costumes_internal.h (EntrySource is defined there): ReadSmallFile, HashSource, Printable,
+// ParseManifest, OpenChecked.
 
 bool ReadSmallFile(const std::filesystem::path& path, uint64_t limit, std::string* out) {
   std::error_code ec;
@@ -64,6 +54,8 @@ std::string HashSource(const afs::Source& source) {
   return sha.HexDigest();
 }
 
+namespace {
+
 std::vector<std::string> Words(std::string_view line) {
   std::vector<std::string> words;
   size_t i = 0;
@@ -81,6 +73,8 @@ std::vector<std::string> Words(std::string_view line) {
 bool PlainFileName(const std::string& file) {
   return suits::SafeFileName(file) && file.find("..") == std::string::npos;
 }
+
+}  // namespace
 
 // Text for a note: bytes outside printable ASCII as \xNN, so a log line never carries them raw. Every note that holds
 // text from outside the program (a manifest line, a word of it, a file name, the folder's path) holds it through this.
@@ -102,10 +96,6 @@ std::string Printable(const std::string& text) {
 
 // The manifest's file name per slot index (empty: no usable line); notes for the lines it ignores and the names it
 // refuses. `refused[i]`: the slot's line named a path.
-struct Parsed {
-  std::vector<std::string> file;
-  std::vector<bool> refused;
-};
 Parsed ParseManifest(const SlotTable& slots, std::string text, std::vector<std::string>* notes) {
   Parsed p{std::vector<std::string>(kSlotCount), std::vector<bool>(kSlotCount, false)};
   if (text.size() >= 3 && uint8_t(text[0]) == 0xEF && uint8_t(text[1]) == 0xBB && uint8_t(text[2]) == 0xBF) text.erase(0, 3);
@@ -171,11 +161,7 @@ std::shared_ptr<const afs::Source> OpenChecked(const std::filesystem::path& fold
   return source;
 }
 
-}  // namespace
-
 const SlotTable& Slots() { return kSlots; }
-
-bool Enabled(bool session, std::string_view np_mode) { return !session && (np_mode.empty() || np_mode == "record"); }
 
 std::filesystem::path ColourFolder(const std::filesystem::path& user_data, std::string_view override_utf8) {
   std::filesystem::path folder = user_data / "colour_costumes";
@@ -283,6 +269,9 @@ Status Load(const SlotTable& slots, const std::filesystem::path& folder, const s
       } else if (loc->entry >= a.toc->count) {
         why = std::string(loc->archive) + " has " + std::to_string(a.toc->count) + " entries, no entry " +
               std::to_string(loc->entry);
+      } else if (a.toc->sizes[loc->entry] != d.size) {
+        // A stand-in of another size than the slot's file is not usable (ruling G13).
+        why = "its stand-in is " + std::to_string(a.toc->sizes[loc->entry]) + " bytes, not " + std::to_string(d.size);
       } else {
         l.tpr = std::make_shared<EntrySource>(a.source, a.toc->offsets[loc->entry], a.toc->sizes[loc->entry]);
       }

@@ -39,7 +39,13 @@ void NetOverlay::OnDraw(ImGuiIO& io) {
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 24.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.85f);
     if (ImGui::Begin("##doa4_net_banner", nullptr, flags)) {
+      // A long banner (the reason of an end this PC made itself) wraps at 90 % of the display's width, so every
+      // line of it is on the screen; a banner narrower than that stays one line in a window as wide as its text, as
+      // before. The wrap position is window-local and set from the display, not from the window's size, so the
+      // auto-resize has nothing to chase: the window fits the wrapped text.
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + io.DisplaySize.x * 0.9f);
       ImGui::TextUnformatted(content.banner.c_str());
+      ImGui::PopTextWrapPos();
     }
     ImGui::End();
   }
