@@ -41,6 +41,7 @@
 
 #include "../doa4_guest.h"
 #include "../doa4_photo.h"
+#include "../doa4_suits_bust.h"
 #include "np_handoff.h"
 #include "np_live.h"
 #include "np_wire.h"
@@ -131,9 +132,11 @@ bool Replaying();
 // guest text (meta guest=, ';'-joined, "(none)" for none) in a replay, nothing otherwise; nothing too for a name the
 // text lacks (a recording made before the name was carried). Fixed once Start has run, before any guest code.
 std::optional<std::string> SessionGuestValue(std::string_view name);
-// The hand-off's doa4_suits_full_bust in a session ("true" reads true), nothing outside one (a replay included). Fixed
-// when the session starts.
-std::optional<bool> SessionFullBust();
+// The session's "Age:" box and age (Part B, ruling A35): in an online session the hand-off's doa4_bust_age and
+// doa4_bust_age_on, in a replay the recording's (D5: a replay runs the recording's values, not this PC's), through
+// doa4::suits::bust::SettingFromText (a missing line, as in a 0.3.7 recording, is the box off at 18; a malformed value
+// too, logged once per call). Nothing offline. Never the local cvars. The hook reads it once and latches it.
+std::optional<doa4::suits::bust::AgeSetting> SessionBust();
 // True in an online session whose hand-off says mixed. Costume code acts on it; nothing else does.
 bool SessionSuitsMixed();
 // An online session whose swimsuit state is mixed: the hand-off's suit_holders (bit 0 the host = player 0, bit 1 the joiner =
@@ -143,12 +146,26 @@ std::optional<uint8_t> SessionMixedSuitHolders();
 bool BannerWaiting();                 // a hold has lasted >= 1 s and is still on (any thread; the overlay's banner)
 int32_t SessionFrame();               // the last frame hook's frame (-1 before the first)
 live::FrameResult LastResult();
+// The reason of an end np::Abort made on this PC (the session was ended here, with a reason written to be shown: this
+// PC cannot build the costume tables, its port did not open); "" for every other end, an internal one included, and
+// while the session runs. The banner shows it; nothing sends it to the other PC.
+std::string AbortReason();
 // Review I2: the other player's game answered as a lobby (the refused-session end); read by the banner.
 bool SessionRefused();
 void RequestLeave();                  // UI: this side leaves at the next frame
 void PeerLeft(int32_t frame, wire::LeaveReason reason);  // the session lobby's on_peer_left (I/O thread)
 // Ends a session that cannot run (before or at its first frame): the terminal lines and the offline relaunch.
 void Abort(const std::string& reason);
+// This process must not run its match (the app's start-up found it cannot build the costume tables the other PC builds:
+// SetUpSuits, after Start). Online: Abort(reason). A record or replay run: the session is switched off as a refused
+// replay's is (its mode off; the recording closed, holding its header and meta and no frame; the three hash files
+// digest.d4d, sweep.d4s and counters.d4k closed and removed, a failed remove being one log line; the determinism layer
+// stopped, the hooks passing through), np_log.txt gets "refused: <reason>", and the host is asked to quit. Any other process (a plain offline game, DOA4_NP set to anything else included): nothing.
+void RefuseRun(const std::string& reason);
+// The frame hook's thread: alpha_colours::ThreadNumber() of the thread that last ran the frame hook of a netplay
+// process (OnFrame stores it at its top, every frame), 0 while none has run: always 0 in a plain offline game, whose
+// frame hook never reaches OnFrame. Read by the hook thread check (doa4_alpha_colours.h).
+uint64_t FrameHookThread();
 struct NetTiming {
   int32_t frame = -1;
   int delay = 0;

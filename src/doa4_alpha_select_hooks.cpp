@@ -24,7 +24,8 @@
 // Guest state RunPass writes itself, all of it put back before it returns (so before the frame goes on, and long before
 // the next frame's state hash): the gate (renderer + 1312), the renderer's viewport (24 bytes) and through
 // sub_82758800 the device's, the camera's projection and view-projection (64 bytes each) and through sub_8276A6F0 the
-// matrix store's projection, the device's scissor enable and rectangle and through sub_82758738 its window scissor.
+// matrix store's projection, the device's scissor enable and rectangle and through sub_82758738 its window scissor,
+// and, with the colour slots installed, her RefractColor and outline words (doa4_alpha_colours.h, BeginFighterDraw).
 // The first time the pass runs for a view (player 1's panel, player 2's panel), one log line says whether a snapshot of
 // those fields taken before equals one taken after. What the game's own functions leave behind as they do in a match is
 // not put back and needs no putting back: the pass's resources (made once), the zoom box the pass works out anew every
@@ -54,7 +55,9 @@
 #include <rex/memory.h>
 #include <rex/ppc/context.h>
 
+#include "doa4_alpha_colours.h"
 #include "doa4_alpha_select.h"
+#include "doa4_guest.h"
 #include "doa4_tweaks.h"
 #include "net/np_session.h"
 
@@ -81,6 +84,9 @@ namespace as = doa4::alpha_select;
 std::atomic<bool> g_enabled{false};
 std::atomic<int32_t> g_screen_w{0}, g_screen_h{0};  // the frame's opening viewport (sub_824F4E90)
 std::atomic<bool> g_said_first[as::kPanels] = {};  // by view: the "put back" line was written for that panel
+// RunPass writes her two colour words as the body hook does (a third writer, since the colour slots are installed in
+// sessions too): its marks for the hook thread check (doa4_alpha_colours.h), under the name "select pass".
+doa4::alpha_colours::HookSite g_select_site;
 std::atomic<bool> g_said_stand_down{false};
 thread_local bool t_in_pass = false;  // RunPass is between its first and its last guest call on this thread
 
@@ -206,6 +212,7 @@ std::string Differences(const Fields& a, const Fields& b) {
 
 // Her pass for one select panel. The caller has checked everything Decide checks (so call.view is below kPanels).
 void RunPass(PPCContext& ctx, uint8_t* base, const as::Call& call) {
+  doa4::alpha_colours::CheckHookThread("select pass", g_select_site);  // at every call: this pass's thread against the frame hook's
   const uint32_t device = call.device;
   const bool first = !g_said_first[call.view].exchange(true, std::memory_order_relaxed);
   Fields before;
@@ -240,7 +247,13 @@ void RunPass(PPCContext& ctx, uint8_t* base, const as::Call& call) {
   SetViewport(ctx, base, device);
   SetProjection(ctx, base);
 
-  // sub_8245D538's three steps (its two tests, the gate and a shown character 16, hold here).
+  // sub_8245D538's three steps (its two tests, the gate and a shown character 16, hold here). Her colour row for the
+  // previewed costume goes in around them (doa4_alpha_colours.h; the hook on sub_8245C270 does not see this __imp__ call),
+  // the panel's player being the view; nothing is written without the colour slots installed or for a model with no row.
+  const doa4::GuestBytes guest{[base](uint32_t address) { return base[address]; },
+                               [base](uint32_t address, uint8_t value) { base[address] = value; }};
+  const doa4::alpha_colours::Saved colour = doa4::alpha_colours::BeginFighterDraw(guest, call.view);
+  if (doa4::alpha_colours::Installed()) doa4::alpha_colours::NoteFighterRow(call.view, colour);
   t_in_pass = true;
   ctx.r3.u64 = call.view;
   __imp__sub_8245C8D0(ctx, base);
@@ -251,6 +264,7 @@ void RunPass(PPCContext& ctx, uint8_t* base, const as::Call& call) {
   SetScissor(ctx, base, device, 1, panel.data());  // her body and the composite are cut at the panel's edge
   ctx.r3.u64 = call.view;
   __imp__sub_8245C270(ctx, base);
+  doa4::alpha_colours::EndFighterDraw(guest, colour);
 
   // Everything back: scissor, viewport, the camera's matrices and the store's projection, the gate.
   SetScissor(ctx, base, device, scissor_on, scissor_rect);

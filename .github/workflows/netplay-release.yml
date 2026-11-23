@@ -99,7 +99,7 @@ jobs:
           findstr /b /l /c:"pgo: use " "%RUNNER_TEMP%\pgo_check.txt" >nul && set "PGO_USE_LINE=1"
           if defined PGO_USE_LINE if not defined PGO_USE echo pgo: use line read but no flag set
           if defined PGO_USE_LINE if not defined PGO_USE exit /b 1
-          cmake --preset win-amd64-release -DREXSDK_DIR=%GITHUB_WORKSPACE:\=/%/rexglue-sdk "-DCMAKE_C_FLAGS=-march=x86-64-v3%PGO_USE%" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3%PGO_USE%" -DDOA4_RELEASE_TAG=${{ steps.version.outputs.tag }} -DDOA4_RELEASE_REPO=${{ github.repository }} -DDOA4_RELEASE_CHANNEL=alpha
+          cmake --preset win-amd64-release -DREXSDK_DIR=%GITHUB_WORKSPACE:\=/%/rexglue-sdk "-DCMAKE_C_FLAGS=-march=x86-64-v2%PGO_USE%" "-DCMAKE_CXX_FLAGS=-march=x86-64-v2%PGO_USE%" -DDOA4_RELEASE_TAG=${{ steps.version.outputs.tag }} -DDOA4_RELEASE_REPO=${{ github.repository }} -DDOA4_RELEASE_CHANNEL=alpha
           if errorlevel 1 exit /b 1
           cmake --build --preset win-amd64-release -- -j 2
           if errorlevel 1 exit /b 1

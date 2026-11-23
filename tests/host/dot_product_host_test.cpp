@@ -14,7 +14,7 @@
 // This file includes <rex/ppc.h>, the same umbrella header, and calls simde_mm_dp_ps in the exact
 // shape of sdk src/codegen/builders/vector.cpp (build_vmsum3fp128 / build_vmsum4fp128).
 //
-// Built by run_dot_product_test.bat with the game's CPU level (-march=x86-64-v3 -msse4.1: simde's
+// Built by run_dot_product_test.bat with the game's CPU level (-march=x86-64-v2 -msse4.1: simde's
 // native SSE4.1 path, where simde_mm_dp_ps is a macro for _mm_dp_ps).
 
 #include <rex/ppc.h>
@@ -32,7 +32,7 @@
 #include "../../src/net/np_selftest.h"
 
 #if !defined(SIMDE_X86_SSE4_1_NATIVE)
-#error "build with -march=x86-64-v3 -msse4.1 like the game: this test checks simde's native path"
+#error "build with -march=x86-64-v2 -msse4.1 like the game: this test checks simde's native path"
 #endif
 
 namespace {

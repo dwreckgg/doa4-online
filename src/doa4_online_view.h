@@ -95,7 +95,12 @@ enum class Ending : uint8_t { kNone, kLeft, kPeerLeft, kPeerQuit, kPeerNotStarte
 // else -> kPeerLeft.
 Ending PeerLeftEnding(int reason, int32_t frame, bool refused);
 // "" = no banner. An ending wins over a hold; a hold (waiting) is "Waiting for the other player...".
-std::string BannerText(bool waiting, Ending ending);
+// `reason`: why THIS PC ended the session itself, when np::Abort ended it (np::AbortReason; the app passes nothing for
+// any other internal end, whose text is written for the log). Read for Ending::kInternal only, where a non-empty
+// reason gives "The session ended: <reason>. Both games restart."; every other ending, and kInternal with an empty
+// reason, has its fixed text. The other PC never gets the reason (nothing carries it), so its banner is one of the
+// kPeer... texts.
+std::string BannerText(bool waiting, Ending ending, std::string_view reason = {});
 
 // The F9 box lines for a connection (empty when `connected` is false): "Ping 42 ms", "Delay 2 frames (33 ms)".
 std::vector<std::string> StatsLines(bool connected, float ping_ms, int delay_frames);

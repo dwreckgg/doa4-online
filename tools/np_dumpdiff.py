@@ -72,6 +72,7 @@ SWEEP_MASKS = [
     (0x830ADBCC, 0x1C),  # critical section of the 16-slot request table 0x830ADB08
     (0x831A7AC0, 4),     # vblank count stored by the D3D vblank callback
     (0x8357A560, 0x400),  # GPU timestamp ring 2 of the graphics object
+    (0x8357C190, 4),     # vertex pointer of the 2D quad batch 0x8357C188 (a D3D command-buffer address)
     (0x8357D520, 4),     # D3D resource id counter
 ]
 # A mixed session's frame-0 compare only: the game no longer hashes these (a mixed session runs no sweep, np_digest.h), but np_pair still

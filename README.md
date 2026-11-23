@@ -5,22 +5,22 @@
 **Dead or Alive 4 Online** is a native Windows build of **Dead or Alive 4** (Xbox 360) with two-player
 online play, statically recompiled with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk). It
 also builds **34 swimsuits from Dead or Alive Xtreme 2** (DOAX2) on your PC from your own disc, as extra
-costumes. This is **alpha 0.3.7**: it works and is used, but it is still an alpha, and the
+costumes. This is **alpha 0.3.8**: it works and is used, but it is still an alpha, and the
 [known issues](#known-issues) are listed below. **No game data is included.** You need your own copy of
 the game, and the swimsuits need your own DOAX2 disc.
 
 It is a fork of [parkerallan/doa4-recomp](https://github.com/parkerallan/doa4-recomp), published at
 [Dwreckgg/doa4-online](https://github.com/Dwreckgg/doa4-online). On top of it: two-player **online
-play**, the DOAX2 swimsuits, a first-run setup that finds or extracts the game files, an Esc menu with
-graphics and display options, an option to skip the boot intro, full-quality photos, a toggle to unlock all
-in-game content, and more.
+play**, the DOAX2 swimsuits, colour costumes for Alpha-152 and Spartan-458, a first-run setup that finds
+or extracts the game files, an Esc menu with graphics and display options, an option to skip the boot
+intro, full-quality photos, a toggle to unlock all in-game content, and more.
 Building it yourself is for contributors: see [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Easy setup and how to play online with a friend
 
 You do not need to build anything. Each player does steps 1-3 once.
 
-**What you need:** Windows 10 or 11, 64-bit; a CPU with AVX2 (Intel Haswell / AMD Zen or newer) and at
+**What you need:** Windows 10 or 11, 64-bit; a CPU with SSE4.2 (Intel Core from 2008 (Nehalem) / AMD FX from 2011 (Bulldozer) or newer) and at
 least two cores; the Microsoft Visual C++ 2015-2022 x64 runtime (if it is missing, the game stops with a "VCRUNTIME140.dll was not found" style error: install it from
 [Microsoft's download page](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist));
 your own copy of *Dead or Alive 4 (USA, Europe) (Rev 1)* as a disc image (`.iso`) or an extracted
@@ -142,8 +142,8 @@ straight away on any save.
   Host and Join stay off until you restart.
 - **Costumes:** importing also unlocks all the DOA4 costumes for the nine girls who have them. Your save
   isn't changed.
-- **Full DOAX2 breast movement** (Extras tab) uses DOAX2's up-and-down range instead of the character's
-  DOA4 range. It takes effect at once.
+- **Age:** (Extras tab, Physics) sets the breast movement for every costume. Off is retail DOA4; on, the
+  slider goes from 1 to 99, and 18 is retail. It takes effect at once. Online, the host's setting is used.
 
 **Online with swimsuits:**
 
@@ -154,6 +154,26 @@ straight away on any save.
   player*, or *neither player*).
 - Two players without the swimsuits play exactly as before.
 - Two imports made by different versions of the importer count as different imports.
+
+## Colour costumes
+
+Since 0.3.8 Alpha-152 and Spartan-458 have new colour costumes
+([issue #13](https://github.com/dwreckgg/doa4-online/issues/13)):
+
+- **Alpha-152:** COS. 2 red, COS. 3 blue and COS. 4 lilac. COS. 1 is unchanged; COS. 2 used to be a copy of
+  it. She needs **Alpha-152 playable** (Esc menu, **Extras** tab).
+- **Spartan-458:** COS. 8 Halo 3 pink, COS. 9 Halo 3 orchid, COS. 10 Halo 2 orange and COS. 11 Halo 2 cyan,
+  after her seven own costumes, which are unchanged.
+- **Made on your PC.** No game data comes with the download: at the first start the game makes the seven
+  costumes from your own *Dead or Alive 4* files and checks each one. It takes about a second; meanwhile the
+  window title says "Preparing colour costumes". They go into a `colour_costumes`
+  folder in your saves folder (about 86 MB), and later starts use them as they are.
+- **If one cannot be made** (for example the drive is full), that costume shows a stand-in on your PC, and
+  the game tries again at the next start. The log's `[doa4][COLOURS]` lines say why.
+- **Online:** every 0.3.8 session has the seven colour costumes, for both players, whether or not they have
+  the swimsuits. A PC that shows a stand-in plays the same match; only the look differs on that PC.
+- **Vanilla DoA4 content only** (Esc menu, **Extras** tab) leaves them out of offline play
+  ([the Esc menu](#the-esc-menu-and-hotkeys)).
 
 ## Updating
 
@@ -220,6 +240,9 @@ The top of the Game tab:
 - **Controller:** pick **Player 1** to **Player 4**, then click a button in the list and press the
   controller button you want for it (Esc cancels). **Reset Player N** restores the default layout.
   Remapping needs the SDL input backend (`input_backend = sdl`).
+- **Vibration (Player N)** under the player buttons (on unless you turn it off): off means the controller in
+  that slot never vibrates, and unticking it stops a vibration at once. It works with every input backend. It is
+  your own setting: online, the other player's game is not affected.
 - **Keyboard:** **Use keyboard as controller** turns keyboard play on. Choose which player the
   keyboard is (**P1** to **P4**), click an action and press the key you want for it; **Reset keyboard**
   restores the defaults. Esc opens the menu, so the keyboard's Start is Enter.
@@ -235,14 +258,25 @@ The top of the Game tab:
   ![A snapshot from the game's photo mode, saved as a full-quality copy (shown here reduced)](docs/images/photo-mode.jpg)
 
 **Extras**
+- **Vanilla DoA4 content only** (off unless you turn it on), with the note beside it "(Turns off all custom
+  costumes not included inside the retail DoA4 game files)". While it is on, the costume select screen leaves
+  out the [colour costumes](#colour-costumes) and the DOAX2 swimsuits, and **Import DOAX2 swimsuits...** is off
+  ("off: vanilla mode"). Nothing is deleted. The game tweaks, the extra costumes and **Age:** follow their own
+  boxes as usual. It applies after a restart: until then the tab says "Applies after a restart" and offers
+  **Restart now**. It only changes the game you start: an online session ignores it, and it is not sent to the
+  other player.
 - **Unlocks:** Unlock all characters, Unlock all costumes, Unlock all system voices, Unlock all
   stages, or Unlock everything. Load your profile first (reach the main menu). Before the first unlock
   the game backs up your save, and the tab shows where.
-- **Game tweaks:** "All stages in Tag battle" and "Hidden characters in multiplayer select".
+- **Game tweaks:** "All stages in Tag battle", "Hidden characters in multiplayer select" and "Alpha-152
+  playable". "Alpha-152 playable" applies after a restart: the tab says so and offers **Restart now**.
 - **Extra costumes:** "Helena's opera dress", "Kokoro's pink and blue kimonos" and "Christie's cutscene
   costume", added after each character's own costumes.
 - **Wipe unlocks...** locks everything again, as in a new save, after it asks; a backup of your save is
   made first.
+- **Physics:** **Age:** sets the breast movement for every costume. Off (the default) is retail DOA4; on, the
+  slider goes from 1 to 99, and 18 is retail ("Breast movement. 18 is the default amount of physics in retail
+  DOA4."). It takes effect at once. Online, the host's setting is used for both players.
 - **DOAX2 swimsuits:** **Import DOAX2 swimsuits...** (or **Import again...**), then **Restart now** to
   use them; see [DOAX2 swimsuits](#doax2-swimsuits).
 
@@ -263,7 +297,9 @@ The top of the Game tab:
   0.3.2") until you press Start. It only tells you; **Check for Updates** does the download.
 
 During an online session some options are locked so both games stay identical: the Extras tab, options
-that need a restart, the language, and changing the game folder. Settings changed during a session are
+that need a restart, the language, and changing the game folder. Controls tab settings changed during a
+session (button remaps, the keyboard keys and player, **Use keyboard as controller** and
+**Vibration (Player N)**) are your own and are kept. Other settings changed during a session are
 restored when it ends.
 
 **Hotkeys**
@@ -283,7 +319,7 @@ restored when it ends.
   example `doa4_user_data = "C:/Games/DOA4saves"`, with forward slashes), else to
   `Documents\dead_or_alive_4`. Keep it outside OneDrive if you can (OneDrive can lock files the game is
   writing). The Esc menu's Game tab shows the folder in use. The imported swimsuits are in its
-  `doax2_suits` folder.
+  `doax2_suits` folder, the colour costumes in its `colour_costumes` folder.
 - **Settings** live in `dead_or_alive_4.toml` next to the exe; the **Esc** menu edits them.
 - **Photos** go to `Pictures\DOA4` unless the Photo tab says otherwise (**Open folder** opens it).
 - **Logs:** `logs\dead_or_alive_4_NNN.log` next to the exe. Send the newest one with a bug report.
@@ -291,9 +327,15 @@ restored when it ends.
 
 ## Linux
 
-Linux is not officially supported yet. One player reports that under Proton and Wine (GE-Proton11-12) the game does not
-open as intended: it shows only a black screen. They could still join an online session with another player, and after
-that the game ran fine. Solo offline play does not seem to work under Linux for now.
+Linux is not officially supported yet: there is no Linux build. Players report that the Windows build now works under Proton, offline and online, including online sessions
+with players on Windows.
+
+- **0.3.8 fixes the black screen at start-up under Proton**
+  ([issue #12](https://github.com/dwreckgg/doa4-online/issues/12)). The `net.ipv4.ip_unprivileged_port_start`
+  workaround is no longer needed.
+- **Savannah Safari and Experimental Playground** spend less time in a slow memory call under Proton since 0.3.8. If
+  anything misbehaves there, `cheap_physical_protect = false` in `dead_or_alive_4.toml` goes back to 0.3.7's
+  behaviour.
 
 ## Troubleshooting
 
@@ -323,7 +365,6 @@ that the game ran fine. Solo offline play does not seem to work under Linux for 
 |---|---|
 | A rare crash with `Call to invalid or unregistered function at guest address 0x...` in the log, at one particular move or moment. | A function the recompiler missed. Send the log (`logs\`) and say which move or moment, so it can be added in the next release. |
 | The imported DOAX2 swimsuits still need polish: some show clipping, physics that don't look right, or visible seams in the models. | Being worked on in later releases. |
-| Story mode: retrying a fight after a loss freezes the game for a couple of frames before the fight starts again. | A fix is planned. |
 | The extra costumes (Esc menu, **Extras** tab: Helena's opera dress, Kokoro's pink and blue kimonos): reflections on the stage scenery show the character in a different costume. | A fix is planned. |
 | First start with an extracted *Dead or Alive 4* folder: choosing it on the setup screen starts the game right away, before the optional DOAX2 swimsuit step. | Import the swimsuits any time from the Esc menu, **Extras** tab, **Import DOAX2 swimsuits...**. A fix is planned. |
 | Alpha-152 (Esc menu, **Extras** tab, **Alpha-152 playable**): her icon in the Team Battle team list and on the results screen shows "?". | A proper icon is planned. |
@@ -331,7 +372,8 @@ that the game ran fine. Solo offline play does not seem to work under Linux for 
 | The game's own online menus (Xbox Live) do not work. | Play online through the Esc menu's Online tab ([how it works](#online-play-in-more-detail)). |
 | Online: on a CPU with fewer cores (for example 4 cores) the game can slow down a lot, because both games run at the speed of the slower PC. | Avoid the CPU-heavy stages, such as Savannah Safari and Experimental Playground, when playing online. Avoid the DOAX2 swimsuits online too: they take more CPU than the original DOA4 costumes. If the graphics card rather than the CPU is the slow part, the host can tick **Batch GPU uploads** (Esc menu, **Game** tab). |
 | Keeping the game folder inside OneDrive (for example on a Desktop or in Documents that OneDrive backs up) can make the game crash when it starts or fail to save. | Keep the whole game folder, with its saves, outside OneDrive, for example in `C:\Games\Dead or Alive 4 Online`. |
-| Linux (Proton / Wine): the game starts to a black screen instead of opening as intended (reported by one player on GE-Proton11-12). | Joining an online session with another player is reported to still work, and the game runs fine after that. Solo offline play does not seem to work yet. |
+| With **Vanilla DoA4 content only** on, the Extras tab still says "DOAX2 swimsuits: N loaded", although the swimsuits are left out of the costume select screen. | Only the text is misleading: the swimsuits stay loaded but are not offered, as the box says. |
+| If the first start is cut off while it prepares the colour costumes (the game is killed or the PC loses power), a temporary file whose name ends in `.tmp` can stay in the `colour_costumes` folder in your saves folder. | It is never used, and the next start makes any missing colour costume again. You can delete the `.tmp` file. |
 
 ## Roadmap
 

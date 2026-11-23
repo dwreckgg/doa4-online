@@ -136,10 +136,11 @@ struct Recording {
 // dropped (reported in *note).
 bool DecodeRecording(std::string_view bytes, Recording* out, std::string* error,
                      std::string* note = nullptr);
-// "" when the keys build, data, fixes, serial, sweep, tweaks, guest and unlock of two meta texts agree (a key
-// missing from one text, as in a version-1 recording or a phase-0 one, reads "(none)", so two metas that both
-// lack guest and unlock agree on them); else "<key> <recorded> vs <current>; ..." in that key order. Other keys
-// are ignored. The value "unreadable" (the exe or the game data could not
+// "" when the nine keys build, data, fixes, serial, sweep, tweaks, guest, unlock and suits of two
+// meta texts agree (a key missing from one text, as in a version-1 recording or a phase-0 one, reads "(none)", so two
+// metas that both lack guest and unlock agree on them); else "<key> <recorded> vs <current>; ..." in that key order. Other keys
+// are ignored: a "colours" line too (the colour costumes are in every process of the build, so no recording says
+// whether it has them). The value "unreadable" (the exe or the game data could not
 // be hashed) agrees with nothing, itself included.
 std::string MetaMismatch(std::string_view recorded, std::string_view current);
 // The value of the line "<key>=<value>" in `meta`; "(none)" when no line is that key (a missing key, as in a

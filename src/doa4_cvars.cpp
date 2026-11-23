@@ -2,6 +2,11 @@
 
 #include <rex/cvar.h>
 
+// Extras tab, first row: vanilla mode (doa4_vanilla.h). Latched once at start-up in a lobby process; a match process ignores
+// it. In a lobby it leaves out the colour and swimsuit rows and refuses the import; tweaks and Age follow their own boxes.
+// Never carried into a session (it is neither a tweak nor a carried port setting) and never writes another setting.
+REXCVAR_DEFINE_BOOL(doa4_vanilla_only, false, "DOA4", "Vanilla DoA4 content only (applies at the next start)");
+
 // Extras tab: game tweaks (doa4_tweaks.h). Applied at load (OnPostLoadXexImage).
 REXCVAR_DEFINE_BOOL(doa4_tag_all_stages, false, "DOA4",
                     "All stages in Tag battle (Xenia patch by ryu_highabusa)");
@@ -44,6 +49,12 @@ REXCVAR_DEFINE_STRING(doa4_game_files, "", "DOA4",
 // next start offers the import again.
 REXCVAR_DEFINE_BOOL(doa4_suits_import_pending, false, "DOA4",
                     "A DOAX2 swimsuit import was started and has not finished; the next start offers it again");
+
+// Colour costumes (doa4_colour_costumes.h): the folder holding manifest.txt and the colour files. Empty: <user
+// data>/colour_costumes, where a lobby start makes the files this PC lacks; a folder named here is read as it is, in
+// every process, and nothing is made in it.
+REXCVAR_DEFINE_STRING(doa4_colour_costumes_dir, "", "DOA4",
+                      "Folder holding the colour costume files (empty: the user data folder's colour_costumes)");
 
 // The save and shader-cache folder (doa4_gamefiles.h ChooseUserData); the
 // command line's --user_data_root overrides it. Empty: Documents\dead_or_alive_4.
@@ -88,6 +99,14 @@ REXCVAR_DEFINE_INT32(doa4_language, -1, "DOA4",
 REXCVAR_DEFINE_INT32(doa4_subtitles, -1, "DOA4",
                      "Game subtitles language (Language > Subtitles in the game's options): -1 the game's own, 0-7 as the "
                      "text language, 8 off/default");
-// Extras tab: DOAX2 swimsuits (doa4_suits_bust.h).
+// Extras tab, Physics: the "Age:" box and, below it, the slider for breast movement (doa4_suits_bust.h
+// LineSetting, WantedAge). Box off: retail DOA4 (age 18) for every costume. The menu saves both keys together.
+// Carried into a session (np_handoff kPortSettings): both PCs run the host's box and age.
+REXCVAR_DEFINE_BOOL(doa4_bust_age_on, false, "DOA4",
+                    "Extras tab Age: box; false = retail DOA4 breast movement for every costume (the slider is not applied)");
+REXCVAR_DEFINE_INT32(doa4_bust_age, 0, "DOA4",
+                     "Extras tab Age: slider, 1-99, applied while doa4_bust_age_on is true; 0 = never saved");
+// The old full-bust checkbox's setting, retired on this line (ruling B1): nothing reads or writes it. It stays defined
+// and carried (np_handoff kPortSettings) so a recording or hand-off that holds its line still applies.
 REXCVAR_DEFINE_BOOL(doa4_suits_full_bust, false, "DOA4",
-                    "DOAX2 swimsuits: full DOAX2 up and down breast movement");
+                    "Old setting from 0.3.7, no longer read (kept so old recordings and hand-offs still apply)");

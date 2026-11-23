@@ -8,6 +8,7 @@
 #include <bit>
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -15,8 +16,11 @@
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <set>
+#include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -62,6 +66,7 @@
 #include "doa4_lagtrace.h"
 #include "doa4_language.h"
 #include "doa4_lowmem.h"
+#include "doa4_alpha_colours.h"
 #include "doa4_alpha_select.h"
 #include "doa4_move_guard.h"
 #include "doa4_net_overlay.h"
@@ -77,6 +82,9 @@
 #include "doa4_setup_win.h"
 #include "doa4_afs_overlay.h"
 #include "doa4_afs_vfs.h"
+#include "doa4_colour_costumes.h"
+#include "doa4_colour_make.h"
+#include "doa4_colourgen.h"
 #include "doa4_display.h"
 #include "doa4_suitconv_job.h"
 #include "doa4_suits.h"
@@ -90,6 +98,7 @@
 #include "doa4_unlocks.h"
 #include "doa4_updater.h"
 #include "doa4_utf8.h"
+#include "doa4_vanilla.h"
 #include "net/np_files.h"
 #include "net/np_handoff.h"
 #include "net/np_online.h"
@@ -561,6 +570,7 @@ class DeadOrAlive4App : public rex::ReXApp {
       unsetenv("DOA4_NP_HANDOFF");  // the offline relaunch at the end must not inherit it
 #endif
       ReadHandoff(path);
+      TestMenuSave();
     }
     doa4::np::SetSwitchContext(session_.has_value(), !test_dir_.empty());
     doa4::np::PrepareReplayRules();
@@ -721,6 +731,13 @@ class DeadOrAlive4App : public rex::ReXApp {
     // Before any guest code allocates: keeps fighter data out of low addresses,
     // where the game's relocation test skips tables (Ryu Hayabusa / Brad Wong crash).
     doa4::ReserveLowGuestMemory(runtime() ? runtime()->memory() : nullptr);
+    // What this process is for the colour costumes (doa4_colour_make.h): a match process when it was started for a
+    // session (session_, read from the hand-off before the runtime existed) or DOA4_NP is set to anything; else a
+    // lobby process. Decided once, here, before SetUpExtras; SetUpSuits (OnPostSetup) reads it.
+    {
+      const char* np_mode = std::getenv("DOA4_NP");
+      kind_ = doa4::colour_costumes::KindOf(session_.has_value(), np_mode ? np_mode : "");
+    }
     SetUpExtras();  // before any guest code runs: the tweaks patch tables read at boot
     SetUpSnapshotWatcher();  // before the first guest swap, so the swap counts start together
     // Kyoto in Bloom water (ou_runs/kyoto/REPORT.md): with asynchronous compilation the SDK skips a draw whose pipeline
@@ -1281,6 +1298,7 @@ class DeadOrAlive4App : public rex::ReXApp {
     namespace ov = doa4::online_view;
     const ov::In in = OnlineViewIn(false);
     ov::Ending ending = ov::Ending::kNone;
+    std::string reason;  // of this PC's own internal end only (BannerText reads it for kInternal alone)
     if (in.in_session) {
       switch (doa4::np::LastResult().end) {
         case doa4::np::live::End::kLeft: ending = ov::Ending::kLeft; break;
@@ -1292,13 +1310,19 @@ class DeadOrAlive4App : public rex::ReXApp {
         case doa4::np::live::End::kLost: ending = ov::Ending::kLost; break;
         case doa4::np::live::End::kDesync: ending = ov::Ending::kDesync; break;
         case doa4::np::live::End::kFrame0Timeout: ending = ov::Ending::kFrame0Timeout; break;
-        case doa4::np::live::End::kInternal: ending = ov::Ending::kInternal; break;
+        case doa4::np::live::End::kInternal:
+          // An end np::Abort made (this PC cannot build the costume tables, or its port did not open) carries a reason
+          // written to be shown: it goes into this PC's banner. Every other internal end has none here (AbortReason
+          // is empty: their texts are for the log) and keeps the fixed text. Nothing sends it to the other PC.
+          ending = ov::Ending::kInternal;
+          reason = doa4::np::AbortReason();
+          break;
         case doa4::np::live::End::kWorkerOrder: ending = ov::Ending::kWorkerOrder; break;  // lockstep port B3
         case doa4::np::live::End::kNone: break;
       }
     }
     doa4::NetOverlay::Content c;
-    c.banner = ov::BannerText(in.in_session && doa4::np::BannerWaiting(), ending);
+    c.banner = ov::BannerText(in.in_session && doa4::np::BannerWaiting(), ending, reason);
     c.stats = ov::Describe(in).stats_lines;
     if (rex::cvar::Query<bool>("doa4_show_fps")) c.fps = fps_meter_.Text();
     if (update_notice_shown_) c.notice = doa4::update_notice::DisplayText(update_notice_tag_);
@@ -1472,7 +1496,8 @@ class DeadOrAlive4App : public rex::ReXApp {
   // was on) comes down, and a character with a box on stays at her maximum, since the added costumes come last. Writes
   // guest memory off the game thread, so never near a session (UnlockStep does the same at a frame boundary there) nor
   // in a record or replay run, whose guest must not change at a wall-clock moment; DOA4_EXTRAS_REQUEST is the one
-  // exception, a record run standing in for an offline game because only it can take scripted pad input.
+  // exception, a record run standing in for an offline game because only it can take scripted pad input. Its two writes,
+  // the clamp and the raise, run alike in vanilla mode and with it off (vanilla mode leaves the tweaks to their boxes).
   void SyncCostumeCounts() {
     if (!guest_ready_ || SessionLocked()) return;
     static const bool offline_stand_in = doa4::np::TestSwitch("DOA4_EXTRAS_REQUEST") != nullptr;
@@ -1872,6 +1897,9 @@ class DeadOrAlive4App : public rex::ReXApp {
       rex::Runtime* rt = runtime();
       return rt ? dynamic_cast<rex::input::InputSystem*>(rt->input_system()) : nullptr;
     };
+    host.note_saved = [this](std::string_view key, std::string_view value_literal) {
+      NoteSessionLocalSave(key, value_literal);
+    };
     host.defer = [this](std::function<void()> fn) {
       app_context().CallInUIThreadDeferred(std::move(fn));
     };
@@ -1968,9 +1996,35 @@ class DeadOrAlive4App : public rex::ReXApp {
     }
   }
 
+  // Task 2b (the user, 2026-11-22: controller settings changed online must save): the menu reports each save it wrote;
+  // only the player's own controller keys are kept. Recorded in every process (cheap); only a session process restores.
+  void NoteSessionLocalSave(std::string_view key, std::string_view value_literal) {
+    if (!doa4::np::handoff::IsSessionLocalKey(key)) return;
+    std::lock_guard<std::mutex> lock(session_saves_mutex_);
+    session_saves_.emplace_back(std::string(key), std::string(value_literal));
+  }
+
+  // DOA4_NP_TEST_MENU_SAVE=<name>=<value> (test dir only, a session process, after the host's settings are applied): the
+  // save the Esc menu's SetAndSave makes for an unquoted value (the cvar, the config line, NoteSessionLocalSave), standing
+  // in for a player's click during a session, so a two-copy run can show Task 2b's keep (or, for another key, the restore).
+  void TestMenuSave() {
+    if (test_dir_.empty() || !session_) return;
+    const char* t = std::getenv("DOA4_NP_TEST_MENU_SAVE");
+    if (!t || !*t) return;
+    const std::string text(t);
+    const size_t eq = text.find('=');
+    if (eq == std::string::npos || eq == 0) return;
+    const std::string name = text.substr(0, eq), value = text.substr(eq + 1);
+    std::string error = rex::cvar::SetFlagByName(name, value) ? std::string() : std::string("the cvar refused it");
+    if (error.empty()) error = doa4::SaveTomlKey(ConfigPath(), name, value);
+    if (error.empty()) NoteSessionLocalSave(name, value);
+    doa4::np::EarlyLog("[doa4][NET] test: menu save " + name + " = " + value + (error.empty() ? "" : ": " + error));
+  }
+
   // Carry 2b: a session applies the host's guest settings to the cvars; nothing may save them into the player's config
   // (the settings overlay's "Save to config", a menu save). The file must be byte-identical after the session: if it is
   // not, the snapshot taken at OnPostInitLogging is written back and a WARN line goes to np_log (the harness fails it).
+  // Task 2b: the exception is the player's own controller saves (NoteSessionLocalSave), replayed onto the snapshot.
   void CheckConfigUnchanged() {
     std::error_code ec;
     std::string now;
@@ -1982,20 +2036,42 @@ class DeadOrAlive4App : public rex::ReXApp {
         now.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
       }
     }
-    if (has == toml_had_ && now == toml_snapshot_) return;
-    if (toml_had_) {  // fix round M3: a temp file, then a rename over the config
+    // Task 2b: the player's own controller saves made with the Esc menu during the session (IsSessionLocalKey: never a
+    // carried or trusted key) are replayed onto the snapshot in save order; every other change is still undone.
+    std::vector<std::pair<std::string, std::string>> kept;
+    {
+      std::lock_guard<std::mutex> lock(session_saves_mutex_);
+      kept = session_saves_;
+    }
+    if (kept.empty()) {
+      if (has == toml_had_ && now == toml_snapshot_) return;
+      if (toml_had_) {  // fix round M3: a temp file, then a rename over the config
+        const std::filesystem::path tmp = ConfigPath().wstring() + L".np_restore";
+        {
+          std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+          out << toml_snapshot_;
+        }
+#if defined(_WIN32)
+        MoveFileExW(tmp.c_str(), ConfigPath().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+#else
+        std::filesystem::rename(tmp, ConfigPath(), ec);  // rename(2) replaces in one step
+#endif
+      } else {
+        std::filesystem::remove(ConfigPath(), ec);
+      }
+    } else {
+      const std::string expected = doa4::ConfigAfterSession(toml_had_ ? toml_snapshot_ : std::string(), kept);
+      if (has && now == expected) return;  // only the player's own controller saves changed: keep them, no WARN
       const std::filesystem::path tmp = ConfigPath().wstring() + L".np_restore";
       {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        out << toml_snapshot_;
+        out << expected;
       }
 #if defined(_WIN32)
       MoveFileExW(tmp.c_str(), ConfigPath().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 #else
       std::filesystem::rename(tmp, ConfigPath(), ec);  // rename(2) replaces in one step
 #endif
-    } else {
-      std::filesystem::remove(ConfigPath(), ec);
     }
     doa4::np::LogLine("WARN session: the config file " + doa4::Utf8Generic(ConfigPath()) +
                       " changed during the session (host-imposed settings must never be saved): restored");
@@ -2024,6 +2100,10 @@ class DeadOrAlive4App : public rex::ReXApp {
   std::atomic<bool> lobby_watch_stop_{false};
   std::string toml_snapshot_;
   bool toml_had_ = false;
+  // Task 2b: (key, value literal) of each Esc-menu save of a session-local controller key, in save order (UI thread
+  // writes, CheckConfigUnchanged reads at relaunch or shutdown).
+  std::mutex session_saves_mutex_;
+  std::vector<std::pair<std::string, std::string>> session_saves_;
   bool guest_touched_ = false;   // a host-imposed setting was applied in this process (fix round I1)
   bool launch_refused_ = false;  // the session start was aborted: no runtime / no module launch (I1, I2)
   // The start-up update notice (Task 15). update_relaunch_*: set once in NetplayAtStart; the rest on the UI thread.
@@ -2086,6 +2166,10 @@ class DeadOrAlive4App : public rex::ReXApp {
   std::atomic<int> running_alpha152_{-1};
   doa4::tweaks::TweakPatcher patcher_;
   doa4::suits::ImportStatus suits_status_;  // DOAX2 swimsuits (SetUpSuits)
+  // What this process is for the colour costumes (colour_costumes::KindOf): set once in OnPostLoadXexImage, before
+  // SetUpExtras; read by SetUpSuits (OnPostSetup, later). A lobby process makes the missing colour files; a match
+  // process makes none and must not run without the colour entries installed. kMatch until it is set: nothing is made.
+  doa4::colour_costumes::ProcessKind kind_ = doa4::colour_costumes::ProcessKind::kMatch;
   // Set by the first-run setup screen (Task 5, OnFinalizePaths) before SetUpSuits runs.
   bool first_run_shown_ = false;
   // Why the finished import could not be put in place at this start ("" when it was, or there was none); Task 6 draws it in Extras.
@@ -2118,16 +2202,101 @@ class DeadOrAlive4App : public rex::ReXApp {
   // suits. Needs the mounts (OnPostSetup) and guest_ (SetUpExtras, OnPostLoadXexImage); runs
   // before any guest code. With no import, or any failure before the tables change, the game's
   // own archives and tables stay as they are.
-  // A session process (the suit state read from the hand-off, ReadHandoff): kNone reads and applies nothing, whatever this PC
-  // has: today's session. kSame and kMixed build the tables from the compiled picks, not from a manifest, so a PC with no files
+  // A session process (the suit state read from the hand-off, ReadHandoff): kNone reads and applies no SWIMSUIT, whatever
+  // this PC has. kSame and kMixed build the tables from the compiled picks, not from a manifest, so a PC with no files
   // builds the same bytes as a PC with all of them; overlays only for the picks' files this PC holds, and whatever it lacks stays
   // an empty slot the guard sends to COS. 1. An overlay that cannot be built costs this PC its suits, never the tables.
+  // The colour costumes are part of the build in EVERY process, a kNone session, a record run and a replay included:
+  // their seven entries are always overlaid (a slot's own file, or a stand-in of the same size) and their rows come from
+  // compiled-in numbers, so both PCs of a match build equal tables whatever files each holds. A match process that
+  // cannot install the entries would build other tables: it is refused, on the one exit of SetUpSuits.
+  struct ColourSetup {
+    doa4::colour_costumes::InstallOutcome outcome = doa4::colour_costumes::InstallOutcome::kNotUsable;
+    bool usable = false;                  // Load's Status::usable: the colour entries could go into the build
+    std::vector<std::string> load_notes;  // Load's notes (Status::notes); when not usable, the last one says why
+    std::string error, retry_error;       // the overlay install's, and the retry's without the colour entries
+    bool test_unusable = false;           // DOA4_COLOURS_TEST_UNUSABLE
+    bool test_unequal = false;            // DOA4_COLOURS_TEST_UNEQUAL
+  };
   void SetUpSuits() {
+    ColourSetup colour;  // kNotUsable until InstallSuitsAndColours installs: also on its early return
+    InstallSuitsAndColours(&colour);
+    // The one exit. Every way out of the install passes here, so a match process that did not install the colour
+    // entries never runs its match: an online session ends through np::Abort, a record or replay run quits with a
+    // "refused: " line (np::RefuseRun). The test switch DOA4_COLOURS_TEST_UNEQUAL skips it on purpose.
+    if (colour.test_unequal) return;
+    if (doa4::colour_costumes::MustRefuse(kind_, colour.outcome)) {
+      doa4::np::RefuseRun(doa4::colour_costumes::RefusalMessage(colour.outcome, colour.usable, colour.load_notes,
+                                                                colour.error, colour.retry_error, colour.test_unusable));
+    }
+  }
+
+  // The lobby step: makes the colour costume files this PC lacks, from its own game files, before Load reads the
+  // folder (no Status is alive on it yet: a loaded file is held open without write sharing). A match process, a
+  // process whose session start was refused, and a folder named by doa4_colour_costumes_dir make nothing. Runs in
+  // line on the thread that runs SetUpSuits (the UI thread, before or between its messages): about half a second for
+  // all seven files on four threads. Once they are made, every lobby start still checks the seven files here (a
+  // SHA-1 of each, about 86 MB in all) before Load hashes them again; nothing is written then.
+  void MakeColourFiles(const std::filesystem::path& colour_dir, const std::filesystem::path& game_root,
+                       bool folder_overridden) {
+    namespace cc = doa4::colour_costumes;
+    if (!cc::ShouldMake(kind_, launch_refused_, folder_overridden)) {
+      REXLOG_INFO("[doa4][COLOURS] making: off ({})",
+                  kind_ != cc::ProcessKind::kLobby ? "a match process"
+                  : launch_refused_               ? "the session start was refused"
+                                                  : "folder override set");
+      return;
+    }
+    cc::MakeOptions opt;
+    opt.generate = [](std::string_view slot, std::span<const uint8_t> source,
+                      std::string* why) -> std::optional<std::vector<uint8_t>> {
+      return doa4::colourgen::Make(slot, source, why);
+    };
+    // Called once a call, on this thread: so the line below is written at most once in a process.
+    opt.free_bytes = [](const std::filesystem::path& folder) -> uint64_t {
+      std::error_code ec;
+      const std::filesystem::space_info info = std::filesystem::space(folder, ec);
+      const uint64_t free_bytes = cc::FreeBytesFrom(info, ec);
+      if (free_bytes == UINT64_MAX) {
+        REXLOG_WARN("[doa4][COLOURS] making: free space unknown ({}); not checked",
+                    ec ? ec.message() : std::string("the system gave no number"));
+      }
+      return free_bytes;
+    };
+    opt.temp_tag = cc::MakeTempTag();
+    opt.threads = (std::min)(4u, (std::max)(1u, std::thread::hardware_concurrency()));
+    // The window says what the wait is while the files are made, and gets its own title back afterwards, also when
+    // MakeMissing returned early.
+    rex::ui::Window* w = window();
+    const std::string title = w ? w->GetTitle() : std::string();
+    bool titled = false;
+    opt.on_start = [w, &title, &titled](size_t to_make) {
+      REXLOG_INFO("[doa4][COLOURS] making: {} files to make", to_make);
+      if (!w) return;
+      titled = true;
+      w->SetTitle(title + " - Preparing colour costumes");
+    };
+    const cc::MakeReport report = cc::MakeMissing(cc::Slots(), cc::MakeDefs(), colour_dir, game_root, guest_, opt);
+    if (titled) w->SetTitle(title);
+    REXLOG_INFO("[doa4][COLOURS] making: {} already made, {} made in {:.2f} s, {} not made", report.good, report.made,
+                report.seconds, report.not_made);
+    // Every note goes out the same way, whatever its cause, except the one that can appear for a moment when two
+    // copies of the game start together.
+    for (const std::string& note : report.notes) {
+      if (cc::IsPassingNote(note)) {
+        REXLOG_INFO("[doa4][COLOURS] {} (another copy of the game may be writing it; the next lobby start writes it)", note);
+      } else {
+        REXLOG_WARN("[doa4][COLOURS] {}", note);
+      }
+    }
+  }
+
+  void InstallSuitsAndColours(ColourSetup* colour) {
     rex::Runtime* rt = runtime();
     rex::memory::Memory* memory = rt ? rt->memory() : nullptr;
     if (!memory || !rt->file_system() || !guest_ready_) {
       REXLOG_WARN("[doa4][SUITS] no guest memory or file system; swimsuits not loaded");
-      return;
+      return;  // nothing installed (colour->outcome stays kNotUsable): SetUpSuits refuses a match process
     }
     // The load-request guard's state: the image's record counts first; the FINAL state (Apply's
     // counts, plus the empty-slot marks) replaces it below, still before any guest code runs.
@@ -2136,6 +2305,32 @@ class DeadOrAlive4App : public rex::ReXApp {
     const std::filesystem::path game_root = std::filesystem::absolute(rt->game_data_root());
     using doa4::np::rules::SuitSession;
     const bool session = session_.has_value();
+    // The colour costumes (doa4_colour_costumes.h), first, in every process: a lobby process makes the files this PC
+    // lacks (MakeColourFiles), then every process loads the seven slots (a slot without a good file gets its stand-in).
+    // Their entries go into the swimsuits' overlays and their rows into the same Apply, before the suits. The line names
+    // the resolved folder, so a run can check the folder it really read (plan F17).
+    const std::string colour_override = rex::cvar::Query<std::string>("doa4_colour_costumes_dir");
+    const std::filesystem::path colour_dir = doa4::colour_costumes::ColourFolder(UserData(), colour_override);
+    MakeColourFiles(colour_dir, game_root, !colour_override.empty());
+    doa4::colour_costumes::Status colours = doa4::colour_costumes::Load(colour_dir, game_root, guest_);
+    REXLOG_INFO("[doa4][COLOURS] {}; folder {}", colours.Summary(), doa4::Utf8(colour_dir));
+    for (const std::string& note : colours.notes) REXLOG_WARN("[doa4][COLOURS] {}", note);
+    colour->load_notes = colours.notes;
+    // Two test switches (np::TestSwitch: never read in an online session without a test dir), each with its own line so
+    // a run can show it took effect. UNUSABLE: this process treats what Load returned as not usable (the refusal's
+    // control). UNEQUAL: this process leaves the colour rows out of its tables and is not refused (the sync check's
+    // control: its tables differ from the other PC's).
+    if (const char* v = doa4::np::TestSwitch("DOA4_COLOURS_TEST_UNUSABLE"); v && v[0] == '1') {
+      colour->test_unusable = true;
+      colours.usable = false;
+      REXLOG_WARN("[doa4][COLOURS] test switch DOA4_COLOURS_TEST_UNUSABLE: the colour slots count as not usable in this process");
+    }
+    if (const char* v = doa4::np::TestSwitch("DOA4_COLOURS_TEST_UNEQUAL"); v && v[0] == '1') {
+      colour->test_unequal = true;
+      REXLOG_WARN("[doa4][COLOURS] test switch DOA4_COLOURS_TEST_UNEQUAL: the colour rows stay out of this process's tables; "
+                  "it is not refused");
+    }
+    colour->usable = colours.usable;  // after the switch: what the build below is given
     // Review Focus 2: a session process never completes a swap (s.complete_swap is false there). The hand-off's checksum names
     // the import the lobby process loaded, and the session must load that same import, so nothing may replace it here. In a
     // process that is not a session the finished import is put in place BEFORE LoadImport opens the folder (LoadImport holds
@@ -2168,26 +2363,80 @@ class DeadOrAlive4App : public rex::ReXApp {
     // The combined archives that were really put in place (empty when there are none, or when
     // installing them failed): the empty-slot marks are read through exactly these.
     std::map<std::string, std::shared_ptr<const doa4::afs::Overlay>> installed;
-    bool any_applied = false;  // at least one suit is in the costume tables: the labels are needed
-    if (!suits_status_.suits.empty()) {
-      std::string error;
-      auto overlays = doa4::suits::BuildOverlays(suits_status_, game_root, guest_, &error);
-      if (overlays.empty()) {
-        suits_status_.Fail(error);
-      } else {
-        error = doa4::afs::InstallOverlays(*rt->file_system(), overlays,
-                                           doa4::suits::EntryLabels(suits_status_, guest_));
-        if (!error.empty()) {
-          suits_status_.Fail(error);
-        } else {
-          installed = std::move(overlays);
+    bool any_applied = false;  // at least one suit or colour costume is in the costume tables: the labels are needed
+    if (!suits_status_.suits.empty() || colours.usable) {
+      // First-read labels: the suits' and, when their entries are in the build, the colours' (avt.afs).
+      const auto labels_with = [&](bool with_colours) {
+        auto labels = doa4::suits::EntryLabels(suits_status_, guest_);
+        if (with_colours) {
+          for (const auto& [archive, entries] : doa4::colour_costumes::EntryLabels(colours, guest_)) {
+            labels[archive].insert(entries.begin(), entries.end());
+          }
         }
+        return labels;
+      };
+      const std::map<std::string, std::vector<doa4::afs::Replacement>> colour_entries =
+          doa4::colour_costumes::Replacements(colours, guest_);  // empty unless colours.usable
+      size_t colour_entry_count = 0;
+      for (const auto& [archive, list] : colour_entries) colour_entry_count += list.size();
+      std::string error;
+      auto overlays = doa4::suits::BuildOverlays(suits_status_, game_root, guest_, &error, colour_entries);
+      const bool build_ok = !overlays.empty();
+      if (build_ok) error = doa4::afs::InstallOverlays(*rt->file_system(), overlays, labels_with(colours.usable));
+      const bool install_ok = build_ok && error.empty();
+      // A failure while the colour entries were in it: they are dropped and the suits built and installed again without
+      // them (InstallOverlays checks every target before it replaces any, so a failed install left nothing behind).
+      bool retry_ok = false;
+      std::string retry_error;
+      std::map<std::string, std::shared_ptr<const doa4::afs::Overlay>> without_colours;
+      if (colours.usable && !install_ok) {
+        if (suits_status_.suits.empty()) {
+          retry_ok = true;  // nothing else to install
+        } else {
+          without_colours = doa4::suits::BuildOverlays(suits_status_, game_root, guest_, &retry_error);
+          if (!without_colours.empty()) {
+            retry_error = doa4::afs::InstallOverlays(*rt->file_system(), without_colours, labels_with(false));
+          }
+          retry_ok = !without_colours.empty() && retry_error.empty();
+        }
+      }
+      const doa4::colour_costumes::InstallOutcome outcome =
+          doa4::colour_costumes::Decide(colours.usable, build_ok, install_ok, retry_ok);
+      colour->outcome = outcome;  // with the two error texts, what the refusal on SetUpSuits' exit reads
+      colour->error = error;
+      colour->retry_error = retry_error;
+      switch (outcome) {
+        case doa4::colour_costumes::InstallOutcome::kInstalled:
+          installed = std::move(overlays);
+          REXLOG_INFO("[doa4][COLOURS] installed: {} colour entries overlaid, beside {} swimsuits", colour_entry_count,
+                      suits_status_.suits.size());
+          break;
+        case doa4::colour_costumes::InstallOutcome::kDropped:
+          installed = std::move(without_colours);
+          REXLOG_WARN("[doa4][COLOURS] dropped: the overlays with the colour entries failed ({}); built and installed "
+                      "again without them, {} swimsuits kept",
+                      error, suits_status_.suits.size());
+          break;
+        case doa4::colour_costumes::InstallOutcome::kNotUsable:
+          installed = std::move(overlays);
+          REXLOG_INFO("[doa4][COLOURS] none installed (not usable); the swimsuits as without them");
+          break;
+        case doa4::colour_costumes::InstallOutcome::kFailed:
+          suits_status_.Fail(colours.usable ? retry_error : error);
+          REXLOG_WARN("[doa4][COLOURS] none installed: the overlays failed ({}){}", error,
+                      colours.usable ? ", and again without the colour entries (" + retry_error + ")" : std::string());
+          break;
       }
     }
     // What the lobby tells the other player: what this PC can really serve, boxes aside (they are the host's in a session).
     suits_checksum_ = doa4::suits::ImportChecksum(suits_status_);
     // What the tables hold. Offline, the import. In a session, the picks, on both PCs: CheckSuit reads only the tables, which the
     // host's settings made equal, so a refusal is the same on both.
+    // Vanilla mode (doa4_vanilla.h) is read here, after every overlay input above was decided without it: the overlays,
+    // their install and suits_checksum_ are the same with it on and off; only the rows below are left out.
+    const bool vanilla = doa4::vanilla::Running();
+    const doa4::colour_costumes::TableRowsChoice rows =
+        doa4::colour_costumes::ChooseTableRows(kind_, vanilla, colour->outcome, colour->test_unequal);
     std::vector<doa4::suits::Suit> table_suits;
     if (session) {
       if (suit_state != SuitSession::kNone) {
@@ -2197,13 +2446,21 @@ class DeadOrAlive4App : public rex::ReXApp {
         REXLOG_INFO("[doa4][SUITS] session: {} picks go in the tables, this PC holds the files of {} (online checksum {})", table_suits.size(),
                     suits_status_.suits.size(), suits_checksum_.empty() ? std::string("none") : suits_checksum_);
       }
-    } else {
+    } else if (rows.offline_suit_rows) {
       table_suits = doa4::suits::SuitsOf(suits_status_);
+    } else {
+      REXLOG_INFO("[doa4][VANILLA] tables: no suit rows, no colour rows (the overlays are installed as without it)");
     }
-    if (!table_suits.empty()) {
+    // The colour costumes' rows (plan F10, step 4): only when their entries were installed, so no record ever names an entry
+    // that is not overlaid (Installed: the gate TestNotInstalledNoExtras pins, M5-1), and only where this process has the
+    // rows on (RowsOn: everywhere, except a lobby process in vanilla mode). ChooseTableRows above.
+    const bool colour_rows = rows.colour_rows;
+    std::vector<doa4::costumes::Extra> extras;
+    if (colour_rows) extras = doa4::colour_costumes::TableExtras(colours);
+    if (!table_suits.empty() || !extras.empty()) {
       const auto alloc = [memory](uint32_t size) { return memory->SystemHeapAlloc(size); };
-      // The tables as they stand: the Extras boxes (SetUpExtras) went first.
-      const doa4::costumes::ApplyResult applied = doa4::costumes::Apply(guest_, alloc, table_suits);
+      // The tables as they stand: the Extras boxes (SetUpExtras) went first. Per character her colour rows, then her suits.
+      const doa4::costumes::ApplyResult applied = doa4::costumes::Apply(guest_, alloc, extras, table_suits);
       std::vector<doa4::suits::LoadedSuit> kept;
       for (const doa4::suits::LoadedSuit& l : suits_status_.suits) {
         bool in = false;
@@ -2219,14 +2476,36 @@ class DeadOrAlive4App : public rex::ReXApp {
       }
       suits_status_.suits = std::move(kept);
       for (const std::string& e : applied.errors) REXLOG_ERROR("[doa4][SUITS] {}", e);
-      std::map<uint32_t, std::vector<uint8_t>> models;
-      for (const auto& a : applied.applied) {
-        REXLOG_INFO("[doa4][SUITS] {}: charId {:#x} costume #{} = model {}", a.label, a.character,
-                    a.costume, a.model);
-        models[a.character].push_back(uint8_t(a.model));
+      std::set<std::string> colour_labels;
+      for (const doa4::costumes::Extra& e : extras) {
+        colour_labels.insert(e.label);
+        const auto refused = applied.refused.find(e.label);
+        if (refused != applied.refused.end()) REXLOG_ERROR("[doa4][COLOURS] {} refused: {}", e.label, refused->second);
       }
-      // The boxes can be toggled from the menu later: each state of her box holds her suits too.
-      for (const auto& [character, list] : models) {
+      for (const auto& a : applied.applied) {
+        if (colour_labels.count(a.label)) {
+          REXLOG_INFO("[doa4][COLOURS] {}: charId {:#x} costume #{} = model {}{}", a.label, a.character, a.costume, a.model,
+                      a.replaced ? " (takes over that costume's list entry)" : "");
+        } else {
+          REXLOG_INFO("[doa4][SUITS] {}: charId {:#x} costume #{} = model {}", a.label, a.character,
+                      a.costume, a.model);
+        }
+      }
+      // Alpha's colour rows per model (doa4_alpha_colours.h): only her applied colour extras get one (ruling T7-R3), and
+      // only when the colour entries are installed and their rows are on; her draws then write each fighter's own row
+      // and put it back, in a session and a replay as offline (the row is chosen by the model the fighter loaded).
+      if (colour_rows) {
+        const doa4::alpha_colours::RowMap rows = doa4::alpha_colours::RowsByModel(applied.applied);
+        doa4::alpha_colours::Install(rows.by_model, rows.names);
+        std::string listed;
+        for (uint32_t model = 0; model < rows.by_model.size(); ++model) {
+          if (rows.by_model[model]) listed += (listed.empty() ? "" : ", ") + rows.names[model] + " = model " + std::to_string(model);
+        }
+        REXLOG_INFO("[doa4][COLOURS] Alpha-152's colour rows installed: {}", listed.empty() ? std::string("none") : listed);
+      }
+      // The boxes can be toggled from the menu later: each state of her box holds her suits too, and her appended colour
+      // costumes; a replacing one adds no costume, so it is not carried (plan F19: costumes::AppendedModels).
+      for (const auto& [character, list] : doa4::costumes::AppendedModels(applied.applied)) {
         const std::string error = patcher_.CarrySuits(guest_, alloc, character, list);
         if (!error.empty()) REXLOG_ERROR("[doa4][SUITS] {}", error);
       }
@@ -2241,7 +2520,9 @@ class DeadOrAlive4App : public rex::ReXApp {
     // The final guard state: Apply's counts (else the image's), and every model whose body files
     // are empty slots in the archives as the game reads them (through the installed overlays).
     const std::string guard_note = doa4::suits::MarkEmptySlots(&guard, guest_, game_root, installed);
-    if (session) {  // the two peers' logs can be compared: heap blocks included, which the frame-0 .data dump does not reach
+    // Every match process (a session, a record run, a replay): the two peers' logs can be compared, heap blocks
+    // included, which the frame-0 .data dump does not reach. The text stays "session:" (tools and pair judges read it).
+    if (kind_ == doa4::colour_costumes::ProcessKind::kMatch) {
       const std::vector<uint8_t> tables = doa4::costumes::TableBytes(guest_, guard);
       REXLOG_INFO("[doa4][SUITS] session: costume tables digest {} ({} bytes)", doa4::gamefiles::Sha1Hex(tables.data(), tables.size()),
                   tables.size());
@@ -2310,6 +2591,9 @@ class DeadOrAlive4App : public rex::ReXApp {
   }
 
   void SetUpExtras() {
+    // Vanilla mode (doa4_vanilla.h): latched once, first, before the early return below (a lobby with no guest memory still
+    // latches) and before any covered reader runs. A match process latches off whatever is saved.
+    doa4::vanilla::Latch(doa4::vanilla::LatchValue(kind_, rex::cvar::Query<bool>("doa4_vanilla_only")));
     rex::Runtime* rt = runtime();
     rex::memory::Memory* memory = rt ? rt->memory() : nullptr;
     if (!memory) {
@@ -2344,6 +2628,8 @@ class DeadOrAlive4App : public rex::ReXApp {
     }
     guest_ready_ = true;
     const auto& tweaks = doa4::tweaks::AllTweaks();
+    // Vanilla mode leaves out the colour and swimsuit rows only: the saved tweak boxes apply at load as with it off.
+    if (doa4::vanilla::Running()) REXLOG_INFO("[doa4][VANILLA] on: colour and swimsuit rows left out; tweaks and Age follow their own boxes");
     for (size_t i = 0; i < tweaks.size(); ++i) {
       if (!rex::cvar::Query<bool>(tweaks[i].cvar)) continue;
       std::string error = patcher_.Apply(guest_, i, true, protect_);

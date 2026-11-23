@@ -81,7 +81,7 @@ def readme_text(tag, port_commit, sdk_commit, changes):
         "Optional: the DOAX2 swimsuits, built on your PC from your own USA copy of Dead or Alive Xtreme 2 (on the first",
         "start, or Esc menu, Extras tab). No DOAX2 data is in this release.",
         "",
-        "Needs Windows 10/11 64-bit, a CPU with AVX2 and at least two cores, and the Microsoft Visual C++ 2015-2022 x64",
+        "Needs Windows 10/11 64-bit, a CPU with SSE4.2 (Intel Core from 2008 (Nehalem) / AMD FX from 2011 (Bulldozer) or newer) and at least two cores, and the Microsoft Visual C++ 2015-2022 x64",
         "runtime. Online play: Esc menu, Online tab (Host, or Join with the other player's code).",
         "",
         "Firewall: the first time you host or join, Windows asks whether to allow the game through the firewall. This",

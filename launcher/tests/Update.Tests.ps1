@@ -30,7 +30,7 @@ Describe 'Install end to end (real git, faked tools and build)' {
         $call.Env.DOA4_SDK_FWD | Should Be ($sdk.Replace('\', '/'))
         $call.Env.DOA4_VSDEVCMD | Should Be (Join-Path $t.Tools.VsPath 'Common7\Tools\VsDevCmd.bat')
         $call.Batch.Contains($t.Root) | Should Be $false
-        $call.Batch | Should Match 'cmake --preset win-amd64-release "-DREXSDK_DIR=%DOA4_SDK_FWD%" "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3"'
+        $call.Batch | Should Match 'cmake --preset win-amd64-release "-DREXSDK_DIR=%DOA4_SDK_FWD%" "-DCMAKE_C_FLAGS=-march=x86-64-v2" "-DCMAKE_CXX_FLAGS=-march=x86-64-v2"'
         $call.Batch | Should Match 'cmake --build --preset win-amd64-release'
     }
     It 'recorded the build, so the status is built' {

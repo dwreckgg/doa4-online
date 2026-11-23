@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.3.8 (unreleased)
+
+### New
+- **No AVX2 needed any more (issue #18).** The game now runs on CPUs with SSE4.2 (Intel Core from 2008 / AMD FX from 2011). Tested by a player on an AMD FX-8350. About 1 % more CPU on newer CPUs.
+- **Heavy stages under Linux/Proton: less time in a memory call.** On Safari and the Experimental Playground the
+  game changes the protection of its animation buffers about 170 to 190 times a frame. Under Proton each of those
+  calls cost 37 to 39 microseconds on a tester's PC (about 2.4 on the developer's Windows PC). The game now skips
+  the host's part of the call where the host's protection would not change or would only become stricter. In the
+  tester's runs (on a test build with the same change) the main thread's
+  wait for the background jobs fell from 12.7 to 8.8 ms a frame on Safari and from 14.0 to 10.7 ms on the
+  Playground; the game's state was identical with the change off and on. On Windows the call was already cheap.
+  If anything misbehaves, `cheap_physical_protect = false` in `dead_or_alive_4.toml` goes back to 0.3.7's
+  behaviour.
+- **Turn controller vibration off** ([issue #25](https://github.com/dwreckgg/doa4-online/issues/25)). Esc menu >
+  Controls: under Player 1 to 4, a "Vibration" box for each controller slot (on by default). Off means that pad never
+  rumbles; unticking it during a rumble stops it at once. It is your own setting: online, the other player's game is
+  not affected.
+- **Colour costumes for Alpha-152 and Spartan-458** ([issue #13](https://github.com/dwreckgg/doa4-online/issues/13)).
+  Alpha-152: COS. 2 red (it was a copy of COS. 1), COS. 3 blue and COS. 4 lilac. Spartan-458: COS. 8 Halo 3 pink,
+  COS. 9 Halo 3 orchid, COS. 10 Halo 2 orange and COS. 11 Halo 2 cyan, after her seven own costumes. No game data is
+  in the release: at the first start the game makes them from your own DOA4 files (about a second, while the window
+  title says "Preparing colour costumes") into a `colour_costumes` folder in your saves folder, about 86 MB. They are
+  in every online session, for both players. A PC that could not make one shows a stand-in for it and still plays
+  the same match.
+- **"Vanilla DoA4 content only"** (Esc menu > Extras, at the top). While it is on (it applies after a restart), the
+  costume select screen leaves out the colour costumes and the DOAX2 swimsuits, and the swimsuit import is off.
+  Nothing is deleted, and the game tweaks, the extra costumes and the "Age:" box follow their own boxes as before. It
+  only changes the game you start: an online session ignores it, and it is not sent to the other player.
+- **"Age:" box and slider for breast movement** (Esc menu > Extras > Physics). Off (the default) is retail DOA4; on,
+  the slider sets the movement for every costume from 1 to 99, and 18 is retail. It takes effect at once. Online, the
+  host's box and age are used for both players. It replaces the "Full DOAX2 breast movement" box, whose old setting is
+  not carried over: the "Age:" box starts off.
+
+### Fixed
+- **Linux/Proton: no black screen at start-up** ([issue #12](https://github.com/dwreckgg/doa4-online/issues/12)).
+  Outside an online session the game opens UDP port 1000 at start. Linux refuses that port to a normal user, and the
+  game then waited on it forever. It now closes that port when the system refuses it, so the game starts under
+  Proton without the `net.ipv4.ip_unprivileged_port_start` workaround. A player confirmed it under GE-Proton11-6. On
+  Windows, where the port is free, nothing changes.
+- **Controller settings changed during an online session are kept.** Button remaps, the keyboard keys, "Use keyboard
+  as controller" and the new vibration boxes, changed in the Esc menu's Controls tab while playing online, were put
+  back to what they were when the session ended. They are your own settings and now stay. Everything the host's
+  game decides for the session is still never saved into your settings.
+- **Story mode fades: no half-second still picture** ([issue #23](https://github.com/dwreckgg/doa4-online/issues/23)).
+  The cross-fade after YOU LOSE / CONTINUE? (and other fades drawn the same way) now fades into the next round
+  instead of holding the old picture for about half a second and then cutting. If a picture looks wrong,
+  `d3d12_constant_alpha_blend_factor = false` in `dead_or_alive_4.toml` draws as 0.3.7 did.
+- **Online Tag matches: no false "desync" at the character select.** When the second fighters were picked, the
+  online check could end the session as a desync although both games were in step: a drawing pointer of the menus,
+  which can differ for a few frames with each PC's loading speed, was part of the check. It is left out now, like
+  the other drawing and timing values. Tested with four online Tag sessions that hit the old cause.
+
+### Notes
+- Both players need 0.3.8: it does not connect to 0.3.7.
+- Linux: players report that the Windows build works under Proton, offline and online, including online with players
+  on Windows. Linux is still not officially supported.
+
 ## 0.3.7 (2026-11-19)
 
 ### New

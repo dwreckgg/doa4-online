@@ -18,6 +18,7 @@ set(DEADORALIVE4_SOURCES
     src/doa4_move_guard_hooks.cpp
     src/doa4_start_rules_hooks.cpp
     src/doa4_alpha_select_hooks.cpp
+    src/doa4_alpha_colours_hooks.cpp
     src/doa4_debug_hooks.cpp
     src/doa4_diag_overlay.cpp
     src/doa4_config.cpp
@@ -40,6 +41,8 @@ set(DEADORALIVE4_SOURCES
     src/doa4_update_notice.cpp
     src/doa4_suits_manifest.cpp
     src/doa4_costumes.cpp
+    src/doa4_colour_costumes.cpp
+    src/doa4_colour_make.cpp
     src/doa4_suits.cpp
     src/doa4_suits_hooks.cpp
     src/doa4_suits_labels.cpp
@@ -167,7 +170,7 @@ endif()
 # contraction without it (phase0_facts.md 3); this keeps it that way.
 target_compile_options(dead_or_alive_4 PRIVATE -ffp-contract=off)
 # Suit converter (Plan 2, "Same bytes on every PC"): the converter's sources must give the same bytes on every PC,
-# so they are built with FMA switched off (these options come after -march=x86-64-v3 from CMAKE_CXX_FLAGS), no
+# so they are built with FMA switched off (these options come after -march=x86-64-v2 from CMAKE_CXX_FLAGS), no
 # contraction, no fast-math and no errno. Each includes src/doa4_suitconv_fp.h first, which refuses to compile
 # when FMA or fast-math is on. Later converter sources are appended to this list.
 set(DOA4_SUITCONV_SOURCES
@@ -195,4 +198,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|x64)$")
     list(PREPEND DOA4_SUITCONV_COMPILE_OPTIONS -mno-fma)
 endif()
 set_source_files_properties(${DOA4_SUITCONV_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "${DOA4_SUITCONV_COMPILE_OPTIONS}")
+# Colour generator: a made file is used only when its SHA-1 equals the one compiled into the slot table, so these
+# sources get the converter's floating-point options too (each includes src/doa4_suitconv_fp.h first).
+set(DOA4_COLOURGEN_SOURCES
+    src/doa4_colourgen_alpha.cpp
+    src/doa4_colourgen_spartan.cpp
+    src/doa4_colourgen_dxt.cpp
+)
+target_sources(dead_or_alive_4 PRIVATE ${DOA4_COLOURGEN_SOURCES})
+set_source_files_properties(${DOA4_COLOURGEN_SOURCES} PROPERTIES
     COMPILE_OPTIONS "${DOA4_SUITCONV_COMPILE_OPTIONS}")

@@ -65,9 +65,13 @@ ImportStatus LoadImport(const std::filesystem::path& folder, const std::filesyst
 // entry about to be replaced is checked again on that open (still an empty slot: 16 bytes of
 // kPlaceholderByte); if the archive changed since LoadImport, the error is
 // "<archive> changed since the import was checked (entry E)".
+// `extra` (the colour costumes' entries, doa4_colour_costumes Replacements, by archive name) joins its archive's
+// replacements without that check (they are real files, not empty slots); an archive with only extra entries gets an
+// overlay too (avt.afs: the overlay is archive-generic and keeps entry 0's offset). An entry named by both a suit and an
+// extra builds nothing: "<archive> entry E is both the swimsuit <label> (tpr|cat) and a colour costume's file".
 std::map<std::string, std::shared_ptr<const afs::Overlay>> BuildOverlays(
     const ImportStatus& status, const std::filesystem::path& game_root, const GuestBytes& guest,
-    std::string* error);
+    std::string* error, const std::map<std::string, std::vector<afs::Replacement>>& extra = {});
 
 // Per archive, per replaced entry: "<label> (tpr)" / "<label> (cat)", for the first-read logs.
 std::map<std::string, std::map<uint32_t, std::string>> EntryLabels(const ImportStatus& status,

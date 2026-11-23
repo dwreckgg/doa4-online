@@ -60,7 +60,7 @@ findstr /b /l /c:"pgo: use " out\pgo_check.txt >nul && set "PGO_USE_LINE=1"
 if defined PGO_USE_LINE if not defined PGO_C echo pgo: use line read but no flag set
 if defined PGO_USE_LINE if not defined PGO_C exit /b 1
 :pgo_ready
-cmake --preset win-amd64-release "-DREXSDK_DIR=%DOA4_SDK%" "-DCMAKE_C_FLAGS=-march=x86-64-v3%PGO_C%" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3%PGO_C%" "-DCMAKE_EXE_LINKER_FLAGS=" "-DCMAKE_SHARED_LINKER_FLAGS=%PGO_SHLINK%" "-DDOA4_RELEASE_CHANNEL=alpha"
+cmake --preset win-amd64-release "-DREXSDK_DIR=%DOA4_SDK%" "-DCMAKE_C_FLAGS=-march=x86-64-v2%PGO_C%" "-DCMAKE_CXX_FLAGS=-march=x86-64-v2%PGO_C%" "-DCMAKE_EXE_LINKER_FLAGS=" "-DCMAKE_SHARED_LINKER_FLAGS=%PGO_SHLINK%" "-DDOA4_RELEASE_CHANNEL=alpha"
 if errorlevel 1 exit /b 1
 exit /b 0
 :build

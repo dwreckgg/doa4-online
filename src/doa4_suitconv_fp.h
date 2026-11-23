@@ -5,7 +5,7 @@
 // Python original does: no fused multiply-add (one rounding where Python rounds twice), no contraction, no fast-math
 // reassociation, no errno-driven library paths. CMakeLists.txt gives these files
 //   -mno-fma -ffp-contract=off -fno-fast-math -fno-math-errno
-// after the target's -march=x86-64-v3, and the host runners pass the same flags through /clang:. If a build drops
+// after the target's -march=x86-64-v2, and the host runners pass the same flags through /clang:. If a build drops
 // them, the checks below stop it at compile time instead of letting it produce different bytes.
 
 #pragma once

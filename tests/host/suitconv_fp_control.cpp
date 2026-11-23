@@ -1,5 +1,5 @@
 // Positive control for suitconv_fp_scan.py and the contraction probe: built WITH FMA and contraction
-// (/clang:-march=x86-64-v3 /clang:-mfma /clang:-ffp-contract=fast) and calling std::pow and std::hypot(float), so
+// (/clang:-march=x86-64-v3 /clang:-mfma /clang:-ffp-contract=fast; v3 on purpose, not the game's v2 level: FMA is in v3 only) and calling std::pow and std::hypot(float), so
 // the scan must report "fma >= 1" and libm pow and _hypotf for its object, and, run as a program on a CPU with FMA,
 // it prints the fused value of the
 // contraction probe (-2^-60), which the converter's ContractionProbe must not give. Not part of any build target.

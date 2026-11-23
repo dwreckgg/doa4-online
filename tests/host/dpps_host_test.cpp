@@ -15,8 +15,8 @@
 // from <rex/ppc/dot_product.h>, not copied): two PCs must print the same
 // "DPPS canonical hash" even where the raw "DPPS combined hash" differs.
 //
-// Built by run_dpps_test.bat with the game's CPU level (-march=x86-64-v3, so the
-// compiler emits VEX vdpps as the game does). The only SDK header is
+// Built by run_dpps_test.bat with the game's CPU level (-march=x86-64-v2, so the
+// compiler emits the legacy-SSE dpps as the game does). The only SDK header is
 // <rex/ppc/dot_product.h> (and simde's, which it includes).
 
 #include <rex/ppc/dot_product.h>

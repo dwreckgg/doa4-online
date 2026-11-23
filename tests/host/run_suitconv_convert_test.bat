@@ -1,6 +1,6 @@
 @echo off
 rem Builds and runs the suit converter's geometry-core host test (convert.py's port at recipe level L0) with clang-cl
-rem (no CMake), under the converter's floating-point flags for every translation unit (x86-64-v3 with FMA switched off, no
+rem (no CMake), under the converter's floating-point flags for every translation unit (x86-64-v2 with FMA switched off, no
 rem contraction, no fast-math, no errno). Converter objects go to %TEMP%\doa4_suitconv_test\obj\ (named after their
 rem source), where suitconv_fp_scan.py scans them before the test runs; the test's own object and the SDK-side sources it
 rem links (afs overlay, xdvdfs, gamefiles) go to ...\testobj\.
@@ -20,7 +20,7 @@ if defined DOA4_SUITCONV_OUT set "OUT=%DOA4_SUITCONV_OUT%"
 if not exist "%OUT%\obj" mkdir "%OUT%\obj"
 if not exist "%OUT%\testobj" mkdir "%OUT%\testobj"
 set "SRC=%~dp0..\..\src"
-set FPFLAGS=/clang:-march=x86-64-v3 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
+set FPFLAGS=/clang:-march=x86-64-v2 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
 set CXXFLAGS=/nologo /std:c++latest /EHsc /O2 %FPFLAGS%
 set "LOG=%OUT%\convert_build.log"
 for %%f in (num sort tpr recipe inputs core trace catx bust waist hands cloth gencloth) do if exist "%OUT%\obj\doa4_suitconv_%%f.obj" del /q "%OUT%\obj\doa4_suitconv_%%f.obj"

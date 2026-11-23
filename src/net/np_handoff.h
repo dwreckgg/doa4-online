@@ -89,11 +89,18 @@ std::vector<uint8_t> Pack(const Handoff& h);
 std::string Unpack(std::span<const uint8_t> bytes, Handoff* out);
 
 // Guest-visible settings (R7). The names, in a fixed order: the SDK cvars of Task 4's census, every tweaks::AllTweaks() cvar,
-// then doa4_suits_full_bust: its rescale writes guest memory, so the session runs the host's value on both PCs, like a box. It
-// is no trust matter, so it is carried, not forced. The Extras tab that changes it is locked in a session, but the SDK's F4
-// settings overlay also writes the cvar, so in a session the reader takes the hand-off's value once (GuestSettingValue,
-// FullBustWanted) and a player's own value comes back when the session ends.
+// then the port's five (np_handoff.cpp kPortSettings): doa4_suits_full_bust, doa4_bust_age_on, doa4_bust_age, doa4_language,
+// doa4_subtitles. The "Age:" box and age: their rescale writes guest memory, so the session runs the host's values on both
+// PCs, like a box. They are no trust matter, so they are carried, not forced. The Extras tab that changes them is locked in
+// a session, but the SDK's F4 settings overlay also writes the cvars, so in a session the reader takes the hand-off's values
+// once (GuestSettingValue, np::SessionBust, AgeWanted) and a player's own values come back when the session ends.
+// doa4_suits_full_bust is no longer read; it stays carried so old recordings and hand-offs, which hold its line, still apply.
 const std::vector<std::string>& GuestSettingNames();
+// The keys a session keeps in the player's config when the Esc menu saves them during the session (the Controls tab:
+// pad_remap_p1..p4, pad_vibration_p1..p4, the 21 keybind_* rows, mnk_mode, mnk_user_index). Every one is the player's
+// own (not carried; the host test pins them against the census), so keeping it cannot persist a host-imposed value.
+// Everything else is restored from the session-start snapshot (carry 2b).
+bool IsSessionLocalKey(std::string_view name);
 // The value of `name` in a guest settings text (the name ends at the first '='), or nothing when no line carries it.
 std::optional<std::string> GuestSettingValue(std::string_view text, std::string_view name);
 // The same for a guest settings text kept as one meta value (np_session GuestMeta: the lines joined by ';', "(none)" when
@@ -102,7 +109,8 @@ std::optional<std::string> GuestMetaValue(std::string_view meta, std::string_vie
 // Where a guest settings text comes from: a session's hand-off, or a replay's recording.
 enum class TextSource { kHandoff, kReplay };
 // R13 (the user's decision): a REPLAY of a recording made before one of the port's own carried settings existed (the
-// port names after the tweaks: doa4_suits_full_bust, doa4_language, doa4_subtitles) applies that setting at its default.
+// port names after the tweaks: doa4_suits_full_bust, doa4_bust_age_on, doa4_bust_age, doa4_language, doa4_subtitles)
+// applies that setting at its default (a 0.3.7 recording: the box off, the age never saved).
 // For kReplay the result is `text` with one "name=<default_of(name)>" line appended per port setting it lacks, in list
 // order, each named in *filled (cleared first); every other line is kept as it is. For kHandoff the result is `text`
 // itself and *filled is empty, so a hand-off without a name is refused exactly as before. Nothing else is filled: a

@@ -37,9 +37,10 @@
 namespace doa4::np {
 
 // Host bookkeeping inside the .data sweep, hashed as zero: each range is touched only by middleware,
-// driver or lock code and never by the game's update (classified by what touches each range). One exception, by judgement: the vblank count is also read
+// driver or lock code and never by the game's update (classified by what touches each range). Two exceptions, by judgement: the vblank count is also read
 // by game code, but only as a wait's exit condition (nothing derived from it is stored); a frame-keyed
-// value would never advance inside that wait.
+// value would never advance inside that wait. And the 2D quad batch's vertex pointer is also read by game code (sub_823BB568), but only
+// to hand it to the batch's own flush as the destination of the vertex copy (nothing derived from it is stored).
 struct SweepMask {
   uint32_t address;
   uint32_t length;
@@ -69,6 +70,26 @@ inline constexpr SweepMask kSweepMasks[] = {
     {0x8357A560, 0x400, "GPU timestamp ring 2 of the graphics object 0x83579C28 (+1292): 64 start and 64 end "
                         "slots stored by the GPU-interrupt callback sub_82765540; read only by sub_82765EF8, "
                         "whose result HoldFrameTiming replaces"},
+    // debug 8357C190: Tag sessions ended in a false "desync at frame 3278" (colour generator ledger G63, G64). Run B3_r1
+    // (no check, every sweep block on every frame, a field log of 0x8357C188): of 164 blocks x 9360 frames only block
+    // 83570000 ever differed, on the 43 frames 3276-3318 (fight state 0, the select screen's second picks), and the
+    // B2_r1 dumps at 3278-3280 differ there only in this word; no digest region and no other .data word ever differed.
+    // The word is the vertex pointer of the guest graphics library's 2D quad batch 0x8357C188 (+0/+4 the floats 640.0
+    // and 360.0, +12 a 24-word vertex staging block, +240.. counts and state): sub_82770488 stores into it the address
+    // sub_82750AC8 allocates in the D3D command buffer (B3_r1: 0xBCD61200..0xBF553450, 5843 distinct values), so it
+    // moves with every command a frame issues, and the select screen's previews issue theirs on a frame that depends on
+    // each PC's loads (at frame 3276 the two PCs were 0x3C00 bytes apart). Readers: np_xref over 8357C180..8357C1A0
+    // lists 26 functions; a second census by constant propagation over every generated function found the same 26,
+    // one level into each callee, and no .data word in the B2_r1 dumps points into the object. Only sub_82770488,
+    // sub_8276F7F0 and sub_823BB568 read the word, each as the destination of the vertex copy (sub_82770990, or
+    // 82770488's own loop) into the command buffer, which the guest never reads back; its only store is the word
+    // itself. +12 (the staging block's first word, written only by the batch's init sub_8276E548) is 0 on every frame
+    // of B3_r1 on both sides and stays hashed. Its twin +108 (0x8357C1F4, with +112 its staging) holds a second
+    // command-buffer pointer, stored by sub_827706A0 and read by sub_8276F7F0 only in batch mode 2; it stays hashed
+    // because mode 2 is never selected (every call of the mode setter sub_8276F6E0 passes 1) and it is 0 in the B2_r1
+    // dumps: a false desync at 0x8357C1F4 would be this same class (review M1, ledger G66).
+    {0x8357C190, 4, "vertex pointer of the 2D quad batch 0x8357C188: the D3D command-buffer address that "
+                    "sub_82750AC8 returns, stored by sub_82770488; read only as the vertex copy's destination"},
     {0x8357D520, 4, "D3D resource id counter (atomic increment in sub_8275D658): ids for D3D state caching"},
 };
 

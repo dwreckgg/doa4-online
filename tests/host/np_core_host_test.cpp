@@ -289,6 +289,31 @@ static void TestMetaMismatch() {
   CHECK(MetaMismatch(meta("aa", "unreadable"), meta("aa", "unreadable")).find("build") == std::string::npos);
 }
 
+// Colour generator plan Task 6: the colour slots are in every process of the build, so a recording no longer says
+// whether it was made with them. No "colours" key is written, and MetaMismatch reads none: a recording of another build
+// is refused by its build key. Each call of MetaMismatch is a statement of its own; each row names what it excludes.
+static void TestColoursKeyIgnored() {
+  std::printf("-- TestColoursKeyIgnored\n");
+  const std::string cur = "build=aa\ndata=dd\nfixes=all\nserial=default\nsweep=4\ntweaks=x=0\n";
+  // Two metas that differ only in a colours=1 line agree, in both orders. Excludes: the key still compared
+  // ("colours 1 vs (none)" and "colours (none) vs 1").
+  { const std::string got = MetaMismatch(cur + "colours=1\n", cur); CHECK(got.empty()); }
+  { const std::string got = MetaMismatch(cur, cur + "colours=1\n"); CHECK(got.empty()); }
+  // Two values of the key agree as well. Excludes: the key compared only when both texts have it.
+  { const std::string got = MetaMismatch(cur + "colours=1\n", cur + "colours=0\n"); CHECK(got.empty()); }
+  // Control: the same pair with a key that is compared. Excludes: a comparison that sees no added line at all.
+  { const std::string got = MetaMismatch(cur + "suits=same\n", cur); CHECK(got == "suits same vs (none)"); }
+  // The key list: nine keys, named in this order, and no tenth. Every one of the nine differs here, and so does a
+  // colours line on each side. Excludes: a key dropped with colours, and colours left in the list.
+  {
+    const std::string got =
+        MetaMismatch("colours=1\nsuits=o\nunlock=0\nguest=m\ntweaks=k\nsweep=i\nserial=g\nfixes=e\ndata=c\nbuild=a\n",
+                     "colours=2\nsuits=p\nunlock=1\nguest=n\ntweaks=l\nsweep=j\nserial=h\nfixes=f\ndata=d\nbuild=b\n");
+    CHECK(got == "build a vs b; data c vs d; fixes e vs f; serial g vs h; sweep i vs j; tweaks k vs l; guest m vs n; "
+                 "unlock 0 vs 1; suits o vs p");
+  }
+}
+
 // The meta keys Task 4 adds: "guest" (the captured guest-visible settings, newlines written as ';') and "unlock"
 // (1 when the session unlocked everything). Task 12 makes the session write them; until then every meta lacks both
 // on both sides and compares equal.
@@ -987,9 +1012,10 @@ static void TestMixedMasksOnlyWhenMixed() {
         CHECK(r[4].masks[i].length == 8);
       }
     }
-    const std::vector<std::pair<uint32_t, uint32_t>> six = {{0x82B747D8, 8},   {0x82F6C9D0, 8},    {0x830ADBCC, 0x1C},
-                                                            {0x831A7AC0, 4},   {0x8357A560, 0x400}, {0x8357D520, 4}};
-    CHECK(SweepRanges(state) == six);
+    const std::vector<std::pair<uint32_t, uint32_t>> seven = {{0x82B747D8, 8},   {0x82F6C9D0, 8},    {0x830ADBCC, 0x1C},
+                                                              {0x831A7AC0, 4},   {0x8357A560, 0x400}, {0x8357C190, 4},
+                                                              {0x8357D520, 4}};
+    CHECK(SweepRanges(state) == seven);
   }
   // kMixed: exactly ruling 15's list, in this order, and no sweep.
   CHECK(!SweepOn(SuitSession::kMixed));
@@ -1295,6 +1321,7 @@ int main() {
   TestQueue();
   TestRecording();
   TestMetaMismatch();
+  TestColoursKeyIgnored();
   TestMetaGuestUnlock();
   TestMaskedCopy();
   TestBlockMasks();

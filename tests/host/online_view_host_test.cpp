@@ -419,6 +419,59 @@ static void TestBanner() {
   CHECK(PeerLeftEnding(5, 100, false) == Ending::kPeerLeft);         // the next number is still "anything else"
 }
 
+// The reason of an internal end on THIS PC (the session was ended here, np::Abort: this PC cannot build the costume
+// tables, or its port did not open) is shown in this PC's banner. Every other ending keeps its text whatever reason is
+// handed in: the other PC's banner never has one. Each call is a statement of its own; each row names what it excludes.
+static void TestBannerReason() {
+  std::printf("-- TestBannerReason\n");
+  const std::string reason = "colour costumes: this PC cannot build the 0.3.8 costume tables: a cause; check the game "
+                             "files (chrthree.afs) and restart";
+  // The internal end with a reason. Excludes: the reason dropped (the text without one).
+  {
+    const std::string got = BannerText(false, Ending::kInternal, "could not open UDP port 7200");
+    CHECK_EQ(got, "The session ended: could not open UDP port 7200. Both games restart.");
+  }
+  {
+    const std::string got = BannerText(false, Ending::kInternal, reason);
+    CHECK_EQ(got, "The session ended: " + reason + ". Both games restart.");
+  }
+  // The internal end with an empty reason, and with none given, is the text it always was. Excludes: an empty
+  // reason printed ("The session ended: . Both games restart.").
+  {
+    const std::string got = BannerText(false, Ending::kInternal, "");
+    CHECK_EQ(got, "The session ended unexpectedly; both games restart.");
+  }
+  {
+    const std::string got = BannerText(false, Ending::kInternal);
+    CHECK_EQ(got, "The session ended unexpectedly; both games restart.");
+  }
+  // Other endings with a reason handed in keep their text. Excludes: the reason shown for every ending.
+  {
+    const std::string got = BannerText(false, Ending::kLost, reason);
+    CHECK_EQ(got, "The other player stopped responding. The session ended; both games restart.");
+  }
+  {
+    const std::string got = BannerText(false, Ending::kPeerLeft, reason);  // what the other PC shows
+    CHECK_EQ(got, "The other player left the session.");
+  }
+  {
+    const std::string got = BannerText(false, Ending::kDesync, reason);
+    CHECK_EQ(got, "The games went out of sync. The session ended; both games restart.");
+  }
+  // No ending: a reason alone shows nothing, and a hold stays a hold. Excludes: the reason shown without an end.
+  {
+    const std::string none = BannerText(false, Ending::kNone, reason);
+    const std::string hold = BannerText(true, Ending::kNone, reason);
+    CHECK_EQ(none, "");
+    CHECK_EQ(hold, "Waiting for the other player...");
+  }
+  // The ending wins over a hold with a reason as without one.
+  {
+    const std::string held = BannerText(true, Ending::kInternal, reason);
+    CHECK_EQ(held, "The session ended: " + reason + ". Both games restart.");
+  }
+}
+
 static void TestTabLogLine() {
   In in = Open(State::kConnected, true);
   in.lobby.can_start = true;
@@ -734,6 +787,7 @@ int main() {
   TestNeedsBuildId();
   TestSessionNote();
   TestBanner();
+  TestBannerReason();
   TestTabLogLine();
   TestUpdateButton();
   TestUpdateLocksJoinHost();

@@ -186,8 +186,9 @@ ImportStatus LoadImport(const std::filesystem::path& folder, const std::filesyst
 
 std::map<std::string, std::shared_ptr<const afs::Overlay>> BuildOverlays(
     const ImportStatus& status, const std::filesystem::path& game_root, const GuestBytes& guest,
-    std::string* error) {
+    std::string* error, const std::map<std::string, std::vector<afs::Replacement>>& extra) {
   std::map<std::string, std::vector<afs::Replacement>> by_archive;
+  std::map<std::string, std::map<uint32_t, std::string>> suit_entries;  // what names each suit entry, for a collision
   for (const LoadedSuit& l : status.suits) {
     const auto tpr = costumes::FileLocation(guest, l.suit.body_tpr);
     const auto cat = costumes::FileLocation(guest, l.suit.body_cat);
@@ -197,6 +198,29 @@ std::map<std::string, std::shared_ptr<const afs::Overlay>> BuildOverlays(
     }
     by_archive[tpr->archive].push_back({tpr->entry, l.tpr});
     by_archive[cat->archive].push_back({cat->entry, l.cat});
+    suit_entries[tpr->archive].emplace(tpr->entry, l.suit.Label() + " (tpr)");
+    suit_entries[cat->archive].emplace(cat->entry, l.suit.Label() + " (cat)");
+  }
+  // The extra entries: no empty-slot check (real files), but never an entry a suit names.
+  for (const auto& [name, replacements] : extra) {
+    const auto suits_here = suit_entries.find(name);
+    for (const afs::Replacement& r : replacements) {
+      if (suits_here == suit_entries.end()) break;
+      const auto named = suits_here->second.find(r.entry);
+      if (named != suits_here->second.end()) {
+        *error = name + " entry " + std::to_string(r.entry) + " is both the swimsuit " + named->second +
+                 " and a colour costume's file";
+        return {};
+      }
+    }
+  }
+  // Which replacements of an archive are suits' (rechecked below) and which are extra (not): the suits' come first.
+  std::map<std::string, size_t> suit_count;
+  for (const auto& [name, replacements] : by_archive) suit_count[name] = replacements.size();
+  for (const auto& [name, replacements] : extra) {
+    if (replacements.empty()) continue;
+    std::vector<afs::Replacement>& list = by_archive[name];
+    list.insert(list.end(), replacements.begin(), replacements.end());
   }
   std::map<std::string, std::shared_ptr<const afs::Overlay>> out;
   for (auto& [name, replacements] : by_archive) {
@@ -213,7 +237,9 @@ std::map<std::string, std::shared_ptr<const afs::Overlay>> BuildOverlays(
       *error = name + ": " + why;
       return {};
     }
-    for (const afs::Replacement& r : replacements) {
+    const size_t suits_here = suit_count.count(name) ? suit_count.at(name) : 0;
+    for (size_t i = 0; i < suits_here; ++i) {
+      const afs::Replacement& r = replacements[i];
       if (r.entry >= toc->count || ClassifySlot(*original, *toc, r.entry) != Slot::kEmpty) {
         *error = name + " changed since the import was checked (entry " + std::to_string(r.entry) + ")";
         return {};
