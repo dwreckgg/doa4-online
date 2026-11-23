@@ -69,8 +69,8 @@ struct MergedKey {
 using Merged = std::vector<MergedKey>;  // keys in first-traversal order
 // Per-axis minimum over every corner (strict <, starting from the first corner). Fails "origin: no triangles".
 std::array<double, 3> Origin(std::span<const Tri>);
-// h empty: identity mode (cell = vid). Otherwise cell = floor((p - org) / h) per axis, held as int64_t: a finite
-// quotient outside int64_t's range (only degenerate inputs reach it) is refused where Python would carry a big int;
+// h empty: identity mode (cell = vid). Otherwise cell = floor((p - org) / h) per axis, held as the floored double
+// itself (an exact integer: two are equal as doubles iff Python's ints are, with -0.0 made 0.0, so no range limit);
 // the non-finite and h == 0 cases fail with Python's exception texts ("ValueError: ...", "OverflowError: ...",
 // "ZeroDivisionError: ..."), at the corner where Python raises.
 // The cell position is a plain sequential sum from 0.0 over the members, divided by their number; the payload is the

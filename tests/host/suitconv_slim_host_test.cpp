@@ -894,15 +894,34 @@ static std::vector<GridCase> GridCases() {
       Ch("choose_inf", {T(1, C(1, inf, 0, 0), C(2, 1, 0, 0), C(3, 0, 1, 0))}, 5),
       // a degenerate face whose cell no kept face references (u6, u7 at H_HI) must not count
       Ch("choose_unreferenced", UnrefTris(), 3),
+      // cells far past 2^63 (Python's floor is a big int; the C++ keys the floored double, exact): 1e300 at h 0.001,
+      // and x = 1e17 inside ChooseH (past 2^63 at H_LO only)
+      M("big_cell_merge", {T(1, C(1, 1e300, 0, 0), C(2, 0, 0, 0), C(3, 0, 1, 0))}, 0.001),
+      Ch("choose_bigcell",
+         {T(1, C(1, 0, 0, 0), C(2, 1e17, 0, 0), C(3, 0, 2, 0)), T(1, C(1, 0, 0, 0), C(4, 0.5, 0, 0), C(3, 0, 2, 0))}, 3),
+      // x = 1e306: finite at H_HI, an infinity at H_LO (the first probe after it), so merge(lo) raises OverflowError
+      Ch("choose_overflow_at_lo",
+         {T(1, C(1, 0, 0, 0), C(2, 1e306, 0, 0), C(3, 0, 2, 0)), T(1, C(1, 0, 0, 0), C(4, 0.5, 0, 0), C(3, 0, 2, 0))},
+         3),
+      // -0.0 beside 0.0 in Merge itself: one cell (the first face degenerate)
+      M("negzero_merge",
+        {T(1, C(1, 0.0, 0, 0, 1), C(2, -0.0, 0, 0, 2), C(3, 0, 2, 0, 3)),
+         T(1, C(1, 0.0, 0, 0, 1), C(4, 2, 0, 0, 4), C(3, 0, 2, 0, 3))},
+        1.0),
   };
 }
 // Pasted verbatim from (2026-11-23; the four choose_inf / choose_keyed_grid / choose_negzero / choose_unreferenced rows
-// added in fix round 1 from the same command, the other 25 unchanged):
+// added in fix round 1 from the same command, then big_cell_merge / choose_bigcell / choose_overflow_at_lo /
+// negzero_merge when the int64 cell deviation was withdrawn; the other 25 unchanged):
 //   tests/host/run_suitconv_slim_test.bat --dump DIR
 //   py -3 -I tests/host/slim_expect.py --grid <doax2_work>/physics_spike/scripts DIR/grid
 // (py -3 = CPython 3.14.7, whose ZeroDivisionError text is "division by zero"; older ones say "float division by zero")
 static const Expected kGridExpected[] = {
     {"all_collapse", "n=0 fnv=cbf29ce484222325"},
+    {"big_cell_merge", "n=3 fnv=df5bcc337d3cc41e"},
+    {"choose_bigcell", "h=3fe0000000000040 lo=3fdfffffffffc090 n=3 fnv=3f2841252947422e"},
+    {"choose_overflow_at_lo", "REFUSED OverflowError: cannot convert float infinity to integer"},
+    {"negzero_merge", "n=3 fnv=6da4117c7f0e7acc"},
     {"cell_mean", "n=4 fnv=cd7f7b107b169817"},
     {"cell_mean_neg", "n=4 fnv=3857fe37c3648a05"},
     {"cell_mean_seq", "n=3 fnv=8b5bf9a90140e8a2"},
@@ -1194,16 +1213,10 @@ static void TestGridRefusals() {
   CheckGridCase("choose_negzero");
   CheckGridCase("choose_inf");
   CheckGridCase("choose_unreferenced");
-  // Deviation (int64_t cells): a finite quotient past int64_t's range, where Python carries a big int, is refused.
-  const Run big = MergeRun({T(1, C(1, 1e300, 0, 0), C(2, 0, 0, 0), C(3, 0, 1, 0))}, 0.001);
-  CHECKF(!big.ok && big.error.rfind("grid cell out of range", 0) == 0, "got \"%s\"", big.error.c_str());
-  // The same deviation inside ChooseH: x = 1e17 fits int64_t at h >= 0.0109 but not at H_LO, the first probe after
-  // H_HI; the count-only probe gives way to Merge, which refuses (slim.py would go on with big ints and return h ~0.5).
-  const Run big_choose = ChooseRun({T(1, C(1, 0, 0, 0), C(2, 1e17, 0, 0), C(3, 0, 2, 0)),
-                                    T(1, C(1, 0, 0, 0), C(4, 0.5, 0, 0), C(3, 0, 2, 0))},
-                                   3);
-  CHECKF(!big_choose.ok && big_choose.error.rfind("grid cell out of range", 0) == 0, "got \"%s\"",
-         big_choose.error.c_str());
+  CheckGridCase("big_cell_merge");
+  CheckGridCase("choose_bigcell");
+  CheckGridCase("choose_overflow_at_lo");
+  CheckGridCase("negzero_merge");
   // Every dumped case has its row, and every row its case.
   size_t rows = 0;
   for (const auto& r : kGridExpected) {

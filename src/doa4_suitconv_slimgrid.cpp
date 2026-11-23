@@ -104,25 +104,21 @@ struct Bucket {
 };
 
 // math.floor((p - o) / h) as Python evaluates it: ZeroDivisionError for h == 0, ValueError for NaN, OverflowError for
-// an infinity. Python's int has no bound; a finite floor outside int64_t (only degenerate inputs: |p - o| / h at or
-// past 2^63) is refused here instead.
-int64_t CellCoord(double p, double o, double h) {
+// an infinity. The cell is the floored double's bits: a finite floor is an exact integer, so two are equal as doubles
+// iff Python's ints are (no range limit); + 0.0 turns floor(-0.0) = -0.0 into 0.0, Python's int 0 like floor(0.0).
+uint64_t CellCoord(double p, double o, double h) {
   // the text of py -3 = CPython 3.14.7 (older ones said "float division by zero")
   if (h == 0.0) Fail("ZeroDivisionError: division by zero");
   const double q = (p - o) / h;
   if (std::isnan(q)) Fail("ValueError: cannot convert float NaN to integer");
   if (std::isinf(q)) Fail("OverflowError: cannot convert float infinity to integer");
-  const double f = std::floor(q);
-  if (!(f >= -9223372036854775808.0 && f < 9223372036854775808.0)) {
-    Fail("grid cell out of range: floor((p - o) / h) does not fit 64 bits (Python would carry a big int)");
-  }
-  return static_cast<int64_t>(f);
+  return DBits(std::floor(q) + 0.0);
 }
 
 // slim.count(slim.merge(tris, h, org)) without building the merge, for ChooseH's probes. Set up once per ChooseH:
 // the distinct positions (by their bits) with p - org per axis (the same subtraction merge does), and the triangles'
-// position indices grouped by key. Count(h) gives the count, or false when some cell is not a finite floor inside
-// int64_t; the caller then runs Merge, which raises Python's error at Python's corner.
+// position indices grouped by key. Count(h) gives the count, or false when some cell is not finite (NaN or an
+// infinity); the caller then runs Merge, which raises Python's error at Python's corner.
 class Counter {
  public:
   Counter(std::span<const Tri> tris, const std::array<double, 3>& org) {
@@ -181,7 +177,7 @@ class Counter {
       double* f = f_[a].data();
       for (size_t i = 0; i < np; ++i) {
         const double v = std::floor(d[i] / h) + 0.0;  // + 0.0: floor(-0.0) is the cell of 0 (Python's int 0)
-        ok &= (v >= -9223372036854775808.0) & (v < 9223372036854775808.0);  // false for NaN and infinities
+        ok &= (v - v == 0.0);  // false for NaN and infinities
         f[i] = v;
       }
     }
@@ -270,7 +266,7 @@ Merged Merge(std::span<const Tri> tris, std::optional<double> h, const std::arra
   const size_t nt = tris.size();
   std::vector<Bucket> buckets;                       // first-traversal order
   Flat<uint32_t> bucket_of(nt);                      // key -> index into buckets
-  Flat<std::array<int64_t, 4>> cell_of(3 * nt);      // (bucket, cell) -> cell index in that bucket
+  Flat<std::array<uint64_t, 4>> cell_of(3 * nt);     // (bucket, cell) -> cell index in that bucket
   Flat<std::array<uint32_t, 3>> member(3 * nt);      // (bucket, cell index, vid) already a member
   Flat<std::array<uint32_t, 4>> kept(nt);            // (bucket, sorted triple) of a kept face
   uint32_t last_key = 0, last_b = kNone;
@@ -290,9 +286,9 @@ Merged Merge(std::span<const Tri> tris, std::optional<double> h, const std::arra
     Triple idx{};
     for (int c = 0; c < 3; ++c) {
       const auto& pos = t.pos[c];
-      std::array<int64_t, 4> cell;
+      std::array<uint64_t, 4> cell;
       if (!h) {
-        cell = {bi, static_cast<int64_t>(t.vid[c]), 0, 0};
+        cell = {bi, t.vid[c], 0, 0};
       } else {
         cell = {bi, CellCoord(pos[0], org[0], *h), CellCoord(pos[1], org[1], *h), CellCoord(pos[2], org[2], *h)};
       }
@@ -363,7 +359,7 @@ size_t Count(const Merged& merged) {
 }
 
 // slim.choose_h. The probes count without building (Counter); a probe Counter cannot place (a non-finite or
-// out-of-range cell) runs the full Merge instead, which raises as Python's merge does at that h.
+// NaN or infinite cell) runs the full Merge instead, which raises as Python's merge does at that h.
 Chosen ChooseH(std::span<const Tri> tris, size_t target) {
   static_assert(kHHi == 1.0, "the refusal text spells H_HI's repr as 1.0");
   const std::array<double, 3> org = Origin(tris);
