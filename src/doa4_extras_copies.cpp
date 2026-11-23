@@ -1,0 +1,171 @@
+// Extras copies: the start-up builder (extras-copies plan, Task 8). See doa4_extras_copies.h.
+
+#include "doa4_extras_copies.h"
+
+#include <chrono>
+#include <exception>
+#include <iterator>
+#include <optional>
+#include <string_view>
+#include <utility>
+
+#include "doa4_gamefiles.h"
+#include "doa4_suitconv_slim.h"
+
+namespace doa4::extras_copies {
+
+namespace {
+
+constexpr std::string_view kOperaBox = "doa4_helena_opera";
+constexpr std::string_view kKimonosBox = "doa4_kokoro_kimonos";
+
+// G0's g0_sha1.txt (ou_runs/extras_refl/g0): the retail files' SHA-1s. Limits: the plan's Global Constraints.
+constexpr Costume kCostumes[] = {
+    {"doa4_helena_opera", "hel03 (extras copy)", "hel03", 16, 17, "46aa6d42e34d093e1cdc198b9e78669a65bb0f5c",
+     "6a7135bff35e25da97a47b77f83d7f26ddcc9a54", 0xFA0000, 0x200000},
+    {"doa4_kokoro_kimonos", "hak03 (extras copy)", "hak03", 46, 47, "00408e2162b8c3dcc6e6bb85a3e22e0ef312ea65",
+     "6b91dc27df6b8190b92cbed6c08a822b1e0300b2", 0xCB0000, 0x300000},
+    {"doa4_kokoro_kimonos", "hak08 (extras copy)", "hak08", 56, 57, "e81b060734d8e908e19dec828c9f9d319f384e71",
+     "de0335bd97423465f078421bab0f489642e195ed", 0xCB0000, 0x300000},
+};
+
+// The callback's answer, with a throw counted as false.
+bool ReadOne(const ReadEntry& read_entry, uint32_t entry, std::vector<uint8_t>* out) {
+  try {
+    return read_entry && read_entry(entry, out);
+  } catch (...) {
+    return false;
+  }
+}
+
+std::string CouldNotRead(uint32_t entry) { return "could not read chrtwo.afs entry " + std::to_string(entry); }
+
+std::string NotRetail(const Costume& c, const char* ext, uint32_t entry) {
+  return std::string(c.name) + "." + ext + " (chrtwo.afs entry " + std::to_string(entry) + ") is not the retail file";
+}
+
+std::string OverLimit(const Costume& c, const char* ext, size_t size, uint32_t limit) {
+  return "the built " + std::string(c.name) + "." + ext + " is " + std::to_string(size) + " bytes, over its limit of " +
+         std::to_string(limit);
+}
+
+// One costume: true with *out filled, or false with *reason. Throws only what the allocator or the string code throws.
+bool BuildOne(const Costume& c, const ReadEntry& read_entry, suitconv::slim::Result* out, std::string* reason) {
+  std::vector<uint8_t> tpr, cat;
+  if (!ReadOne(read_entry, c.tpr_entry, &tpr)) return *reason = CouldNotRead(c.tpr_entry), false;
+  if (!ReadOne(read_entry, c.cat_entry, &cat)) return *reason = CouldNotRead(c.cat_entry), false;
+  if (gamefiles::Sha1Hex(tpr.data(), tpr.size()) != c.tpr_sha1) return *reason = NotRetail(c, "tpr", c.tpr_entry), false;
+  if (gamefiles::Sha1Hex(cat.data(), cat.size()) != c.cat_sha1) return *reason = NotRetail(c, "cat", c.cat_entry), false;
+  suitconv::slim::Result built;
+  std::string error;
+  bool ok = false;
+  try {
+    ok = suitconv::slim::SlimCopies(c.name, tpr, cat, tpr, cat, suitconv::slim::CopyMode::kSlim, &built, &error);
+  } catch (...) {  // SlimCopies promises not to throw; this is the game's start-up (Task 6 M7)
+    ok = false;
+    error = "unexpected non-standard exception";
+  }
+  if (!ok) return *reason = error, false;
+  if (built.tpr.size() > c.tpr_limit) return *reason = OverLimit(c, "tpr", built.tpr.size(), c.tpr_limit), false;
+  if (built.cat.size() > c.cat_limit) return *reason = OverLimit(c, "cat", built.cat.size(), c.cat_limit), false;
+  *out = std::move(built);
+  return true;
+}
+
+}  // namespace
+
+std::span<const Costume> Costumes() { return kCostumes; }
+
+Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::span<const Costume> table) {
+  const auto start = std::chrono::steady_clock::now();
+  Built result;
+  result.boxes_at_start = (opera_on ? 1u : 0u) | (kimonos_on ? 2u : 0u);
+  int selected = 0, built_count = 0;
+  std::optional<gamefiles::Sha1> all;  // over the built files, in table order
+  for (const Costume& c : table) {
+    try {
+      const std::string_view box = c.tweak_cvar ? c.tweak_cvar : "";
+      if (box != kOperaBox && box != kKimonosBox) {
+        result.log.push_back(std::string(c.name ? c.name : "?") + ": never built: unknown box " + std::string(box));
+        continue;
+      }
+      if (!(box == kOperaBox ? opera_on : kimonos_on)) continue;
+      ++selected;
+      suitconv::slim::Result out;
+      std::string reason;
+      if (!BuildOne(c, read_entry, &out, &reason)) {
+        result.log.push_back(std::string(c.name) + ": kept the stand-in: " + reason);
+        continue;
+      }
+      std::string line = std::string(c.name) + ": built (tpr " + std::to_string(out.tpr.size()) + " bytes, cat " +
+                         std::to_string(out.cat.size()) + " bytes)";
+      if (!all) all.emplace();
+      all->Update(out.tpr.data(), out.tpr.size());
+      all->Update(out.cat.data(), out.cat.size());
+      std::vector<afs::Replacement> pair;
+      pair.push_back({c.tpr_entry, std::make_shared<afs::MemorySource>(std::move(out.tpr))});
+      pair.push_back({c.cat_entry, std::make_shared<afs::MemorySource>(std::move(out.cat))});
+      result.chrtwo.insert(result.chrtwo.end(), std::make_move_iterator(pair.begin()),
+                           std::make_move_iterator(pair.end()));
+      result.log.push_back(std::move(line));
+      ++built_count;
+    } catch (const std::exception& e) {
+      try {
+        result.log.push_back(std::string(c.name ? c.name : "?") + ": kept the stand-in: unexpected error: " + e.what());
+      } catch (...) {
+      }
+    } catch (...) {
+      try {
+        result.log.push_back(std::string(c.name ? c.name : "?") +
+                             ": kept the stand-in: unexpected non-standard exception");
+      } catch (...) {
+      }
+    }
+  }
+  try {
+    if (all && built_count > 0) result.sha1 = all->HexDigest();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    result.log.push_back("extras copies: " + std::to_string(built_count) + " built of " + std::to_string(selected) +
+                         " selected in " + std::to_string(ms.count()) + " ms");
+  } catch (...) {
+  }
+  return result;
+}
+
+ReadEntry ReadEntryFromSource(std::shared_ptr<const afs::Source> archive) {
+  struct State {
+    std::shared_ptr<const afs::Source> source;
+    bool tried = false;
+    std::optional<afs::Toc> toc;
+  };
+  auto state = std::make_shared<State>();
+  state->source = std::move(archive);
+  return [state](uint32_t entry, std::vector<uint8_t>* out) -> bool {
+    if (!state->tried) {
+      state->tried = true;
+      if (state->source) state->toc = afs::ReadToc(*state->source, nullptr);
+    }
+    if (!state->toc || entry >= state->toc->count || !out) return false;
+    out->resize(state->toc->sizes[entry]);
+    return state->source->Read(state->toc->offsets[entry], out->data(), out->size());
+  };
+}
+
+ReadEntry ReadEntryFrom(const std::filesystem::path& archive) {
+  struct State {
+    std::filesystem::path path;
+    bool opened = false;
+    ReadEntry inner;
+  };
+  auto state = std::make_shared<State>();
+  state->path = archive;
+  return [state](uint32_t entry, std::vector<uint8_t>* out) -> bool {
+    if (!state->opened) {
+      state->opened = true;
+      state->inner = ReadEntryFromSource(afs::FileSource::Open(state->path));
+    }
+    return state->inner(entry, out);
+  };
+}
+
+}  // namespace doa4::extras_copies

@@ -182,6 +182,9 @@ set(DOA4_SUITCONV_SOURCES
     src/doa4_suitconv_slimwrite.cpp
 )
 target_sources(dead_or_alive_4 PRIVATE ${DOA4_SUITCONV_SOURCES})
+# Extras copies (the start-up builder that calls the slim core): not a converter file, so not in the list above; the
+# core runs under its own floating-point environment inside SlimCopies.
+target_sources(dead_or_alive_4 PRIVATE src/doa4_extras_copies.cpp)
 # -mno-fma exists only for x86 targets (clang refuses it for aarch64); arm64 has no implicit FMA once
 # contraction is off.
 set(DOA4_SUITCONV_COMPILE_OPTIONS -ffp-contract=off -fno-fast-math -fno-math-errno)
