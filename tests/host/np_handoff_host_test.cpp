@@ -2039,9 +2039,10 @@ static void TestCapture() {
   }
 
   // Vanilla mode (colour generator plan Task 7, amendment r2-F9): a host whose lobby latched vanilla mode carries its OWN
-  // live values, the six boxes and the Age box on and the age 40, never the vanilla view (every box off, age 18).
-  // Excludes: a capture that consults vanilla::Running() and sends the vanilla view (plan probe 4), and a vanilla mode
-  // that clears the live values (then the reader below would not return them: R7's live line covers the app side).
+  // live values, the six boxes and the Age box on and the age 40 (vanilla mode leaves the tweaks and Age to their own
+  // boxes; it never changes the values sent).
+  // Excludes: a capture that consults vanilla::Running() and sends a vanilla view, every box off and age 18 (plan probe
+  // 4), and a vanilla mode that clears the live values (then the reader below would not return them).
   std::printf("-- TestCapture (vanilla latched)\n");
   Group("capture: in vanilla mode the host's live boxes and Age go out, not the vanilla view");
   doa4::vanilla::ResetForTest();

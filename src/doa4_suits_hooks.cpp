@@ -97,7 +97,6 @@
 #include "doa4_suits_bust.h"
 #include "doa4_suits_labels.h"
 #include "doa4_unlocks.h"
-#include "doa4_vanilla.h"
 #include "net/np_session.h"
 #include "generated/default/dead_or_alive_4_init.h"
 
@@ -639,11 +638,12 @@ int AgeWanted() {
       from_session = true;
     } else {
       // 3. Offline: the cvars, live, so the Extras box and slider act at once. Read order: the age, then the box (the
-      // menu writes the box, then the age; Review Focus 1). In vanilla mode (a lobby that latched the Extras tab's
-      // "Vanilla DoA4 content only" at start-up) retail movement, the saved values only read (doa4_vanilla.h).
+      // menu writes the box, then the age; Review Focus 1). Vanilla mode does not change this: in vanilla mode a lobby
+      // leaves out the colour and swimsuit rows and refuses the import; tweaks and Age follow their own boxes
+      // (doa4_vanilla.h).
       const int32_t raw = rex::cvar::Query<int32_t>("doa4_bust_age");
       const bool box = rex::cvar::Query<bool>("doa4_bust_age_on");
-      s = bust::OfflineSetting(raw, box, doa4::vanilla::Running());
+      s = bust::LineSetting(raw, box);
     }
   }
   const int age = bust::WantedAge(s);

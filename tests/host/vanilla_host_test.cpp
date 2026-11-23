@@ -1,6 +1,7 @@
-// Host test for src/doa4_vanilla.h (the Extras tab's "Vanilla DoA4 content only" box): the start-up latch and the menu's
-// refusal rule. Each test starts from "never latched" (ResetForTest). Each call of the function under test is a statement
-// of its own; each row's comment names the wrong version it excludes. Built and run by run_vanilla_test.bat.
+// Host test for src/doa4_vanilla.h (the Extras tab's "Vanilla DoA4 content only" box): the start-up latch and the
+// import's status text (the tweaks and Age are not vanilla mode's: they follow their own boxes). Each test starts from
+// "never latched" (ResetForTest). Each call of the function under test is a statement of its own; each row's comment
+// names the wrong version it excludes. Built and run by run_vanilla_test.bat.
 
 #include "../../src/doa4_vanilla.h"
 
@@ -65,23 +66,10 @@ static void TestLatchOnce() {
   { const bool r = vanilla::Running(); CHECK(r == false); }
 }
 
-// The menu's rule: turning a box ON is refused in vanilla mode; turning one off (the wipe) never is.
-static void TestSetTweakRefusedInVanilla() {
-  std::printf("-- TestSetTweakRefusedInVanilla\n");
-  vanilla::ResetForTest();
-  vanilla::Latch(true);
-  // On while running: refused. Excludes: the on-refusal dropped (v4, plan probe 2).
-  { const bool refused = vanilla::RefusesTweak(true); CHECK(refused == true); }
-  // Off while running: allowed. Excludes: a refusal of off too (v5): the wipe could not turn the costume boxes off.
-  { const bool refused = vanilla::RefusesTweak(false); CHECK(refused == false); }
-  vanilla::ResetForTest();
-  vanilla::Latch(false);
-  // On while not running: allowed. Excludes: the refusal read from the argument alone (Running() not read).
-  { const bool refused = vanilla::RefusesTweak(true); CHECK(refused == false); }
-  vanilla::ResetForTest();
-  // On before any latch: allowed (Running() is false then).
-  { const bool refused = vanilla::RefusesTweak(true); CHECK(refused == false); }
-  // WHICH refusal: the menu's status text, exactly. Excludes: another wording (the design's picture shows this one).
+// The swimsuit import's status in vanilla mode (the import is still refused, doa4_menu.cpp), exactly. Excludes: another
+// wording (the design's picture shows this one).
+static void TestOffTextKept() {
+  std::printf("-- TestOffTextKept\n");
   CHECK(std::strcmp(vanilla::kOffText, "off: vanilla mode") == 0);
 }
 
@@ -89,7 +77,7 @@ int main() {
   TestLatchValue();
   TestRunningBeforeLatch();
   TestLatchOnce();
-  TestSetTweakRefusedInVanilla();
+  TestOffTextKept();
   vanilla::ResetForTest();
   std::printf("vanilla: %d checks run\n", g_checks);
   if (g_failures != 0) {

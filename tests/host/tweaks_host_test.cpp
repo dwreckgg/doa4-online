@@ -834,9 +834,9 @@ static void TestCostumeBlockFailure() {
 }
 
 // The tests that use the patch sites' originals.
-// Task 7 (the vanilla box): in vanilla mode no tweak is applied at load, and the wipe still turns a saved-on costume box
-// off, so Apply(i, false) meets a live tweak that was never applied, after EndLoad. It returns no error and the guest
-// bytes equal the start. An EFFECT check, not a no-write check (ledger G50, ruling C1): Apply's off writes the captured
+// A general rule (first written for the vanilla box's Task 7, whose load skipped the tweaks; vanilla mode no longer does):
+// Apply(i, false) on a live tweak that was never applied, after EndLoad (the wipe turning off a box whose apply at load
+// failed or did not run), returns no error and leaves the guest bytes equal to the start. An EFFECT check, not a no-write check (ledger G50, ruling C1): Apply's off writes the captured
 // originals back by design (doa4_tweaks.cpp Apply), which over unchanged bytes changes nothing; a write-back cannot be
 // seen here. Excludes: an off that fails on a never-applied tweak, and one that writes anything but the captured state.
 // The two table tweaks here; the three costume tweaks in TestNeverAppliedCostumeOffWritesNothing (image tier: their
@@ -858,7 +858,7 @@ static void TestNeverAppliedOffWritesNothing() {
 }
 
 // The costume half of TestNeverAppliedOffWritesNothing: each costume box never applied, after EndLoad, turned off (the
-// wipe's call in vanilla mode). An EFFECT check (ruling C1): no error, the tables and every guest byte as at the start,
+// wipe's call on a box that was never applied). An EFFECT check (ruling C1): no error, the tables and every guest byte as at the start,
 // through both write paths (byte writes and whole words).
 static void TestNeverAppliedCostumeOffWritesNothing() {
   std::printf("-- TestNeverAppliedCostumeOffWritesNothing\n");

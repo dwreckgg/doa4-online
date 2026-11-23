@@ -1456,7 +1456,8 @@ class DeadOrAlive4App : public rex::ReXApp {
   // was on) comes down, and a character with a box on stays at her maximum, since the added costumes come last. Writes
   // guest memory off the game thread, so never near a session (UnlockStep does the same at a frame boundary there) nor
   // in a record or replay run, whose guest must not change at a wall-clock moment; DOA4_EXTRAS_REQUEST is the one
-  // exception, a record run standing in for an offline game because only it can take scripted pad input.
+  // exception, a record run standing in for an offline game because only it can take scripted pad input. Its two writes,
+  // the clamp and the raise, run alike in vanilla mode and with it off (vanilla mode leaves the tweaks to their boxes).
   void SyncCostumeCounts() {
     if (!guest_ready_ || SessionLocked()) return;
     static const bool offline_stand_in = doa4::np::TestSwitch("DOA4_EXTRAS_REQUEST") != nullptr;
@@ -1467,16 +1468,6 @@ class DeadOrAlive4App : public rex::ReXApp {
       REXLOG_INFO("[doa4][EXTRAS] {} costume count(s) above the maximum lowered", n);
     }
     if (!doa4::unlocks::FindProfile(guest_)) return;
-    // Vanilla mode raises nothing in the save (the clamp above stays, plan U1): a saved-on box raises its counts again at
-    // the first start with vanilla mode off.
-    if (doa4::vanilla::Running()) {
-      static bool logged = false;  // UiTick runs on the UI thread only
-      if (!logged) {
-        logged = true;
-        REXLOG_INFO("[doa4][VANILLA] costume counts: raise skipped");
-      }
-      return;
-    }
     for (const doa4::tweaks::Tweak& tweak : doa4::tweaks::AllTweaks()) {
       if (tweak.additions.empty() || !rex::cvar::Query<bool>(tweak.cvar)) continue;
       for (const doa4::tweaks::CostumeAddition& addition : tweak.additions) {
@@ -2526,15 +2517,10 @@ class DeadOrAlive4App : public rex::ReXApp {
     }
     guest_ready_ = true;
     const auto& tweaks = doa4::tweaks::AllTweaks();
-    const bool vanilla = doa4::vanilla::Running();
-    if (vanilla) {
-      // No tweak is applied; the saved boxes and their live values stay as they are (vanilla mode never writes them).
-      int saved_on = 0;
-      for (const doa4::tweaks::Tweak& t : tweaks) saved_on += rex::cvar::Query<bool>(t.cvar) ? 1 : 0;
-      REXLOG_INFO("[doa4][VANILLA] on: {} saved boxes not applied", saved_on);
-    }
+    // Vanilla mode leaves out the colour and swimsuit rows only: the saved tweak boxes apply at load as with it off.
+    if (doa4::vanilla::Running()) REXLOG_INFO("[doa4][VANILLA] on: colour and swimsuit rows left out; tweaks and Age follow their own boxes");
     for (size_t i = 0; i < tweaks.size(); ++i) {
-      if (vanilla || !rex::cvar::Query<bool>(tweaks[i].cvar)) continue;
+      if (!rex::cvar::Query<bool>(tweaks[i].cvar)) continue;
       std::string error = patcher_.Apply(guest_, i, true, protect_);
       const bool in_memory = patcher_.IsOn(guest_, i);
       if (error.empty() && in_memory) {
@@ -2547,17 +2533,6 @@ class DeadOrAlive4App : public rex::ReXApp {
     // The load is over: the at-load-only tweak (Alpha-152) is refused from here on, in both directions, so nothing of it is
     // patched while the game runs. Her select model follows the bytes in memory, not the cvar (which the menu may change).
     patcher_.EndLoad();
-    if (vanilla) {
-      // The live values, read back after the load (R7's evidence that vanilla mode tested them and wrote none): the six
-      // tweak cvars in AllTweaks() order, then the Age box and the age.
-      std::string live;
-      for (const doa4::tweaks::Tweak& t : tweaks) {
-        live += fmt::format("{}{}={}", live.empty() ? "" : " ", t.cvar, rex::cvar::Query<bool>(t.cvar));
-      }
-      live += fmt::format(" doa4_bust_age_on={} doa4_bust_age={}", rex::cvar::Query<bool>("doa4_bust_age_on"),
-                          rex::cvar::Query<int32_t>("doa4_bust_age"));
-      REXLOG_INFO("[doa4][VANILLA] live: {}", live);
-    }
     const bool running_alpha152 = patcher_.IsOn(guest_, doa4::tweaks::kAlpha152);
     doa4::alpha_select::Enable(running_alpha152);  // before any guest code: the boot copy's hook reads it
     running_alpha152_.store(running_alpha152 ? 1 : 0, std::memory_order_release);

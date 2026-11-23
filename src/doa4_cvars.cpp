@@ -3,7 +3,8 @@
 #include <rex/cvar.h>
 
 // Extras tab, first row: vanilla mode (doa4_vanilla.h). Latched once at start-up in a lobby process; a match process ignores
-// it. Never carried into a session (it is neither a tweak nor a carried port setting) and never writes a covered setting.
+// it. In a lobby it leaves out the colour and swimsuit rows and refuses the import; tweaks and Age follow their own boxes.
+// Never carried into a session (it is neither a tweak nor a carried port setting) and never writes another setting.
 REXCVAR_DEFINE_BOOL(doa4_vanilla_only, false, "DOA4", "Vanilla DoA4 content only (applies at the next start)");
 
 // Extras tab: game tweaks (doa4_tweaks.h). Applied at load (OnPostLoadXexImage).
