@@ -176,6 +176,7 @@ set(DOA4_SUITCONV_SOURCES
     src/doa4_suitconv_cloth.cpp
     src/doa4_suitconv_gencloth.cpp
     src/doa4_suitconv_job.cpp
+    src/doa4_suitconv_slimread.cpp
 )
 target_sources(dead_or_alive_4 PRIVATE ${DOA4_SUITCONV_SOURCES})
 # -mno-fma exists only for x86 targets (clang refuses it for aarch64); arm64 has no implicit FMA once
