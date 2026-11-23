@@ -9,8 +9,17 @@ a .map beside a .cat is applied with slim_addon.cat_with_map. Prints the C++ tab
     {"<case>", "OK fnv=<FNV-1a 64> len=<bytes>[ stripped=<...> ids=[...]]"},
 or  {"<case>", "REFUSED <SlimError text>"},
 in case-name order, then one buf_set line. Any other exception is printed as ERROR and the exit code is 1.
+
+Grid mode (Task 4): py -3 -I tests/host/slim_expect.py --grid TOOL_DIR DUMP_DIR/grid
+  runs slim.merge (or slim.choose_h) on every <case>.grid the dump wrote and prints the kGridExpected rows
+    {"<case>", "n=<count> fnv=<FNV-1a 64 of the canonical text>"}            (merge)
+    {"<case>", "h=<bits> lo=<bits> n=<count> fnv=<...>"}                     (choose_h)
+    {"<case>", "REFUSED <SlimError text>"} or "REFUSED <ExceptionType>: <text>" for math.floor's and the division's
+  errors. A .grid file: 'case NAME', then 'merge none|<h bits>' or 'choose <target>', then one line per triangle
+  't KEY vid x y z payload vid x y z payload vid x y z payload' (doubles as their IEEE bits, 16 hex digits).
 """
 import os
+import struct
 import sys
 
 
@@ -30,7 +39,73 @@ def c_str(s):
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+def dbits(x):
+    """A double's IEEE bits as 16 hex digits (the C++ Bits()); -0.0 and 0.0 differ."""
+    return struct.pack('>d', x).hex()
+
+
+def bits_d(s):
+    return struct.unpack('>d', bytes.fromhex(s))[0]
+
+
+def canon(merged):
+    """slim.merge's dict as the C++ test's Canon(): per key in dict order 'K<key>:' then 'v<x>,<y>,<z>,<payload>;' per
+    vertex (positions as IEEE bits) and 'f<i>,<j>,<k>;' per face, then '|'."""
+    out = []
+    for key, (verts, faces) in merged.items():
+        out.append(f'K{key}:')
+        for pos, payload in verts:
+            out.append(f'v{dbits(pos[0])},{dbits(pos[1])},{dbits(pos[2])},{payload};')
+        for f in faces:
+            out.append(f'f{f[0]},{f[1]},{f[2]};')
+        out.append('|')
+    return ''.join(out)
+
+
+def grid_main(tool, gdir):
+    """--grid mode: every <case>.grid file the test exe's `--dump DIR` wrote under DIR/grid, run through slim.py."""
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, tool)
+    import slim                             # noqa: E402
+    print(f'# tool {os.path.abspath(slim.__file__)}')
+    bad = 0
+    for fn in sorted(f for f in os.listdir(gdir) if f.endswith('.grid')):
+        lines = open(os.path.join(gdir, fn), encoding='ascii').read().split('\n')
+        name = lines[0].split(' ', 1)[1]
+        mode = lines[1].split(' ')
+        tris = []
+        for ln in lines[2:]:
+            if not ln:
+                continue
+            w = ln.split(' ')
+            assert w[0] == 't', ln
+            corners = []
+            for c in range(3):
+                v = w[2 + 5 * c: 7 + 5 * c]
+                corners.append((int(v[0]), (bits_d(v[1]), bits_d(v[2]), bits_d(v[3])), int(v[4])))
+            tris.append((int(w[1]), tuple(corners)))
+        try:
+            if mode[0] == 'merge':
+                h = None if mode[1] == 'none' else bits_d(mode[1])
+                m = slim.merge(tris, h, slim.origin(tris))
+                line = f'n={slim.count(m)} fnv={fnv(canon(m).encode("ascii")):016x}'
+            else:
+                h, m, lo = slim.choose_h(tris, int(mode[1]))
+                line = f'h={dbits(h)} lo={dbits(lo)} n={slim.count(m)} fnv={fnv(canon(m).encode("ascii")):016x}'
+        except slim.SlimError as e:
+            line = f'REFUSED {e}'
+        except (ValueError, OverflowError, ZeroDivisionError) as e:
+            line = f'REFUSED {type(e).__name__}: {e}'
+        except Exception as e:  # noqa: BLE001
+            line = f'ERROR {type(e).__name__}: {e}'
+            bad += 1
+        print(f'    {{{c_str(name)}, {c_str(line)}}},')
+    return 1 if bad else 0
+
+
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == '--grid':
+        return grid_main(sys.argv[2], sys.argv[3])
     if len(sys.argv) != 3:
         print(__doc__)
         return 2

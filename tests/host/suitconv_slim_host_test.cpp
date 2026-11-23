@@ -9,7 +9,10 @@
 // A summary is "OK fnv=<FNV-1a 64 of the output> len=<bytes> ..." or "REFUSED <the SlimError text>".
 //
 // Groups: synth_round_trip, strip_removes_copies, strip_not_trailing_in_list_order, strip_refusals, cat_map_converter,
-// cat_map_in_place, cat_refusals, map_grammar, buf_set. Last line: "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
+// cat_map_in_place, cat_refusals, map_grammar, buf_set; the grid (Task 4, doa4_suitconv_slimgrid.cpp): merge_identity,
+// merge_cell_mean, merge_degenerate_and_dup, merge_all_collapse, merge_keys_separate, merge_unreferenced, choose_h_fits,
+// choose_h_too_small, deterministic, empty_key, bisect_le_edge, cell_mean_is_sequential, vid_membership,
+// grid_refusals. Last line: "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
 
 #include "../../src/doa4_suitconv_slim.h"
 #include "slim_synth.h"
@@ -21,6 +24,8 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -602,6 +607,586 @@ static void TestBufSet() {
   CHECK(threw);
 }
 
+// ---------------------------------------------------------------- grid merge and bisection (Task 4, slim.py)
+// The ten checks of doax2_work/physics_spike/scripts/test_slim.py and test_slim_addon.py's check_bisect_le_edge, on the
+// same fixtures (grid_tris :54, quad_tris :68). Python's string vids, payloads and tuple keys become integers (a
+// one-to-one renaming: slim.py only compares and hashes them). Expected values are copied from the Python file (its
+// line is named beside each); every fixture is also dumped (--dump DIR writes DIR/grid/<case>.grid) and run through
+// slim.py itself:
+//   py -3 -I tests/host/slim_expect.py --grid <doax2_work>/physics_spike/scripts DIR/grid
+// whose rows are kGridExpected below (pasted verbatim); a row's fnv is over the canonical text Canon() builds.
+namespace grid {
+
+struct Corner {
+  uint32_t vid;
+  double x, y, z;
+  uint32_t payload;
+};
+static Corner C(uint32_t vid, double x, double y, double z, uint32_t payload = 0) { return {vid, x, y, z, payload}; }
+static sl::Tri T(uint32_t key, const Corner& a, const Corner& b, const Corner& c) {
+  sl::Tri t{};
+  t.key = key;
+  const Corner* cs[3] = {&a, &b, &c};
+  for (int i = 0; i < 3; ++i) {
+    t.vid[i] = cs[i]->vid;
+    t.pos[i] = {cs[i]->x, cs[i]->y, cs[i]->z};
+    t.payload[i] = cs[i]->payload;
+  }
+  return t;
+}
+using Tris = std::vector<sl::Tri>;
+
+static uint64_t Bits(double d) {
+  uint64_t u;
+  std::memcpy(&u, &d, sizeof u);
+  return u;
+}
+static std::string Hex16(uint64_t u) {
+  char buf[24];
+  std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(u));
+  return buf;
+}
+// slim_expect.py canon(): per key 'K<key>:', 'v<x>,<y>,<z>,<payload>;' per vertex (IEEE bits), 'f<i>,<j>,<k>;' per
+// face, '|'.
+static std::string Canon(const sl::Merged& m) {
+  std::string s;
+  for (const auto& k : m) {
+    s += "K" + std::to_string(k.key) + ":";
+    for (size_t i = 0; i < k.pos.size(); ++i) {
+      s += "v" + Hex16(Bits(k.pos[i][0])) + "," + Hex16(Bits(k.pos[i][1])) + "," + Hex16(Bits(k.pos[i][2])) + ",";
+      s += (i < k.payload.size() ? std::to_string(k.payload[i]) : std::string("?")) + ";";
+    }
+    for (const auto& f : k.faces)
+      s += "f" + std::to_string(f[0]) + "," + std::to_string(f[1]) + "," + std::to_string(f[2]) + ";";
+    s += "|";
+  }
+  return s;
+}
+static uint64_t FnvText(const std::string& s) {
+  uint64_t h = 0xcbf29ce484222325ull;
+  for (unsigned char v : s) {
+    h ^= v;
+    h *= 0x100000001b3ull;
+  }
+  return h;
+}
+static std::string Summ(const sl::Merged& m) {
+  return "n=" + std::to_string(sl::Count(m)) + " fnv=" + Hex16(FnvText(Canon(m)));
+}
+
+// An expected key written as test_slim.py writes it: (key, ([(pos, payload)...], [faces])).
+struct WantKey {
+  uint32_t key;
+  std::vector<std::pair<std::array<double, 3>, uint32_t>> verts;
+  std::vector<std::array<uint32_t, 3>> faces;
+};
+static std::string Canon(const std::vector<WantKey>& w) {
+  sl::Merged m;
+  for (const auto& k : w) {
+    sl::MergedKey mk;
+    mk.key = k.key;
+    for (const auto& v : k.verts) {
+      mk.pos.push_back(v.first);
+      mk.payload.push_back(v.second);
+    }
+    mk.faces = k.faces;
+    m.push_back(mk);
+  }
+  return Canon(m);
+}
+
+// Non-throwing drivers: a refusal is a value, never the end of a group.
+struct Run {
+  bool ok = false;
+  std::string error;
+  sl::Merged merged;
+  double h = 0, lo = 0;
+};
+static Run MergeRun(const Tris& t, std::optional<double> h) {
+  Run r;
+  try {
+    r.merged = sl::Merge(t, h, sl::Origin(t));
+    r.ok = true;
+  } catch (const std::exception& e) {
+    r.error = e.what();
+  }
+  return r;
+}
+static Run MergeAt(const Tris& t, std::optional<double> h, const std::array<double, 3>& org) {
+  Run r;
+  try {
+    r.merged = sl::Merge(t, h, org);
+    r.ok = true;
+  } catch (const std::exception& e) {
+    r.error = e.what();
+  }
+  return r;
+}
+static Run ChooseRun(const Tris& t, size_t target) {
+  Run r;
+  try {
+    sl::Chosen c = sl::ChooseH(t, target);
+    r.merged = std::move(c.merged);
+    r.h = c.h;
+    r.lo = c.lo;
+    r.ok = true;
+  } catch (const std::exception& e) {
+    r.error = e.what();
+  }
+  return r;
+}
+static std::array<double, 3> OriginOr(const Tris& t) {
+  try {
+    return sl::Origin(t);
+  } catch (const std::exception&) {
+    return {-12345.0, -12345.0, -12345.0};
+  }
+}
+#define CHECK_MERGED(run, want)                                                                                    \
+  do {                                                                                                             \
+    const std::string got_ = (run).ok ? Canon((run).merged) : "REFUSED " + (run).error;                            \
+    const std::string want_ = Canon(want);                                                                         \
+    CHECKF(got_ == want_, "got %s want %s", got_.c_str(), want_.c_str());                                          \
+  } while (0)
+
+// ---- fixtures (test_slim.py)
+// grid_tris (:54-65): 10x10 vertex plane, spacing 0.01, two triangles per square; vid = payload = 10 i + j.
+static Tris GridTris(uint32_t key = 9) {
+  auto v = [](int i, int j) {
+    const uint32_t n = static_cast<uint32_t>(i * 10 + j);
+    return C(n, i * 0.01, j * 0.01, 0.0, n);
+  };
+  Tris t;
+  for (int j = 0; j < 9; ++j)
+    for (int i = 0; i < 9; ++i) {
+      t.push_back(T(key, v(i, j), v(i + 1, j), v(i + 1, j + 1)));
+      t.push_back(T(key, v(i, j), v(i + 1, j + 1), v(i, j + 1)));
+    }
+  return t;
+}
+// grid_tris with triangle n under key ids[n % 3] (the deterministic check's key-id permutation).
+static Tris GridKeyed(const std::array<uint32_t, 3>& ids) {
+  Tris t = GridTris();
+  for (size_t n = 0; n < t.size(); ++n) t[n].key = ids[n % 3];
+  return t;
+}
+// quad_tris (:68-86), K = 5: Q0..Q3 = vids 0..3, C = vid 4 (payload = vid).
+static Tris QuadTris() {
+  const Corner q0 = C(0, 0.0, 0.0, 0.0, 0), q1 = C(1, 3.75, 0.0, 0.0, 1), q2 = C(2, 3.75, 3.75, 0.0, 2),
+               q3 = C(3, 0.0, 3.75, 0.0, 3), c = C(4, 3.25, 0.5, 0.0, 4);
+  return {T(5, q0, q1, c), T(5, q1, q2, c), T(5, q2, q3, c), T(5, q3, q0, c),
+          T(5, c, q3, q2), T(5, q0, q1, q3), T(5, q0, q2, q3)};
+}
+// check_merge_identity (:92-98), K = 7, payload b'pN' = N.
+static Tris IdentityTris() {
+  const Corner v30 = C(30, 0, 0, 0, 30), v10 = C(10, 1, 0, 0, 10), v20 = C(20, 0, 1, 0, 20), v40 = C(40, 1, 1, 0, 40);
+  return {T(7, v30, v10, v20), T(7, v10, v40, v20)};
+}
+// (:107-110), K2 = 8, payload 'sN' = N.
+static Tris IdentityTris2() {
+  const Corner s2 = C(2, 1, 0, 0, 2), s3 = C(3, 0, 1, 0, 3);
+  return {T(8, C(1, 0.0, 0, 0, 1), s2, s3), T(8, C(4, -0.0, 0, 0, 4), s2, s3)};
+}
+// check_merge_cell_mean (:118-124), K = 3.
+static Tris MeanTris() {
+  const Corner v1 = C(1, 0.0, 0.0, 0.0, 1), v2 = C(2, 0.1, 0.0, 0.0, 2), v3 = C(3, 5.0, 0.0, 0.0, 3),
+               v4 = C(4, 0.0, 5.0, 0.0, 4), v5 = C(5, 0.0, 0.0, 5.0, 5);
+  return {T(3, v1, v3, v4), T(3, v2, v3, v5), T(3, v1, v4, v5)};
+}
+// (:146-155), K3 = 6: m1..m3 = 1..3, a..e = 4..8.
+static Tris MeanNegTris() {
+  const Corner m1 = C(1, 0.1, 0, 0, 1), m2 = C(2, 0.2, 0, 0, 2), m3 = C(3, 0.3, 0, 0, 3);
+  const Corner a = C(4, -1.0, 0.5, -2.2, 4), b = C(5, 0.5, -1.5, 1.0, 5), c = C(6, -1.0, 0.5, -1.6, 6),
+               d = C(7, -1.0, 0.5, -2.1, 7), e = C(8, -1.0, 0.5, -1.75, 8);
+  return {T(6, m1, m2, a), T(6, m3, a, b), T(6, c, a, b), T(6, d, e, b)};
+}
+// check_merge_all_collapse (:191-192), K = 1, payload None = 0.
+static Tris CollapseTris() { return {T(1, C(0, 0.0, 0, 0), C(1, 0.1, 0, 0), C(3, 0.3, 0, 0))}; }
+// check_merge_keys_separate (:199-205): Kb = (0,'b') = 9 traversed first, Ka = (0,'a') = 4 (a LOWER id, so an
+// id-ordered output differs from first traversal); vid 'v0' = 0 under both keys.
+static Tris KeysTris() {
+  return {T(9, C(0, 0, 0, 0, 0), C(1, 0, 0, 5, 1), C(2, 5, 5, 5, 2)),
+          T(4, C(0, 0, 0, 0, 0), C(3, 5, 0, 0, 3), C(4, 0, 5, 0, 4))};
+}
+// check_merge_unreferenced (:214-221), K = 2.
+static Tris UnrefTris() {
+  const Corner u1 = C(1, 0, 0, 0, 1), u2 = C(2, 5, 0, 0, 2), u3 = C(3, 0, 5, 0, 3), u6 = C(6, 9.0, 9.0, 9.0, 6),
+               u7 = C(7, 9.5, 9.0, 9.0, 7);
+  return {T(2, u6, u7, u2), T(2, u1, u2, u3)};
+}
+// check_choose_h_too_small (:263-264), K = 4.
+static Tris SmallTris() { return {T(4, C(0, 0, 0, 0), C(1, 2, 0, 0), C(2, 0, 2, 0))}; }
+// check_empty_key (:322-331): Kd = (8,'dead') = 11, Kl = (8,'live') = 10.
+static Tris EmptyKeyTris(bool identity) {
+  const Corner d1 = C(1, 0, 0, 0, 1), d2 = C(2, 0.25, 0, 0, 2), d3 = C(3, 0, 0.5, 0, 3), d4 = C(4, 5, 5, 5, 4);
+  const sl::Tri live = T(10, C(11, 0, 0, 0, 11), C(12, 5, 0, 0, 12), C(13, 0, 5, 0, 13));
+  if (identity) return {T(11, d1, d1, d4), live};
+  return {T(11, d1, d2, d3), T(11, d1, d1, d4), live};
+}
+static const WantKey kLiveWant = {10, {{{0.0, 0.0, 0.0}, 11}, {{5.0, 0.0, 0.0}, 12}, {{0.0, 5.0, 0.0}, 13}}, {{0, 1, 2}}};
+// New (brief R5): one cell of three members whose x are 1e16, 1.0, -1e16 (h = 1e17, so all three share a cell),
+// then a kept face; slim.py:68-71 sums them left to right from 0.0.
+static Tris SeqTris() {
+  const Corner m1 = C(1, 1e16, 0, 0, 1), m2 = C(2, 1.0, 0, 0, 2), m3 = C(3, -1e16, 0, 0, 3);
+  return {T(1, m1, m2, m3), T(1, m1, C(4, 0, 2e17, 0, 4), C(5, 0, 0, 2e17, 5))};
+}
+// New (ruling R2): vids 1 and 2 at one position, vid 3 in the same 1.0-cell: three members, not two.
+static Tris VidSharedPosTris() {
+  const Corner a = C(1, 0, 0, 0, 1), b = C(2, 0, 0, 0, 2), c = C(3, 0.5, 0, 0, 3);
+  return {T(1, a, b, c), T(1, a, C(4, 5, 0, 0, 4), C(5, 0, 5, 0, 5))};
+}
+// New (ruling R2): vid 1 met again in its cell at another position (one member, the first position) and once more in
+// another cell (a member there too).
+static Tris VidRepeatTris() {
+  const Corner a = C(1, 0, 0, 0, 1), a2 = C(1, 0.5, 0, 0, 99), a3 = C(1, 5, 0, 0, 98), b = C(2, 0.25, 0, 0, 2);
+  const Corner y = C(5, 0, 5, 0, 5), z = C(6, 0, 0, 5, 6);
+  return {T(1, a, y, z), T(1, b, a2, a3), T(1, a3, y, z)};
+}
+
+// ---- the cases run through slim.py (the dump) and their expected rows
+struct GridCase {
+  std::string name;
+  Tris tris;
+  bool choose = false;
+  std::optional<double> h;
+  size_t target = 0;
+};
+static GridCase M(std::string n, Tris t, std::optional<double> h) { return {std::move(n), std::move(t), false, h, 0}; }
+static GridCase Ch(std::string n, Tris t, size_t target) {
+  return {std::move(n), std::move(t), true, std::nullopt, target};
+}
+static std::vector<GridCase> GridCases() {
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  return {
+      M("identity", IdentityTris(), std::nullopt),
+      M("identity2", IdentityTris2(), std::nullopt),
+      M("cell_mean", MeanTris(), 1.0),
+      M("cell_mean_neg", MeanNegTris(), 0.5),
+      M("quad", QuadTris(), 1.0),
+      M("all_collapse", CollapseTris(), 1.0),
+      M("keys_separate", KeysTris(), 1.0),
+      M("unreferenced", UnrefTris(), 1.0),
+      M("grid_at_lo", GridTris(), 0.001),
+      M("grid_at_hi", GridTris(), 1.0),
+      Ch("choose_grid_30", GridTris(), 30),
+      Ch("choose_grid_25", GridTris(), 25),
+      Ch("too_small_0", SmallTris(), 0),
+      Ch("too_small_2", SmallTris(), 2),
+      Ch("too_small_3", SmallTris(), 3),
+      M("empty_key_grid", EmptyKeyTris(false), 1.0),
+      M("empty_key_identity", EmptyKeyTris(true), std::nullopt),
+      M("cell_mean_seq", SeqTris(), 1e17),
+      M("vid_shared_pos", VidSharedPosTris(), 1.0),
+      M("vid_repeat", VidRepeatTris(), 1.0),
+      M("keyed_grid", GridKeyed({5, 9, 2}), 0.025),
+      Ch("choose_empty", {}, 5),
+      M("pos_inf", {T(1, C(1, inf, 0, 0), C(2, 1, 0, 0), C(3, 0, 1, 0))}, 1.0),
+      M("pos_nan_first", {T(1, C(1, nan, 0, 0), C(2, 1, 0, 0), C(3, 0, 1, 0))}, 1.0),
+      M("h_zero", QuadTris(), 0.0),
+  };
+}
+// Pasted verbatim from (2026-11-23):
+//   tests/host/run_suitconv_slim_test.bat --dump DIR
+//   py -3 -I tests/host/slim_expect.py --grid <doax2_work>/physics_spike/scripts DIR/grid
+// (py -3 = CPython 3.14.7, whose ZeroDivisionError text is "division by zero"; older ones say "float division by zero")
+static const Expected kGridExpected[] = {
+    {"all_collapse", "n=0 fnv=cbf29ce484222325"},
+    {"cell_mean", "n=4 fnv=cd7f7b107b169817"},
+    {"cell_mean_neg", "n=4 fnv=3857fe37c3648a05"},
+    {"cell_mean_seq", "n=3 fnv=8b5bf9a90140e8a2"},
+    {"choose_empty", "REFUSED origin: no triangles"},
+    {"choose_grid_25", "h=3f926e978d52c7b0 lo=3f926e978d4ec8b6 n=25 fnv=6aa665befd4df7e5"},
+    {"choose_grid_30", "h=3f926e978d52c7b0 lo=3f926e978d4ec8b6 n=25 fnv=6aa665befd4df7e5"},
+    {"empty_key_grid", "n=3 fnv=d2eb8400e834b41d"},
+    {"empty_key_identity", "n=3 fnv=d2eb8400e834b41d"},
+    {"grid_at_hi", "n=0 fnv=cbf29ce484222325"},
+    {"grid_at_lo", "n=100 fnv=3a49efd2b8c50db1"},
+    {"h_zero", "REFUSED ZeroDivisionError: division by zero"},
+    {"identity", "n=4 fnv=e5fe8d38b315047c"},
+    {"identity2", "n=4 fnv=3c4a789678e858e7"},
+    {"keyed_grid", "n=34 fnv=45392ed65bee6637"},
+    {"keys_separate", "n=6 fnv=925af96c1f788f04"},
+    {"pos_inf", "REFUSED OverflowError: cannot convert float infinity to integer"},
+    {"pos_nan_first", "REFUSED ValueError: cannot convert float NaN to integer"},
+    {"quad", "n=4 fnv=dcce830d6584dd3a"},
+    {"too_small_0", "REFUSED count 3 at H_HI = 1.0 exceeds target 0"},
+    {"too_small_2", "REFUSED count 3 at H_HI = 1.0 exceeds target 2"},
+    {"too_small_3", "h=3f50624dd2f1a9fc lo=3f50624dd2f1a9fc n=3 fnv=5c8d55cf4ab71703"},
+    {"unreferenced", "n=3 fnv=0dde03b502129eeb"},
+    {"vid_repeat", "n=4 fnv=81c2d4269d17983a"},
+    {"vid_shared_pos", "n=3 fnv=2eeaf7b0e616e7b3"},
+};
+static std::string CaseSummary(const GridCase& c) {
+  const Run r = c.choose ? ChooseRun(c.tris, c.target) : MergeRun(c.tris, c.h);
+  if (!r.ok) return "REFUSED " + r.error;
+  if (!c.choose) return Summ(r.merged);
+  return "h=" + Hex16(Bits(r.h)) + " lo=" + Hex16(Bits(r.lo)) + " " + Summ(r.merged);
+}
+static void CheckGridCase(const std::string& name) {
+  for (const GridCase& c : GridCases()) {
+    if (c.name != name) continue;
+    const char* want = nullptr;
+    for (const auto& e : kGridExpected)
+      if (name == e.name) want = e.summary;
+    const std::string got = CaseSummary(c);
+    CHECKF(want != nullptr && got == want, "%s: got \"%s\" want \"%s\"", name.c_str(), got.c_str(), want ? want : "(none)");
+    return;
+  }
+  CHECKF(false, "no grid case %s", name.c_str());
+}
+static void WriteGridCase(const fs::path& dir, const GridCase& c) {
+  std::string s = "case " + c.name + "\n";
+  if (c.choose) {
+    s += "choose " + std::to_string(c.target) + "\n";
+  } else {
+    s += std::string("merge ") + (c.h ? Hex16(Bits(*c.h)) : std::string("none")) + "\n";
+  }
+  for (const auto& t : c.tris) {
+    s += "t " + std::to_string(t.key);
+    for (int i = 0; i < 3; ++i) {
+      s += " " + std::to_string(t.vid[i]);
+      for (int a = 0; a < 3; ++a) s += " " + Hex16(Bits(t.pos[i][a]));
+      s += " " + std::to_string(t.payload[i]);
+    }
+    s += "\n";
+  }
+  std::ofstream f(dir / (c.name + ".grid"), std::ios::binary);
+  f.write(s.data(), static_cast<std::streamsize>(s.size()));
+}
+
+}  // namespace grid
+
+static void TestMergeIdentity() {  // test_slim.py check_merge_identity :91-114
+  using namespace grid;
+  const Run r = MergeRun(IdentityTris(), std::nullopt);
+  // want :100-102
+  CHECK_MERGED(r, (std::vector<WantKey>{{7,
+                                         {{{0.0, 0.0, 0.0}, 30}, {{1.0, 0.0, 0.0}, 10}, {{0.0, 1.0, 0.0}, 20},
+                                          {{1.0, 1.0, 0.0}, 40}},
+                                         {{0, 1, 2}, {1, 3, 2}}}}));
+  CHECK(r.ok && sl::Count(r.merged) == 4);  // :104
+  // :112-113: two vids at one position stay two vertices; vid 4's -0.0 kept (bits compared)
+  const Run r2 = MergeRun(IdentityTris2(), std::nullopt);
+  CHECK_MERGED(r2, (std::vector<WantKey>{{8,
+                                          {{{0.0, 0.0, 0.0}, 1}, {{1.0, 0.0, 0.0}, 2}, {{0.0, 1.0, 0.0}, 3},
+                                           {{-0.0, 0.0, 0.0}, 4}},
+                                          {{0, 1, 2}, {3, 1, 2}}}}));
+  CheckGridCase("identity");
+  CheckGridCase("identity2");
+}
+
+static void TestMergeCellMean() {  // check_merge_cell_mean :117-173
+  using namespace grid;
+  const Tris t = MeanTris();
+  const auto org = OriginOr(t);
+  CHECK((org == std::array<double, 3>{0.0, 0.0, 0.0}));  // :126
+  const Run r = MergeAt(t, 1.0, org);
+  const double ax = (0.0 + 0.1) / 2;  // :130
+  // :131-133
+  CHECK_MERGED(r, (std::vector<WantKey>{{3,
+                                         {{{ax, 0.0, 0.0}, 1}, {{5.0, 0.0, 0.0}, 3}, {{0.0, 5.0, 0.0}, 4},
+                                          {{0.0, 0.0, 5.0}, 5}},
+                                         {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}}}}));
+  const double every_corner = (0.0 + 0.1 + 0.0) / 3;  // :137-140
+  CHECK(!(r.ok && !r.merged.empty() && !r.merged[0].pos.empty() && r.merged[0].pos[0][0] == every_corner));
+  const Tris t3 = MeanNegTris();
+  const auto org3 = OriginOr(t3);
+  CHECK((org3 == std::array<double, 3>{-1.0, -1.5, -2.2}));  // :157
+  const double seq_x = (((0.0 + 0.1) + 0.2) + 0.3) / 3;   // :164
+  // :166 fixture precondition
+  CHECK(seq_x != (((0.0 + 0.3) + 0.2) + 0.1) / 3);
+  // :168-172
+  CHECK_MERGED(MergeAt(t3, 0.5, org3),
+               (std::vector<WantKey>{{6,
+                                      {{{seq_x, 0.0, 0.0}, 1},
+                                       {{-1.0, 0.5, (((0.0 + -2.2) + -2.1) + -1.75) / 3}, 4},
+                                       {{0.5, -1.5, 1.0}, 5},
+                                       {{-1.0, 0.5, -1.6}, 6}},
+                                      {{0, 1, 2}, {3, 1, 2}}}}));
+  CheckGridCase("cell_mean");
+  CheckGridCase("cell_mean_neg");
+}
+
+static void TestMergeDegenerateAndDup() {  // check_merge_degenerate_and_dup :176-187
+  using namespace grid;
+  const Tris t = QuadTris();
+  const auto org = OriginOr(t);
+  CHECK((org == std::array<double, 3>{0.0, 0.0, 0.0}));  // :179
+  // :184-186
+  CHECK_MERGED(MergeAt(t, 1.0, org), (std::vector<WantKey>{{5,
+                                                            {{{3.75, 3.75, 0.0}, 2}, {{0.0, 3.75, 0.0}, 3},
+                                                             {{3.5, 0.25, 0.0}, 1}, {{0.0, 0.0, 0.0}, 0}},
+                                                            {{0, 1, 2}, {1, 3, 2}, {3, 0, 1}}}}));
+  CheckGridCase("quad");
+}
+
+static void TestMergeAllCollapse() {  // check_merge_all_collapse :190-195
+  using namespace grid;
+  const Run r = MergeRun(CollapseTris(), 1.0);
+  CHECK(r.ok && r.merged.empty());           // :194
+  CHECK(r.ok && sl::Count(r.merged) == 0);   // :195
+  CheckGridCase("all_collapse");
+}
+
+static void TestMergeKeysSeparate() {  // check_merge_keys_separate :198-210
+  using namespace grid;
+  const Run r = MergeRun(KeysTris(), 1.0);
+  // :207-208 (Kb = 9 first, Ka = 4 second)
+  CHECK_MERGED(r, (std::vector<WantKey>{
+                      {9, {{{0.0, 0.0, 0.0}, 0}, {{0.0, 0.0, 5.0}, 1}, {{5.0, 5.0, 5.0}, 2}}, {{0, 1, 2}}},
+                      {4, {{{0.0, 0.0, 0.0}, 0}, {{5.0, 0.0, 0.0}, 3}, {{0.0, 5.0, 0.0}, 4}}, {{0, 1, 2}}}}));
+  CHECK(r.ok && sl::Count(r.merged) == 6);  // :210
+  CheckGridCase("keys_separate");
+}
+
+static void TestMergeUnreferenced() {  // check_merge_unreferenced :213-224
+  using namespace grid;
+  // :223
+  CHECK_MERGED(MergeRun(UnrefTris(), 1.0),
+               (std::vector<WantKey>{{2, {{{0.0, 0.0, 0.0}, 1}, {{5.0, 0.0, 0.0}, 2}, {{0.0, 5.0, 0.0}, 3}}, {{0, 1, 2}}}}));
+  CheckGridCase("unreferenced");
+}
+
+static void TestChooseHFits() {  // check_choose_h_fits :227-258
+  using namespace grid;
+  CHECK(sl::kHLo == 0.001 && sl::kHHi == 1.0 && sl::kHalvings == 40);  // :229
+  const Tris t = GridTris();
+  CHECK(t.size() == 162);  // :231
+  const auto org = OriginOr(t);
+  CHECK((org == std::array<double, 3>{0.0, 0.0, 0.0}));  // :233
+  const Run at_lo = MergeAt(t, 0.001, org);
+  CHECK(at_lo.ok && sl::Count(at_lo.merged) == 100);  // :236
+  const Run at_hi = MergeAt(t, 1.0, org);
+  CHECK(at_hi.ok && sl::Count(at_hi.merged) == 0);    // :238
+  const Run c = ChooseRun(t, 30);
+  CHECKF(c.ok, "%s", c.error.c_str());
+  CHECK(c.ok && sl::Count(c.merged) <= 30);  // :240
+  CHECK(c.ok && c.h > c.lo);                 // :242
+  const double bound = (1.0 - 0.001) / 1099511627776.0;  // :248, 2 ** 40
+  const double width = c.h - c.lo;                         // :249
+  CHECKF(c.ok && bound * (1 - 1e-6) < width && width <= bound * (1 + 1e-6), "width %.17g bound %.17g", width, bound);  // :250
+  CHECK(c.ok && 0.001 < c.h && c.h <= 1.0);  // :252
+  const Run n_lo = MergeAt(t, c.lo, org);
+  CHECK(c.ok && n_lo.ok && sl::Count(n_lo.merged) > 30);  // :254-255
+  const Run at_h = MergeAt(t, c.h, org);
+  CHECK(c.ok && at_h.ok && !c.merged.empty() && Canon(c.merged) == Canon(at_h.merged));  // :258
+  CheckGridCase("grid_at_lo");
+  CheckGridCase("grid_at_hi");
+  CheckGridCase("choose_grid_30");
+}
+
+static void TestChooseHTooSmall() {  // check_choose_h_too_small :261-277
+  using namespace grid;
+  const Tris t = SmallTris();
+  const Run at_hi = MergeAt(t, 1.0, OriginOr(t));
+  CHECK(at_hi.ok && sl::Count(at_hi.merged) == 3);  // :266
+  for (size_t target : {size_t{0}, size_t{2}}) {    // :267-273 (the text: slim.py:147, through the dump rows)
+    const Run r = ChooseRun(t, target);
+    const std::string want = "count 3 at H_HI = 1.0 exceeds target " + std::to_string(target);
+    CHECKF(!r.ok && r.error == want, "target %zu: got \"%s\"", target, r.error.c_str());
+  }
+  const Run r3 = ChooseRun(t, 3);
+  CHECK(r3.ok && r3.h == 0.001 && r3.lo == 0.001);  // :276
+  CHECK(r3.ok && sl::Count(r3.merged) == 3);        // :277
+  CheckGridCase("too_small_0");
+  CheckGridCase("too_small_2");
+  CheckGridCase("too_small_3");
+}
+
+static void TestDeterministic() {  // check_deterministic :303-318, as ruled (R5)
+  using namespace grid;
+  const Run a = ChooseRun(GridTris(), 30), b = ChooseRun(GridTris(), 30);
+  CHECK(a.ok && b.ok && !a.merged.empty() && Bits(a.h) == Bits(b.h) && Bits(a.lo) == Bits(b.lo) &&
+        Canon(a.merged) == Canon(b.merged));
+  const Tris q = QuadTris();
+  const Run m1 = MergeAt(q, 1.0, OriginOr(q)), m2 = MergeAt(QuadTris(), 1.0, OriginOr(q));
+  CHECK(m1.ok && m2.ok && !m1.merged.empty() && Canon(m1.merged) == Canon(m2.merged));
+  // The same triangles with their key ids permuted (5 -> 2, 9 -> 5, 2 -> 9), traversal order unchanged: the same output
+  // once the ids are mapped back. Each side has three keys (non-vacuous).
+  const Run p1 = MergeRun(GridKeyed({5, 9, 2}), 0.025);
+  Run p2 = MergeRun(GridKeyed({2, 5, 9}), 0.025);
+  CHECK(p1.ok && p2.ok && p1.merged.size() == 3 && p2.merged.size() == 3);
+  CHECK(p1.ok && p1.merged.size() == 3 && p1.merged[0].key == 5 && p1.merged[1].key == 9 && p1.merged[2].key == 2);
+  for (auto& k : p2.merged) k.key = k.key == 2 ? 5 : k.key == 5 ? 9 : k.key == 9 ? 2 : 0;
+  CHECK(p1.ok && p2.ok && !p1.merged.empty() && Canon(p1.merged) == Canon(p2.merged));
+  CheckGridCase("keyed_grid");
+}
+
+static void TestEmptyKey() {  // check_empty_key :321-337
+  using namespace grid;
+  CHECK_MERGED(MergeRun(EmptyKeyTris(false), 1.0), (std::vector<WantKey>{kLiveWant}));         // :333
+  CHECK_MERGED(MergeRun(EmptyKeyTris(true), std::nullopt), (std::vector<WantKey>{kLiveWant}));  // :337
+  CheckGridCase("empty_key_grid");
+  CheckGridCase("empty_key_identity");
+}
+
+static void TestBisectLeEdge() {  // test_slim_addon.py check_bisect_le_edge :945-957
+  using namespace grid;
+  const Tris t = GridTris();
+  const auto org = OriginOr(t);
+  const Run c = ChooseRun(t, 25);
+  const Run at_lo = MergeAt(t, c.lo, org);
+  const size_t n_h = c.ok ? sl::Count(c.merged) : 999, n_lo = at_lo.ok ? sl::Count(at_lo.merged) : 0;
+  CHECKF(c.ok && n_h <= 25, "n_h %zu", n_h);    // :955
+  CHECKF(c.ok && n_lo > 25, "n_lo %zu", n_lo);  // :956
+  CHECK(c.ok && c.lo < c.h);                    // :957
+  CheckGridCase("choose_grid_25");
+}
+
+static void TestCellMeanIsSequential() {  // brief R5; slim.py:68-71
+  using namespace grid;
+  const double plain = (((0.0 + 1e16) + 1.0) + -1e16) / 3;
+  doa4::suitconv::num::PySum ps;
+  for (double v : {1e16, 1.0, -1e16}) ps.Add(v);
+  CHECKF(plain != ps.Result() / 3, "fixture precondition: plain %.17g compensated %.17g", plain, ps.Result() / 3);
+  CHECK_MERGED(MergeRun(SeqTris(), 1e17),
+               (std::vector<WantKey>{{1, {{{plain, 0.0, 0.0}, 1}, {{0.0, 2e17, 0.0}, 4}, {{0.0, 0.0, 2e17}, 5}}, {{0, 1, 2}}}}));
+  CheckGridCase("cell_mean_seq");
+}
+
+static void TestVidMembership() {  // ruling R2
+  using namespace grid;
+  // three distinct vids in the cell: x = ((0 + 0) + 0.5) / 3, payload vid 1's
+  CHECK_MERGED(MergeRun(VidSharedPosTris(), 1.0),
+               (std::vector<WantKey>{{1,
+                                      {{{((0.0 + 0.0) + 0.0 + 0.5) / 3, 0.0, 0.0}, 1},
+                                       {{5.0, 0.0, 0.0}, 4},
+                                       {{0.0, 5.0, 0.0}, 5}},
+                                      {{0, 1, 2}}}}));
+  CheckGridCase("vid_shared_pos");
+  // cell 0 = [vid 1 at 0, vid 2 at 0.25] (vid 1's second position not a member); vid 1 at 5 is cell 3's member
+  CHECK_MERGED(MergeRun(VidRepeatTris(), 1.0),
+               (std::vector<WantKey>{{1,
+                                      {{{(0.0 + 0.0 + 0.25) / 2, 0.0, 0.0}, 1},
+                                       {{0.0, 5.0, 0.0}, 5},
+                                       {{0.0, 0.0, 5.0}, 6},
+                                       {{5.0, 0.0, 0.0}, 98}},
+                                      {{0, 1, 2}, {3, 1, 2}}}}));
+  CheckGridCase("vid_repeat");
+}
+
+static void TestGridRefusals() {
+  using namespace grid;
+  // Origin of nothing (slim.py:45-46), through ChooseH
+  const Run e = ChooseRun({}, 5);
+  CHECKF(!e.ok && e.error == "origin: no triangles", "got \"%s\"", e.error.c_str());
+  CheckGridCase("choose_empty");
+  CheckGridCase("pos_inf");
+  CheckGridCase("pos_nan_first");
+  CheckGridCase("h_zero");
+  // Deviation (int64_t cells): a finite quotient past int64_t's range, where Python carries a big int, is refused.
+  const Run big = MergeRun({T(1, C(1, 1e300, 0, 0), C(2, 0, 0, 0), C(3, 0, 1, 0))}, 0.001);
+  CHECKF(!big.ok && big.error.rfind("grid cell out of range", 0) == 0, "got \"%s\"", big.error.c_str());
+  // Every dumped case has its row, and every row its case.
+  size_t rows = 0;
+  for (const auto& r : kGridExpected) {
+    (void)r;
+    ++rows;
+  }
+  CHECKF(rows == GridCases().size(), "rows %zu cases %zu", rows, GridCases().size());
+}
+
 // ---------------------------------------------------------------- dump mode
 static int Dump(const fs::path& dir) {
   fs::create_directories(dir);
@@ -618,6 +1203,11 @@ static int Dump(const fs::path& dir) {
       put(dir / (c.name + ".tpr"), c.tpr);
       put(dir / (c.name + ".cat"), c.cat);
     }
+    ++n;
+  }
+  fs::create_directories(dir / "grid");
+  for (const grid::GridCase& c : grid::GridCases()) {
+    grid::WriteGridCase(dir / "grid", c);
     ++n;
   }
   std::printf("dumped %d cases to %s\n", n, dir.string().c_str());
@@ -637,6 +1227,20 @@ int main(int argc, char** argv) {
   RunGroup(TestCatRefusals, "cat_refusals");
   RunGroup(TestMapGrammar, "map_grammar");
   RunGroup(TestBufSet, "buf_set");
+  RunGroup(TestMergeIdentity, "merge_identity");
+  RunGroup(TestMergeCellMean, "merge_cell_mean");
+  RunGroup(TestMergeDegenerateAndDup, "merge_degenerate_and_dup");
+  RunGroup(TestMergeAllCollapse, "merge_all_collapse");
+  RunGroup(TestMergeKeysSeparate, "merge_keys_separate");
+  RunGroup(TestMergeUnreferenced, "merge_unreferenced");
+  RunGroup(TestChooseHFits, "choose_h_fits");
+  RunGroup(TestChooseHTooSmall, "choose_h_too_small");
+  RunGroup(TestDeterministic, "deterministic");
+  RunGroup(TestEmptyKey, "empty_key");
+  RunGroup(TestBisectLeEdge, "bisect_le_edge");
+  RunGroup(TestCellMeanIsSequential, "cell_mean_is_sequential");
+  RunGroup(TestVidMembership, "vid_membership");
+  RunGroup(TestGridRefusals, "grid_refusals");
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
     return 1;

@@ -44,14 +44,22 @@ Result AddCopies(std::span<const uint8_t> tpr, std::span<const uint8_t> cat, std
 bool SlimCopies(std::span<const uint8_t> tpr, std::span<const uint8_t> cat, std::span<const uint8_t> ref_tpr,
                 std::span<const uint8_t> ref_cat, CopyMode mode, Result* out, std::string* error);
 
-// ---------------------------------------------------------------- grid (Task 4)
-// A corner carries a position and an opaque payload index; a key is an opaque integer id given in first-traversal
-// order by the caller.
+// ---------------------------------------------------------------- grid (Task 4, bodies in doa4_suitconv_slimgrid.cpp)
+// slim.py: origin, merge, count, choose_h. A corner carries a source identity (vid), a position and an opaque payload
+// index; a key is an opaque integer id given by the caller (it only names the bucket: output order is the keys'
+// first-traversal order, never their numeric order). A cell's members are the DISTINCT vids that land in it (slim.py's
+// b.seen), so two corners at one position with different vids are two members, and a vid met again in the same cell
+// is one. (The plan's Interfaces had no vid; Python's membership needs one, so Tri carries it: Task 4 ruling R2.)
 struct Tri {
   uint32_t key;
+  std::array<uint32_t, 3> vid;
   std::array<std::array<double, 3>, 3> pos;
   std::array<uint32_t, 3> payload;
 };
+// slim.py's constants (H_LO, H_HI, HALVINGS).
+inline constexpr double kHLo = 0.001;
+inline constexpr double kHHi = 1.0;
+inline constexpr int kHalvings = 40;
 struct MergedKey {
   uint32_t key;
   std::vector<std::array<double, 3>> pos;
@@ -59,7 +67,14 @@ struct MergedKey {
   std::vector<std::array<uint32_t, 3>> faces;
 };
 using Merged = std::vector<MergedKey>;  // keys in first-traversal order
+// Per-axis minimum over every corner (strict <, starting from the first corner). Fails "origin: no triangles".
 std::array<double, 3> Origin(std::span<const Tri>);
+// h empty: identity mode (cell = vid). Otherwise cell = floor((p - org) / h) per axis, held as int64_t: a finite
+// quotient outside int64_t's range (only degenerate inputs reach it) is refused where Python would carry a big int;
+// the non-finite and h == 0 cases fail with Python's exception texts ("ValueError: ...", "OverflowError: ...",
+// "ZeroDivisionError: ..."), at the corner where Python raises.
+// The cell position is a plain sequential sum from 0.0 over the members, divided by their number; the payload is the
+// first member's; identity mode keeps the first member's own position.
 Merged Merge(std::span<const Tri>, std::optional<double> h, const std::array<double, 3>& org);
 size_t Count(const Merged&);
 struct Chosen {
