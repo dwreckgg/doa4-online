@@ -128,7 +128,7 @@ static const char* const kSdkNames[] = {
     "vsync", "readback_resolve", "readback_resolve_half_pixel_offset", "readback_memexport",
     "readback_memexport_fast", "d3d12_readback_resolve", "d3d12_readback_memexport", "vulkan_readback_resolve",
     "vulkan_readback_memexport", "query_occlusion_fake_sample_count", "occlusion_query_enable", "clear_memory_page_state",
-    "gpu_upload_prefetch", "async_shader_compilation", "audio_maxqframes",
+    "gpu_upload_prefetch", "gpu_submit_snapshot", "async_shader_compilation", "audio_maxqframes",
 };
 struct NotCarried {
   const char* name;
@@ -187,6 +187,7 @@ static const NotCarried kSdkNotCarried[] = {
     {"gpu_allow_invalid_fetch_constants", "gpu-render"},
     {"gpu_debug_markers", "log"},
     {"gpu_refresh_stretch_ms", "gpu-budget"},  // N2 probe: host-timing test switch, default 0; its run computed records equal to the run without it
+    {"gpu_submit_snapshot_check", "log"},  // submit snapshot diagnostic: counts and logs only
     {"guide_button", "input"},
     {"half_pixel_offset", "gpu-render"},
     {"headless", "excluded"},
@@ -359,7 +360,7 @@ static constexpr size_t kSdkCount = sizeof(kSdkNames) / sizeof(kSdkNames[0]);
 static constexpr size_t kSdkNotCarriedCount = sizeof(kSdkNotCarried) / sizeof(kSdkNotCarried[0]);
 static constexpr size_t kPortNotCarriedCount = sizeof(kPortNotCarried) / sizeof(kPortNotCarried[0]);
 static constexpr size_t kTrustedCount = sizeof(kTrusted) / sizeof(kTrusted[0]);
-static constexpr size_t kSdkTotal = 213;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend, +4 pad vibration)
+static constexpr size_t kSdkTotal = 215;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend, +4 pad vibration, +2 submit snapshot)
 
 // The expected names: the carried list, then the Extras tweak cvars of the tweaks module.
 // The port's own carried settings beyond the tweaks: they change guest memory and are no trust matter (np_handoff.cpp
@@ -1669,7 +1670,7 @@ static void TestGuestNames() {
   Group("guest settings: the names are the census list, then every Extras tweak cvar, in that order");
   const std::vector<std::string>& names = ho::GuestSettingNames();
   const std::vector<std::string> want = ExpectedNames();
-  CHECK(kSdkCount == 39);
+  CHECK(kSdkCount == 40);
   CHECK(doa4::tweaks::AllTweaks().size() >= 2);
   CHECK(names.size() == want.size());
   CHECK(names == want);
