@@ -3365,6 +3365,14 @@ def test_frame0_diff(root):
     for addr, length in mod.SWEEP_MASKS:
         full_b[addr - DUMP_LO + length - 1] ^= 0xFF
     check(mod.frame0_difference(bytes(full_a), bytes(full_b)) is None, "frame0_difference: every mask's last byte on a full dump")
+    # the 2D quad batch's vertex pointer 8357C190+4 (np_digest.h; the false Tag desync of run B3_r1): its first and last bytes are
+    # masked; the batch's +4 word just before it and its staging word at +12 (8357C194) just past it stay hashed
+    for at, masked_byte in ((0x8357C190, True), (0x8357C193, True), (0x8357C18F, False), (0x8357C194, False)):
+        fb = bytearray(full_a)
+        fb[at - DUMP_LO] ^= 0xFF
+        got = mod.frame0_difference(bytes(full_a), bytes(fb))
+        want = None if masked_byte else (at, 0x83570000)
+        check(got == want, f"frame0_difference: {at:08X} {'masked' if masked_byte else 'differs'} on a full dump: {got}")
 
 
 def test_handle_shift(root):
