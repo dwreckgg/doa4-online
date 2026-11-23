@@ -12,11 +12,18 @@
 // cat_map_in_place, cat_refusals, map_grammar, buf_set; the grid (Task 4, doa4_suitconv_slimgrid.cpp): merge_identity,
 // merge_cell_mean, merge_degenerate_and_dup, merge_all_collapse, merge_keys_separate, merge_unreferenced, choose_h_fits,
 // choose_h_too_small, deterministic, empty_key, bisect_le_edge, cell_mean_is_sequential, vid_membership,
-// grid_refusals. Last line: "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
+// grid_refusals; the layout and scan (Task 5, doa4_suitconv_slimscan.cpp): channel_lowest_code, shallowest_then_lowest_id,
+// ids_from_own_count, heaviest_tie_lowest_bone, first_vertex_after_swap, strip_tris_restart,
+// corner_adds_world_translation, world_mats_compensated, t1_first_row_per_code, neck_n2, kind2_skips_untextured,
+// matsrc_first_mesh, to_local_compensated, frame_dev_threshold, vids_one_to_one, key_fields_separate,
+// index_slice_clamps, out_of_range_refuses, kind4_payload_has_no_attributes, scan_refusals. `--bench` prints the scan's
+// time on a synthetic suit of about 25000 triangles. Last line: "PASSED: N checks, 0 failures" or "FAILED: ...".
 
 #include "../../src/doa4_suitconv_slim.h"
 #include "slim_synth.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -25,7 +32,10 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <map>
+#include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1226,6 +1236,946 @@ static void TestGridRefusals() {
   CHECKF(rows == GridCases().size(), "rows %zu cases %zu", rows, GridCases().size());
 }
 
+// ---------------------------------------------------------------- layout and scan (Task 5, doa4_suitconv_slimscan.cpp)
+// Every scene is synthetic: a suit (main nodes, objects with real vertex records, a map with its main group only) and a
+// reference (the suit's main nodes, plus copy nodes, one default object per node, a map with groups 0x02, a state group
+// and 0x04). Each case is dumped (--dump DIR writes DIR/scan/<case>.tpr/.cat and <case>.ref.tpr/.ref.cat, plus
+// DIR/scan/tolocal.txt) and run through the Python tool:
+//   py -3 -I tests/host/slim_expect.py --scan <doax2_work>/physics_spike/scripts DIR/scan
+// whose rows are kScanExpected and kToLocalExpected below (pasted verbatim). A row is the Layout's canonical text fnv,
+// node_of_code, and per kind the triangle, key and vid counts, the fnv of the scan's canonical text (keys with every
+// field and matsrc's fnv, vid sources, per corner vid, position bits and payload) and each triangle's copy node.
+namespace scan {
+
+struct NodeDef {
+  int64_t id, parent_id;  // parent by id (-1: a root); positions follow the list order
+  double tx, ty, tz;
+  std::optional<std::array<double, 16>> mat = std::nullopt;
+};
+struct DeclDef {
+  std::vector<Bytes> verts;
+  std::vector<uint16_t> idx;
+  std::vector<tp::DeclElem> elems = synth::StdElems();
+  uint32_t stride = synth::kStride;
+};
+struct ObjDef {
+  std::vector<uint16_t> palette;
+  std::vector<DeclDef> decls;
+  std::vector<synth::MeshSpec> meshes;
+  uint32_t infos_short = 0;
+};
+using Rows = std::vector<std::pair<uint32_t, uint8_t>>;
+struct Scene {
+  std::vector<NodeDef> suit_nodes, ref_nodes;
+  Rows main, ref_main, g2, g4;
+  std::vector<ObjDef> objs;
+  std::vector<sl::MapGroup> extra_groups;  // added to the reference's map after group 0x04
+};
+
+static std::vector<synth::Node> Tree(const std::vector<NodeDef>& defs) {
+  std::vector<synth::Node> out;
+  std::map<int64_t, int64_t> pos;
+  for (size_t k = 0; k < defs.size(); ++k) pos[defs[k].id] = static_cast<int64_t>(k);
+  for (const NodeDef& d : defs)
+    out.push_back(synth::Node{d.id, d.parent_id < 0 ? -1 : pos.at(d.parent_id), {}, d.tx, d.ty, d.tz, d.mat});
+  for (size_t k = 0; k < out.size(); ++k)
+    if (out[k].parent >= 0) out[static_cast<size_t>(out[k].parent)].children.push_back(static_cast<int64_t>(k));
+  return out;
+}
+
+static synth::Model SuitModel(const Scene& sc) {
+  synth::Model m;
+  m.SetNodes(Tree(sc.suit_nodes));
+  uint32_t at = 0x100;
+  const auto place = [&at](const Bytes& content) {
+    const uint32_t base = static_cast<uint32_t>(tp::Al(at, 0x100));
+    at = base + static_cast<uint32_t>(content.size());
+    return synth::Buf{base, static_cast<uint32_t>(tp::Al(std::max<size_t>(content.size(), 4), 4)), 0, content};
+  };
+  for (size_t k = 0; k < sc.objs.size(); ++k) {
+    const ObjDef& od = sc.objs[k];
+    synth::Object o{static_cast<uint32_t>(k), static_cast<uint32_t>(k), 0, 0, 0, 0};
+    o.palette = od.palette;
+    o.meshes = od.meshes;
+    o.infos_short = od.infos_short;
+    for (const DeclDef& dd : od.decls) {
+      Bytes vb;
+      for (const Bytes& v : dd.verts) vb.insert(vb.end(), v.begin(), v.end());
+      const uint32_t vbi = static_cast<uint32_t>(m.vbufs.size()), ibi = static_cast<uint32_t>(m.ibufs.size());
+      m.vbufs.push_back(place(vb));
+      m.ibufs.push_back(place(synth::Idx16(dd.idx)));
+      o.decls.push_back(synth::DeclSpec{vbi, ibi, static_cast<uint32_t>(dd.verts.size()),
+                                        static_cast<uint32_t>(dd.idx.size()), dd.stride, dd.elems});
+    }
+    m.objects.push_back(std::move(o));
+  }
+  m.SetDataEnd(static_cast<uint32_t>(tp::Al(at, 16)));
+  m.SetGroups({synth::Main(sc.main)});
+  return m;
+}
+
+static synth::Model RefModel(const Scene& sc) {
+  synth::Model m;
+  m.SetNodes(Tree(sc.ref_nodes));
+  for (size_t k = 0; k < sc.ref_nodes.size(); ++k)
+    m.objects.push_back(synth::Object{static_cast<uint32_t>(k), static_cast<uint32_t>(k), 0, 0, 1, 3});
+  m.SetVbufs({{0x0, 0x10, 1}});
+  m.SetIbufs({{0x10, 0x10, 2}});
+  m.SetDataEnd(0x20);
+  std::vector<sl::MapGroup> g = {synth::Main(sc.ref_main), synth::Group(2, sc.g2), synth::State(0x10, {{0x9001, 0}}),
+                                 synth::Group(4, sc.g4)};
+  g.insert(g.end(), sc.extra_groups.begin(), sc.extra_groups.end());
+  m.SetGroups(g);
+  return m;
+}
+
+static Bytes V(std::array<double, 3> p, std::array<double, 4> w = {1, 0, 0, 0}) {
+  // a normal and a uv that differ per position, so payloads differ per vertex
+  return synth::Vert(p, {p[1] * 0.5, 0.75, p[0] - 0.125}, {p[0] + 0.0625, 1.0 - p[2]}, w);
+}
+
+// The base scene. Suit (= reference main) nodes, list position = id:
+//   0 root (0x9002); 1 under 0 (0x9003); 2 under 1 (0x9004); 3 under 0 (0x9006 AND 0x9005, rows in that order);
+//   4 under 3 (0x9101, the neck); 5 under 2 (0x9007, a channel no copy group has).
+// Reference copies: group 0x02 old ids 20 root (0x9002); 21 under 20 (0x9003); 22 under 21 (0x9004); 26 under 22
+//   (0x9003 again, deeper, its row FIRST); 23 under 20 (0x9005, rotated 90 degrees about z); 24 under 20 (0x9006, a
+//   small rotation); 25 under 20 (0x9008); 27, 28 under 20 (0x9101 on both, depth tie, 28's row first); 29 under 20
+//   is in no group (left out of 0x02's children). Group 0x04: 30 root (0x9002); 31, 32 under 30 (0x9003, 0x9005).
+// New ids (6 suit nodes): 20..28 -> 6..14, 30..32 -> 15..17.
+static Scene Base() {
+  Scene sc;
+  sc.suit_nodes = {{0, -1, 0.5, 1.0, 0.25}, {1, 0, 0.125, 0.2, 0.3}, {2, 1, 0.0625, -0.125, 0.75},
+                   {3, 0, -0.3, 0.1, 0.05},  {4, 3, 0.01, 0.02, 0.03},  {5, 2, 0.3, 0.3, -0.2}};
+  sc.main = {{0x9002, 0}, {0x9003, 1}, {0x9004, 2}, {0x9006, 3}, {0x9005, 3}, {0x9101, 4}, {0x9007, 5}};
+  sc.ref_main = sc.main;
+  const double c = 0.0, s = 1.0;  // cos, sin of 90 degrees
+  const std::array<double, 16> rot_z = {c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0.05, 0.4, -0.1, 1};
+  const std::array<double, 16> small = {1, 2e-6, 0, 0, -2e-6, 1, 0, 0, 0, 0, 1, 0, -0.05, 0.1, 0.2, 1};
+  sc.ref_nodes = sc.suit_nodes;
+  for (const NodeDef& d : std::vector<NodeDef>{{20, -1, 0.5, 1.0, 0.25},
+                                               {21, 20, 0.125, 0.2, 0.3},
+                                               {22, 21, 0.0625, -0.125, 0.75},
+                                               {23, 20, 0, 0, 0, rot_z},
+                                               {24, 20, 0, 0, 0, small},
+                                               {25, 20, 0.2, -0.1, 0.0},
+                                               {26, 22, 0.01, 0.0, 0.02},
+                                               {27, 20, 0.0, 0.3, 0.1},
+                                               {28, 20, 0.0, 0.31, 0.1},
+                                               {29, 20, 0.7, 0.7, 0.7},
+                                               {30, -1, 0.5, 1.0, 0.25},
+                                               {31, 30, 0.125, 0.2, 0.3},
+                                               {32, 30, -0.3, 0.1, 0.05}})
+    sc.ref_nodes.push_back(d);
+  sc.g2 = {{0x9002, 20}, {0x9003, 26}, {0x9003, 21}, {0x9004, 22}, {0x9005, 23},
+           {0x9006, 24}, {0x9008, 25}, {0x9101, 28}, {0x9101, 27}};
+  sc.g4 = {{0x9002, 30}, {0x9003, 31}, {0x9005, 32}};
+  using MS = synth::MeshSpec;
+  // O0: no palette (the object itself), one strip of 4
+  sc.objs.push_back({{},
+                     {{{V({0, 0, 0}), V({0.25, 0, 0}), V({0, 0.25, 0}), V({0.25, 0.25, 0.125})}, {0, 1, 2, 3}}},
+                     {MS{.decl = 0, .istart = 0, .icount = 4, .tex = 1}}});
+  // O1: palette [2, 1, 2]; v0 a tie (bone 2: 0.5, bone 1: 0.5 -> 1), v1 a sum (bone 2: 0.3 + 0.3 > bone 1: 0.4 -> 2),
+  // v2 bone 1, v3 bone 2 (slot 3 is past the palette). Strip [0 1 2 3]: t0 = (0, 1, 2), t1 = (2, 1, 3) after the swap.
+  sc.objs.push_back({{2, 1, 2},
+                     {{{V({0, 0, 0.5}, {0.5, 0.5, 0, 0}), V({0.5, 0, 0.5}, {0.3, 0.4, 0.3, 0}),
+                        V({0, 0.5, 0.5}, {0.125, 0.75, 0.125, 0}), V({0.5, 0.5, 0.5}, {0, 0.25, 0.5, 0.25})},
+                       {0, 1, 2, 3}}},
+                     {MS{.decl = 0, .istart = 0, .icount = 4, .tex = 2}}});
+  // O2: three meshes on one decl: A (tex 3, pass 4, flag 1, word4 0x11), B untextured, C = A's key fields with
+  // another index word and other bytes (same key: matsrc stays A).
+  sc.objs.push_back({{},
+                     {{{V({0, 0, 1}), V({0.5, 0, 1}), V({0, 0.5, 1}), V({0.5, 0.5, 1.25})}, {0, 1, 2, 1, 2, 3, 0, 2, 3}}},
+                     {MS{.decl = 0, .istart = 0, .icount = 3, .tex = 3, .pass = 4, .flag = 1, .word4 = 0x11},
+                      MS{.decl = 0, .istart = 3, .icount = 3, .tex = 0xFFFFFFFF},
+                      MS{.decl = 0, .istart = 6, .icount = 3, .tex = 3, .pass = 4, .flag = 1, .word4 = 0x11,
+                         .index_word = 2, .other = 0x55}}});
+  // O3 (node with codes 0x9006 and 0x9005): decl 0 drawn by two keys (M1 tex 4, M2 tex 5) over the same vertices;
+  // decl 1 has the same vertex numbers 0..2 (M3, M1's key).
+  sc.objs.push_back({{},
+                     {{{V({1, 0, 0}), V({1.25, 0, 0}), V({1, 0.25, 0})}, {0, 1, 2}},
+                      {{V({2, 0, 0}), V({2.25, 0, 0}), V({2, 0.25, 0})}, {0, 1, 2}}},
+                     {MS{.decl = 0, .istart = 0, .icount = 3, .tex = 4}, MS{.decl = 0, .istart = 0, .icount = 3, .tex = 5},
+                      MS{.decl = 1, .istart = 0, .icount = 3, .tex = 4}}});
+  // O4: the neck, palette [3, 3] (rule N2: slots [4, 3]); weights 0.625 / 0.375
+  sc.objs.push_back({{3, 3},
+                     {{{V({0, 1, 0}, {0.625, 0.375, 0, 0}), V({0.25, 1, 0}, {0.625, 0.375, 0, 0}),
+                        V({0, 1.25, 0}, {0.625, 0.375, 0, 0})},
+                       {0, 1, 2}}},
+                     {MS{.decl = 0, .istart = 0, .icount = 3, .tex = 6}}});
+  // O5: a restart and a degenerate window; mesh B's count runs past the index list (Python's slice clamps)
+  sc.objs.push_back({{},
+                     {{{V({3, 0, 0}), V({3.25, 0, 0}), V({3, 0.25, 0}), V({3.5, 0, 0}), V({3.5, 0.25, 0}),
+                        V({3.75, 0, 0}), V({3.75, 0.25, 0}), V({4, 0.5, 0})},
+                       {0, 1, 2, 0xFFFF, 3, 4, 5, 6, 7, 7, 0, 1, 3}}},
+                     {MS{.decl = 0, .istart = 0, .icount = 8, .tex = 7}, MS{.decl = 0, .istart = 8, .icount = 100, .tex = 7}}});
+  return sc;
+}
+
+// The key-field scene: Base with O0 replaced by two meshes A [0 1 2] and B [3 4 5] on one decl; `which` changes ONE of
+// B's seven key fields (1 node, 2 tex, 3 pass, 4 flag, 5 word4, 6 m70, 7 m80), 0 changes none.
+static Scene KeyScene(int which) {
+  Scene sc = Base();
+  using MS = synth::MeshSpec;
+  const std::array<double, 4> w0 = {1, 0, 0, 0}, w1 = which == 1 ? std::array<double, 4>{0, 1, 0, 0} : w0;
+  ObjDef o{{0, 1},
+           {{{V({0, 0, 0}, w0), V({0.25, 0, 0}, w0), V({0, 0.25, 0}, w0), V({0.5, 0, 0}, w1), V({0.75, 0, 0}, w1),
+              V({0.5, 0.25, 0}, w1)},
+             {0, 1, 2, 3, 4, 5}}},
+           {MS{.decl = 0, .istart = 0, .icount = 3, .tex = 1}, MS{.decl = 0, .istart = 3, .icount = 3, .tex = 1, .index_word = 1}}};
+  MS& b = o.meshes[1];
+  if (which == 2) b.tex = 9;
+  if (which == 3) b.pass = 4;
+  if (which == 4) b.flag = 1;
+  if (which == 5) b.word4 = 1;
+  if (which == 6) b.m70 = {0x70, 0x71, 0x72, 0x74};
+  if (which == 7) b.m80 = 0x81;
+  sc.objs[0] = o;
+  return sc;
+}
+
+struct ScanCase {
+  std::string name;
+  Scene sc;
+};
+
+static std::vector<ScanCase> ScanCases() {
+  std::vector<ScanCase> v;
+  v.push_back({"base", Base()});
+  {  // channel_map: 0x9005 also on node 4 (depth 2, its row first) -> the shallowest node 3 keeps 0x9005
+    Scene sc = Base();
+    for (Rows* rows : {&sc.main, &sc.ref_main}) rows->insert(rows->begin() + 3, {0x9005, 4});
+    v.push_back({"chan_shallowest", sc});
+  }
+  {  // a suit with one node more than the reference's main group: new ids from 7, not 6
+    Scene sc = Base();
+    sc.suit_nodes.push_back({6, 0, 0.4, 0.4, 0.4});
+    sc.objs.push_back({{}, {{{V({5, 0, 0}), V({5.25, 0, 0}), V({5, 0.25, 0})}, {0, 1, 2}}},
+                       {synth::MeshSpec{.decl = 0, .istart = 0, .icount = 3, .tex = 8}}});
+    v.push_back({"ids_own_count", sc});
+  }
+  {  // node 1 a shear whose column 0 and 2 sum three products; node 2's translation 1e16, 1, -1e16 cancels in them:
+     // builtin sum() keeps the 1 that a plain left-to-right sum loses
+    Scene sc = Base();
+    const std::array<double, 16> shear = {1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0.125, 0.2, 0.3, 1};
+    const std::array<double, 16> big = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1e16, 1, -1e16, 1};
+    for (auto* nodes : {&sc.suit_nodes, &sc.ref_nodes}) {
+      (*nodes)[1].mat = shear;
+      (*nodes)[2].mat = big;
+    }
+    v.push_back({"world_comp", sc});
+  }
+  {  // wrist T1: forearm 0x9120 rows (7) then (5); object 7's palette [hand 3, upper arm 6]
+    Scene sc = Base();
+    for (auto* nodes : {&sc.suit_nodes, &sc.ref_nodes}) {
+      nodes->insert(nodes->begin() + 6, NodeDef{6, 0, -0.5, 0.2, 0.0});
+      nodes->insert(nodes->begin() + 7, NodeDef{7, 6, -0.25, 0.0, 0.0});
+    }
+    for (Rows* rows : {&sc.main, &sc.ref_main}) {
+      rows->push_back({0x9008, 6});
+      rows->push_back({0x9120, 7});
+      rows->push_back({0x9120, 5});
+    }
+    sc.objs.push_back({{}, {{{V({6, 0, 0}), V({6.25, 0, 0}), V({6, 0.25, 0})}, {0, 1, 2}}},
+                       {synth::MeshSpec{.decl = 0, .istart = 0, .icount = 3, .tex = 8}}});
+    const std::array<double, 4> w = {0.75, 0.25, 0, 0};
+    sc.objs.push_back({{3, 6}, {{{V({7, 0, 0}, w), V({7.25, 0, 0}, w), V({7, 0.25, 0}, w)}, {0, 1, 2}}},
+                       {synth::MeshSpec{.decl = 0, .istart = 0, .icount = 3, .tex = 8}}});
+    v.push_back({"t1_first_row", sc});
+  }
+  static const char* kKeyNames[] = {"key_equal", "key_node", "key_tex", "key_pass", "key_flag", "key_word4", "key_m70",
+                                    "key_m80"};
+  for (int k = 0; k < 8; ++k) v.push_back({kKeyNames[k], KeyScene(k)});
+  {  // packed elements (TDX T3.7: the formats real files carry): O1 with position F3 at 0, normal HEND3N at 12, uv0 H2
+     // at 16, weights UB4N at 20 (integers 0..255, summed by _heaviest as ints), stride 24; the same bone choices as Base
+    Scene sc = Base();
+    const auto pv = [](std::array<double, 3> p, uint32_t nrm, uint16_t u, uint16_t v, std::array<uint8_t, 4> w) {
+      Bytes b;
+      for (double x : p) synth::PutF32(b, x);
+      for (int s = 24; s >= 0; s -= 8) b.push_back(static_cast<uint8_t>(nrm >> s));
+      b.push_back(static_cast<uint8_t>(u >> 8)), b.push_back(static_cast<uint8_t>(u & 0xFF));
+      b.push_back(static_cast<uint8_t>(v >> 8)), b.push_back(static_cast<uint8_t>(v & 0xFF));
+      b.insert(b.end(), w.begin(), w.end());
+      return b;
+    };
+    DeclDef& d = sc.objs[1].decls[0];
+    d.verts = {pv({0, 0, 0.5}, 0x3FF001FFu, 0x3400, 0x3A00, {128, 128, 0, 0}),
+               pv({0.5, 0, 0.5}, 0x80100401u, 0x3800, 0x3C00, {77, 102, 77, 0}),
+               pv({0, 0.5, 0.5}, 0x001FFC00u, 0xB400, 0x3555, {32, 191, 32, 0}),
+               pv({0.5, 0.5, 0.5}, 0x7FFFFFFFu, 0x0001, 0x7BFF, {0, 64, 128, 64})};
+    d.elems = {tp::DeclElem{0, 0, 0x2A23B9, 0, 0, 0, 0}, tp::DeclElem{0, 12, 0x2A2190, 0, 3, 0, 0},
+               tp::DeclElem{0, 16, 0x2C235F, 0, 5, 0, 0}, tp::DeclElem{0, 20, 0x1A2086, 0, 1, 0, 0}};
+    d.stride = 24;
+    v.push_back({"packed_elems", sc});
+  }
+  {  // a 0x80-byte mesh: m[0x70:0x74] lies in its stage, m[0x80:0xC0] is empty
+    Scene sc = Base();
+    sc.objs[0].meshes[0].size = 0x80;
+    v.push_back({"short_mesh", sc});
+  }
+  {  // O0's last index names vertex 4 of a 4-vertex buffer: read from the data section after it, as Python reads it
+    Scene sc = Base();
+    sc.objs[0].decls[0].idx = {0, 1, 2, 4};
+    v.push_back({"vertex_past_vbuf", sc});
+  }
+  // refusals
+  {
+    Scene sc = Base();
+    sc.ref_nodes.push_back({9, 0, 0.1, 0.1, 0.1});
+    sc.ref_main.push_back({0x9009, 9});
+    v.push_back({"r_bind_missing", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.ref_nodes[1].tx = 0.1262345;
+    v.push_back({"r_bind_mm", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.extra_groups.push_back(synth::Group(2, {{0x9002, 20}}));
+    v.push_back({"r_two_groups", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.g2.push_back({0x9007, 20});
+    v.push_back({"r_named_twice", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.g2.erase(sc.g2.begin() + 2);  // (0x9003, 21): 22's parent leaves the group
+    v.push_back({"r_parent_outside", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.ref_nodes.push_back({33, 30, 0.0, 0.0, 0.5});
+    v.push_back({"r_shadow_child", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.g2[0].first = 0x9001;
+    v.push_back({"r_no_9002", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.objs.push_back(sc.objs[0]);  // object 6, and no node 6
+    v.push_back({"r_no_node", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.objs[0].decls[0].elems = synth::StdElems(true, false, true);
+    v.push_back({"r_no_uv", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.objs[0].meshes[0].pass = 3;
+    v.push_back({"r_pass", sc});
+  }
+  // Python raises (no SlimError): a vertex past the data end; an infos list shorter than the meshes
+  {
+    Scene sc = Base();
+    sc.objs[5].decls[0].idx[2] = 3000;
+    v.push_back({"x_vertex_past_data", sc});
+  }
+  {
+    Scene sc = Base();
+    sc.objs[2].infos_short = 1;
+    v.push_back({"x_infos_short", sc});
+  }
+  return v;
+}
+
+static const ScanCase* FindCase(const std::string& name) {
+  static const std::vector<ScanCase> cases = ScanCases();
+  for (const auto& c : cases)
+    if (c.name == name) return &c;
+  return nullptr;
+}
+
+using grid::Bits;
+using grid::FnvText;
+using grid::Hex16;
+
+static std::string HexBytes(const Bytes& b) {
+  std::string s;
+  char buf[4];
+  for (uint8_t v : b) {
+    std::snprintf(buf, sizeof buf, "%02x", v);
+    s += buf;
+  }
+  return s;
+}
+static std::string Hx(uint64_t v) {
+  char buf[24];
+  std::snprintf(buf, sizeof buf, "%llx", static_cast<unsigned long long>(v));
+  return buf;
+}
+
+// slim_expect.py scan_layout()
+static std::string LayoutCanon(const sl::Layout& lay) {
+  std::string s;
+  for (int kind : {2, 4}) {
+    const sl::CopyGroup& g = lay.Of(kind);
+    s += "G" + std::to_string(kind) + ":r=";
+    for (size_t i = 0; i < g.rows.size(); ++i) s += (i ? "," : "") + Hx(g.rows[i].first) + ":" + std::to_string(g.rows[i].second);
+    s += ";i=";
+    for (size_t i = 0; i < g.ids.size(); ++i) s += (i ? "," : "") + std::to_string(g.ids[i]);
+    s += ";n=";
+    bool first = true;
+    for (const auto& [o, n] : g.new_id) s += (first ? "" : ",") + std::to_string(o) + ">" + std::to_string(n), first = false;
+    s += ";h=";
+    for (size_t i = 0; i < g.nodes.size(); ++i) {
+      const auto& nd = g.nodes[i];
+      s += (i ? "," : "") + std::to_string(nd.id) + "/" + std::to_string(nd.parent) + "/";
+      for (size_t c = 0; c < nd.children.size(); ++c) s += (c ? "." : "") + std::to_string(nd.children[c]);
+    }
+    s += ";c=";
+    first = true;
+    for (const auto& [c, n] : g.node_of_code) s += (first ? "" : ",") + Hx(c) + ">" + std::to_string(n), first = false;
+    s += "|";
+  }
+  s += "k=";
+  for (size_t i = 0; i < lay.kinds.size(); ++i)
+    s += (i ? "," : "") + std::string(lay.kinds[i].first == sl::MapGroup::Kind::kState ? "s" : "") + Hx(lay.kinds[i].second);
+  s += "|a=";
+  for (size_t i = 0; i < lay.allnodes.size(); ++i) s += (i ? "," : "") + std::to_string(lay.allnodes[i].id);
+  s += "|";
+  for (const auto& [id, f] : lay.frame) {
+    s += "f" + std::to_string(id) + ":";
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c) s += Hex16(Bits(f.R[r][c])) + ",";
+    for (int a = 0; a < 3; ++a) s += Hex16(Bits(f.t[a])) + ",";
+    s += Hex16(Bits(f.dev)) + ";";
+  }
+  return s;
+}
+
+// slim_expect.py scan_text()
+static std::string ScanLine(int kind, const sl::Scan& sc) {
+  std::string kt, vt, tt;
+  for (const auto& k : sc.keys) {
+    if (kind == 2) {
+      kt += std::to_string(k.node) + "," + Hx(k.tex) + "," + std::to_string(k.pass) + "," + std::to_string(k.flag) + "," +
+            Hx(k.word4) + "," + HexBytes(k.m70) + "," + HexBytes(k.m80) + "," + Hex16(Fnv(k.matsrc)) + ";";
+    } else {
+      kt += std::to_string(k.node) + ";";
+    }
+  }
+  for (const auto& v : sc.vid_src) vt += std::to_string(v[0]) + "." + std::to_string(v[1]) + "." + std::to_string(v[2]) + ";";
+  std::string nodes;
+  for (size_t t = 0; t < sc.tris.size(); ++t) {
+    const sl::Tri& tr = sc.tris[t];
+    if (t) tt += "|";
+    tt += std::to_string(tr.key) + ":";
+    for (int c = 0; c < 3; ++c) {
+      const sl::ScanPayload& pl = sc.payload[tr.payload[c]];
+      tt += std::to_string(tr.vid[c]) + "," + Hex16(Bits(tr.pos[c][0])) + "," + Hex16(Bits(tr.pos[c][1])) + "," +
+            Hex16(Bits(tr.pos[c][2])) + "," + std::to_string(pl.vid) + "." + std::to_string(pl.tri) + "." +
+            std::to_string(pl.corner);
+      if (kind == 2) {
+        tt += ".";
+        for (int a = 0; a < pl.nrm_n; ++a) tt += (a ? "." : "") + Hex16(Bits(pl.nrm[a]));
+        tt += "/";
+        for (int a = 0; a < pl.uv_n; ++a) tt += (a ? "." : "") + Hex16(Bits(pl.uv[a]));
+      }
+      tt += ";";
+    }
+    nodes += (t ? "," : "") + std::to_string(sc.keys[tr.key].node);
+  }
+  const std::string text = "K" + kt + "V" + vt + "T" + tt;
+  return "S" + std::to_string(kind) + "=n" + std::to_string(sc.tris.size()) + " k" + std::to_string(sc.keys.size()) + " v" +
+         std::to_string(sc.vid_src.size()) + " fnv=" + Hex16(FnvText(text)) + " nodes" + std::to_string(kind) + "=[" + nodes +
+         "]";
+}
+
+// A refusal as the Python row prints it: a SlimError (its text starts with the suit's name) or any other raise
+static std::string Refusal(const std::string& name, const std::exception& e) {
+  const std::string w = e.what();
+  if (w.rfind(name + ": ", 0) == 0) return "REFUSED " + w;
+  return "RAISED";
+}
+
+struct Built {
+  Bytes tpr, cat, ref_tpr, ref_cat;
+};
+static Built BuildCase(const ScanCase& c) {
+  const synth::Model s = SuitModel(c.sc), r = RefModel(c.sc);
+  return {s.MakeTpr(), s.MakeCat(), r.MakeTpr(), r.MakeCat()};
+}
+struct Loaded {
+  sl::Suit suit;
+  doa4::suitconv::core::Model ref;
+};
+static Loaded Load(const std::string& name, const Built& b) {
+  return {sl::ReadSuit(name, b.tpr, b.cat),
+          doa4::suitconv::core::LoadModel(name + ".ref.tpr", b.ref_tpr, std::make_shared<const Bytes>(b.ref_cat))};
+}
+
+static std::string ScanSummary(const ScanCase& c) {
+  Loaded ld;
+  try {
+    ld = Load(c.name, BuildCase(c));
+  } catch (const std::exception& e) {
+    return std::string("ERROR ") + e.what();
+  }
+  sl::Layout lay;
+  try {
+    sl::BindGuard(ld.suit, ld.ref);
+    lay = sl::MakeLayout(ld.suit, ld.ref);
+  } catch (const std::exception& e) {
+    return Refusal(c.name, e);
+  }
+  std::string line = "L=" + Hex16(FnvText(LayoutCanon(lay)));
+  for (int kind : {2, 4}) {
+    line += " noc" + std::to_string(kind) + "=[";
+    bool first = true;
+    for (const auto& [code, n] : lay.Of(kind).node_of_code) line += (first ? "" : ",") + Hx(code) + ">" + std::to_string(n), first = false;
+    line += "]";
+  }
+  for (int kind : {2, 4}) {
+    try {
+      line += " " + ScanLine(kind, sl::ScanKind(ld.suit, ld.ref, lay, kind));
+    } catch (const std::exception& e) {
+      line += " S" + std::to_string(kind) + "=" + Refusal(c.name, e);
+    }
+  }
+  return line;
+}
+
+// The scan of one kind, or nothing (a refusal is a failed check by the caller, never the end of a group)
+static std::optional<sl::Scan> ScanOf(const std::string& name, int kind) {
+  const ScanCase* c = FindCase(name);
+  if (!c) return std::nullopt;
+  try {
+    const Loaded ld = Load(c->name, BuildCase(*c));
+    return sl::ScanKind(ld.suit, ld.ref, sl::MakeLayout(ld.suit, ld.ref), kind);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+static std::optional<sl::Layout> LayoutOf(const std::string& name) {
+  const ScanCase* c = FindCase(name);
+  if (!c) return std::nullopt;
+  try {
+    const Loaded ld = Load(c->name, BuildCase(*c));
+    return sl::MakeLayout(ld.suit, ld.ref);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+// the copy node of each triangle whose corners come from object `obj` (vid_src), in scan order
+static std::vector<int64_t> NodesOfObject(const sl::Scan& sc, uint32_t obj) {
+  std::vector<int64_t> out;
+  for (const auto& t : sc.tris)
+    if (sc.vid_src[t.vid[0]][0] == obj) out.push_back(sc.keys[t.key].node);
+  return out;
+}
+
+// every triangle's copy node, in scan order
+static std::vector<int64_t> RowNodesOf(const sl::Scan& sc) {
+  std::vector<int64_t> out;
+  for (const auto& t : sc.tris) out.push_back(sc.keys[t.key].node);
+  return out;
+}
+
+// ---------------------------------------------------------------- the frame cases (lod_chain._frame / _to_local)
+struct ToLocalCase {
+  const char* name;
+  std::array<double, 16> w;
+  std::array<double, 3> v;
+  bool direction;
+};
+static std::vector<ToLocalCase> ToLocalCases() {
+  const auto I = [](double r01, double tx, double ty, double tz) {
+    return std::array<double, 16>{1, r01, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, tz, 1};
+  };
+  return {
+      // row 0 of R is (1, 1, 1): q0 * 1 + q1 * 1 + q2 * 1 with q = (1e16, 1, -1e16) is 1 by builtin sum(), 0 plainly
+      {"compensated", {1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0.25, 0.125, 1}, {1e16 + 0.5, 1.25, -1e16 + 0.125}, false},
+      {"dev_at_1e-6", I(1e-6, 0.5, 0.25, 0.125), {0.1, 0.2, 0.3}, false},        // dev == 1e-6: rotated (not <)
+      {"dev_under", I(0.9e-6, 0.5, 0.25, 0.125), {0.1, 0.2, 0.3}, false},        // q unrotated
+      {"dev_over", I(1.1e-6, 0.5, 0.25, 0.125), {0.1, 0.2, 0.3}, false},         // rotated
+      {"direction", {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 9, 9, 9, 1}, {0.1, 0.2, 0.3}, true},  // no subtraction
+      {"subtract", {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 9, 9, 9, 1}, {0.1, 0.2, 0.3}, false},
+  };
+}
+static std::string ToLocalLine(const ToLocalCase& c) {
+  const sl::Frame f = sl::FrameOf(std::vector<double>(c.w.begin(), c.w.end()));
+  const auto q = sl::ToLocal(c.v, f, c.direction);
+  return "dev=" + Hex16(Bits(f.dev)) + " q=" + Hex16(Bits(q[0])) + "," + Hex16(Bits(q[1])) + "," + Hex16(Bits(q[2]));
+}
+
+}  // namespace scan
+
+// Pasted verbatim from (2026-11-23):
+//   tests/host/run_suitconv_slim_test.bat --dump DIR
+//   py -3 -I tests/host/slim_expect.py --scan <doax2_work>/physics_spike/scripts DIR/scan
+static const Expected kScanExpected[] = {
+    {"base", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"chan_shallowest", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"ids_own_count", "L=92866ca5f3475738 noc2=[9002>7,9003>8,9004>9,9005>10,9006>11,9008>12,9101>14] noc4=[9002>16,9003>17,9005>18] S2=n16 k8 v32 fnv=09018aea29f3f060 nodes2=[7,7,8,8,9,9,10,10,10,14,9,9,9,9,9,7] S4=n17 k3 v32 fnv=f6ffccd18cea5b55 nodes4=[16,16,17,17,17,17,17,18,18,18,18,17,17,17,17,17,16]"},
+    {"key_equal", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v31 fnv=c6ca70044c9dced9 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"key_flag", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=07aa977d29639f1e nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"key_m70", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=d67f015d3d119d87 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"key_m80", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=31dd91ca56f13ebc nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"key_node", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=2d546fbccdeec4fe nodes2=[6,7,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=fe732e11c4160219 nodes4=[15,16,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"key_pass", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=20c35aaee244eb85 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"key_tex", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=27a55e3dd6316f02 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"key_word4", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=80439472627698ee nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"packed_elems", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=618423fdbfdee2da nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"r_bind_missing", "REFUSED r_bind_missing: reference node 9 (0x9009) missing from the suit"},
+    {"r_bind_mm", "REFUSED r_bind_mm: node 1 (0x9003) is 1.235 mm from the reference bind"},
+    {"r_named_twice", "REFUSED r_named_twice: a group-0x2 node named twice in the reference"},
+    {"r_no_9002", "L=5cd0f2adaa535532 noc2=[9001>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=REFUSED r_no_9002: reference group 0x2 has no 0x9002 row S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"r_no_node", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=REFUSED r_no_node: object 6 has no node of that id S4=REFUSED r_no_node: object 6 has no node of that id"},
+    {"r_no_uv", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=REFUSED r_no_uv: object 0 decl 0 has no normal or uv0 S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"r_parent_outside", "REFUSED r_parent_outside: group-0x2 node 22 has its parent 21 outside the group"},
+    {"r_pass", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=REFUSED r_pass: object 0 mesh 0 draw pass 3 S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"r_shadow_child", "REFUSED r_shadow_child: shadow node 30 has a child 33 outside the group"},
+    {"r_two_groups", "REFUSED r_two_groups: reference has no single group 0x2 (['main', 2, ('state', 16), 4, 2])"},
+    {"short_mesh", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=121f099ff89a1ad2 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"t1_first_row", "L=d0fa349280c474d3 noc2=[9002>8,9003>9,9004>10,9005>11,9006>12,9008>13,9101>15] noc4=[9002>17,9003>18,9005>19] S2=n17 k8 v35 fnv=52422f13b10a2b41 nodes2=[8,8,9,9,10,10,11,11,11,15,10,10,10,10,10,13,13] S4=n18 k3 v35 fnv=5a0196121fc33456 nodes4=[17,17,18,18,18,18,18,19,19,19,19,18,18,18,18,18,17,17]"},
+    {"vertex_past_vbuf", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=782f3167a3822b42 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=0a8561153ddedb47 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"world_comp", "L=d175ca871c4d8aa6 noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=bbec5af60ef42134 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=87354e0992bb2c4f nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"x_infos_short", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=RAISED S4=RAISED"},
+    {"x_vertex_past_data", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=RAISED S4=RAISED"},
+};
+static const Expected kToLocalExpected[] = {
+    {"compensated", "dev=3ff0000000000000 q=3ff0000000000000,3ff0000000000000,c341c37937e08000"},
+    {"dev_at_1e-6", "dev=3eb0c6f7a0b5ed8d q=bfd99999cf497ecf,bfa9999999999998,3fc6666666666666"},
+    {"dev_under", "dev=3eae32f0ee144531 q=bfd999999999999a,bfa9999999999998,3fc6666666666666"},
+    {"dev_over", "dev=3eb27476ca61b882 q=bfd99999d4a7e288,bfa9999999999998,3fc6666666666666"},
+    {"direction", "dev=3ff0000000000000 q=3fc999999999999a,bfb999999999999a,3fd3333333333333"},
+    {"subtract", "dev=3ff0000000000000 q=c02199999999999a,4021cccccccccccd,c021666666666666"},
+};
+
+static const char* ScanExpectedFor(const std::string& name) {
+  for (const auto& e : kScanExpected)
+    if (name == e.name) return e.summary;
+  return nullptr;
+}
+static void CheckScanCase(const std::string& name) {
+  const scan::ScanCase* c = scan::FindCase(name);
+  const char* want = ScanExpectedFor(name);
+  const std::string got = c ? scan::ScanSummary(*c) : std::string("(no case)");
+  CHECKF(want != nullptr && got == want, "%s: got \"%s\" want \"%s\"", name.c_str(), got.c_str(), want ? want : "(none)");
+}
+// one node list of a kind, as the Python row prints it (the text between "nodes<kind>=[" and "]")
+static std::string RowNodes(const std::string& name, int kind) {
+  const char* want = ScanExpectedFor(name);
+  if (!want) return "(none)";
+  const std::string row = want, tag = "nodes" + std::to_string(kind) + "=[";
+  const size_t at = row.find(tag);
+  if (at == std::string::npos) return "(none)";
+  const size_t end = row.find(']', at);
+  return row.substr(at + tag.size(), end == std::string::npos ? std::string::npos : end - at - tag.size());
+}
+static std::string Join(const std::vector<int64_t>& v) {
+  std::string s;
+  for (size_t i = 0; i < v.size(); ++i) s += (i ? "," : "") + std::to_string(v[i]);
+  return s;
+}
+
+static void TestChannelLowestCode() {
+  // Node 3 carries 0x9006 (first row) and 0x9005: its channel is the LOWEST code, 0x9005 -> copy node 9 (old 23).
+  // Wrong versions: highest code / first row -> 0x9006 -> node 10.
+  CheckScanCase("base");
+  const auto s2 = scan::ScanOf("base", 2);
+  const auto n3 = s2 ? scan::NodesOfObject(*s2, 3) : std::vector<int64_t>{};
+  CHECKF(!n3.empty() && n3 == std::vector<int64_t>(n3.size(), 9), "object 3 nodes %s (not 10)", Join(n3).c_str());
+  const auto s4 = scan::ScanOf("base", 4);
+  const auto m3 = s4 ? scan::NodesOfObject(*s4, 3) : std::vector<int64_t>{};
+  CHECKF(!m3.empty() && m3 == std::vector<int64_t>(m3.size(), 17), "object 3 shadow nodes %s", Join(m3).c_str());
+  // channel_map's own rule: 0x9005 on node 4 (depth 2, row first) and node 3 (depth 1) -> node 3. Wrong (first row):
+  // node 3's channel becomes 0x9006 (node 10) and the neck's 0x9005 (node 9).
+  CheckScanCase("chan_shallowest");
+  const auto c2 = scan::ScanOf("chan_shallowest", 2);
+  const auto c3 = c2 ? scan::NodesOfObject(*c2, 3) : std::vector<int64_t>{};
+  const auto c4 = c2 ? scan::NodesOfObject(*c2, 4) : std::vector<int64_t>{};
+  CHECKF(!c3.empty() && c3 == std::vector<int64_t>(c3.size(), 9) && c4 == std::vector<int64_t>{13}, "objects 3: %s, 4: %s",
+         Join(c3).c_str(), Join(c4).c_str());
+}
+
+static void TestShallowestThenLowestId() {
+  // group 0x02: 0x9003 on 26 (depth 3, row first) and 21 (depth 1) -> 21's new id 7; 0x9101 on 28 (row first) and 27,
+  // both depth 1 -> the lower new id, 13. Wrong (first row wins): 12 and 14.
+  const auto lay = scan::LayoutOf("base");
+  CHECK(lay.has_value());
+  if (!lay) return;
+  const auto& noc = lay->Of(2).node_of_code;
+  const auto at = [&noc](uint32_t c) { const auto it = noc.find(c); return it == noc.end() ? int64_t(-1) : it->second; };
+  CHECKF(at(0x9003) == 7, "0x9003 -> %lld (not 12)", static_cast<long long>(at(0x9003)));
+  CHECKF(at(0x9101) == 13, "0x9101 -> %lld (not 14)", static_cast<long long>(at(0x9101)));
+  // the neck's triangles land on 13
+  const auto s2 = scan::ScanOf("base", 2);
+  const auto n4 = s2 ? scan::NodesOfObject(*s2, 4) : std::vector<int64_t>{};
+  CHECKF(!n4.empty() && n4 == std::vector<int64_t>(n4.size(), 13), "object 4 nodes %s", Join(n4).c_str());
+}
+
+static void TestIdsFromOwnCount() {
+  // 7 suit nodes, 6 in the reference's main group: group 0x02 ids start at 7 (not 6), group 0x04 at 16.
+  CheckScanCase("ids_own_count");
+  const auto lay = scan::LayoutOf("ids_own_count");
+  CHECK(lay.has_value());
+  if (!lay) return;
+  CHECKF(lay->g2.new_id.size() == 9 && lay->g2.new_id.at(20) == 7 && lay->g2.new_id.at(28) == 15, "0x02 first id");
+  CHECKF(lay->g4.new_id.size() == 3 && lay->g4.new_id.at(30) == 16, "0x04 first id");
+  CHECK(lay->allnodes.size() == 19 && lay->allnodes[7].id == 7 && lay->allnodes[16].id == 16);
+}
+
+static void TestHeaviestTieLowestBone() {
+  // O1, palette [2, 1, 2]: t0's first vertex is a tie (bone 2 in slot 0, bone 1 in slot 1, 0.5 each) -> bone 1 ->
+  // 0x9003 -> node 7. Wrong: ties to the highest bone or to the first slot -> bone 2 -> node 8.
+  const auto s2 = scan::ScanOf("base", 2);
+  const auto n1 = s2 ? scan::NodesOfObject(*s2, 1) : std::vector<int64_t>{};
+  CHECKF(n1.size() == 2 && n1[0] == 7, "object 1 nodes %s", Join(n1).c_str());
+  // the same rule over UB4N integer weights (128 / 128 tie), HEND3N normals and H2 uvs (Python's row)
+  CheckScanCase("packed_elems");
+  const auto p2 = scan::ScanOf("packed_elems", 2);
+  const auto q1 = p2 ? scan::NodesOfObject(*p2, 1) : std::vector<int64_t>{};
+  CHECKF(q1 == (std::vector<int64_t>{7, 7}), "packed object 1 nodes %s", Join(q1).c_str());
+}
+
+static void TestFirstVertexAfterSwap() {
+  // O1's strip [0 1 2 3]: t1 = (2, 1, 3) after the swap; its first vertex v2 is bone 1 -> node 7. Unswapped (1, 2, 3)
+  // starts at v1 (bone 2 by the summed slots 0.3 + 0.3 > 0.4) -> node 8; the last corner v3 -> node 8.
+  const auto s2 = scan::ScanOf("base", 2);
+  const auto n1 = s2 ? scan::NodesOfObject(*s2, 1) : std::vector<int64_t>{};
+  CHECKF(n1.size() == 2 && n1[1] == 7, "object 1 nodes %s", Join(n1).c_str());
+  bool order = false;
+  if (s2)
+    for (const auto& t : s2->tris)
+      if (s2->vid_src[t.vid[0]][0] == 1 && s2->vid_src[t.vid[0]][2] == 2)
+        order = s2->vid_src[t.vid[1]][2] == 1 && s2->vid_src[t.vid[2]][2] == 3;
+  CHECKF(order, "t1's corners are (2, 1, 3)");
+}
+
+static void TestStripTrisRestart() {
+  // O5 mesh A [0 1 2 FFFF 3 4 5 6] -> (0 1 2), (3 4 5), (5 4 6); mesh B idx[8:108] = [7 7 0 1 3] -> (0 7 1), (0 1 3)
+  const auto s4 = scan::ScanOf("base", 4);
+  std::vector<std::array<uint32_t, 3>> got;
+  if (s4)
+    for (const auto& t : s4->tris)
+      if (s4->vid_src[t.vid[0]][0] == 5)
+        got.push_back({s4->vid_src[t.vid[0]][2], s4->vid_src[t.vid[1]][2], s4->vid_src[t.vid[2]][2]});
+  const std::vector<std::array<uint32_t, 3>> want = {{0, 1, 2}, {3, 4, 5}, {5, 4, 6}, {0, 7, 1}, {0, 1, 3}};
+  CHECKF(got == want, "object 5 gives %zu triangles", got.size());
+}
+
+static void TestCornerAddsWorldTranslation() {
+  // O2's vertex (0, 0, 1) on node 2: world translation 0 + 1 + 2 = (0.6875, 1.075, 1.3) per axis in double.
+  // Wrong: the node's own translation (0.0625, -0.125, 0.75) or none.
+  const auto s4 = scan::ScanOf("base", 4);
+  bool found = false;
+  if (s4)
+    for (const auto& t : s4->tris)
+      for (int c = 0; c < 3; ++c)
+        if (s4->vid_src[t.vid[c]][0] == 2 && s4->vid_src[t.vid[c]][2] == 0) {
+          const double jx = static_cast<double>(0.5f) + static_cast<double>(0.125f) + static_cast<double>(0.0625f);
+          found = t.pos[c][0] == 0.0 + jx && t.pos[c][2] == 1.0 + ((static_cast<double>(0.25f) + static_cast<double>(0.3f)) +
+                                                                   static_cast<double>(0.75f));
+        }
+  CHECKF(found, "object 2 vertex 0 position = local + world translation");
+  CheckScanCase("base");
+}
+
+static void TestWorldMatsCompensated() {
+  // Precondition: on this chain a plain left-to-right sum of world(2)'s x translation differs from builtin sum().
+  const float big = 1e16f;
+  const double prods[4] = {static_cast<double>(big) * 1.0, 1.0 * 1.0, -static_cast<double>(big) * 1.0,
+                           1.0 * (static_cast<double>(0.125f) + static_cast<double>(0.5f))};
+  double plain = 0.0;
+  doa4::suitconv::num::PySum ps;
+  for (double p : prods) plain += p, ps.Add(p);
+  CHECKF(plain != ps.Result(), "plain %.17g python %.17g", plain, ps.Result());
+  CheckScanCase("world_comp");  // the scan's positions (Python's bits) on object 2 and 5
+}
+
+static void TestT1FirstRowPerCode() {
+  // 0x9120's rows: (7) then (5). The first row's object 7 has palette [hand 3, upper arm 6]: T1 -> slots [7, 7] ->
+  // 0x9120 has no row -> up to 6 (0x9008) -> node 13. Wrong (last row wins: object 5, no T1): literal slots, bone 3
+  // (0.75) -> 0x9005 -> node 11.
+  CheckScanCase("t1_first_row");
+  const auto s2 = scan::ScanOf("t1_first_row", 2);
+  const auto n7 = s2 ? scan::NodesOfObject(*s2, 7) : std::vector<int64_t>{};
+  CHECKF(n7 == std::vector<int64_t>{13}, "object 7 nodes %s", Join(n7).c_str());
+}
+
+static void TestNeckN2() {
+  // O4, the neck, palette [3, 3] -> slots [4, 3]: 0.625 on the neck itself -> 0x9101 -> node 13. Literal [3, 3] ->
+  // bone 3 -> node 9.
+  const auto s2 = scan::ScanOf("base", 2);
+  const auto n4 = s2 ? scan::NodesOfObject(*s2, 4) : std::vector<int64_t>{};
+  CHECKF(n4 == std::vector<int64_t>{13}, "object 4 nodes %s", Join(n4).c_str());
+}
+
+static void TestKind2SkipsUntextured() {
+  // O2's mesh B has no stage-0 texture: kind 2 has 2 of O2's triangles, kind 4 all 3.
+  const auto s2 = scan::ScanOf("base", 2), s4 = scan::ScanOf("base", 4);
+  CHECK(s2 && s4 && scan::NodesOfObject(*s2, 2).size() == 2 && scan::NodesOfObject(*s4, 2).size() == 3);
+}
+
+static void TestMatsrcFirstMesh() {
+  // O2's meshes A and C give one key; matsrc is A's record (C differs in its index word and other bytes).
+  const scan::ScanCase* c = scan::FindCase("base");
+  const auto s2 = scan::ScanOf("base", 2);
+  bool ok = false;
+  if (c && s2) {
+    const Bytes a = synth::MeshBytes(c->sc.objs[2].meshes[0]), cc = synth::MeshBytes(c->sc.objs[2].meshes[2]);
+    for (const auto& t : s2->tris)
+      if (s2->vid_src[t.vid[0]][0] == 2) ok = a != cc && s2->keys[t.key].matsrc == a;
+  }
+  CHECKF(ok, "O2's key keeps mesh A");
+}
+
+static void TestToLocalCompensated() {
+  for (const auto& c : scan::ToLocalCases()) {
+    if (std::string(c.name) != "compensated" && std::string(c.name) != "direction" && std::string(c.name) != "subtract")
+      continue;
+    const char* want = nullptr;
+    for (const auto& e : kToLocalExpected)
+      if (std::string(c.name) == e.name) want = e.summary;
+    const std::string got = scan::ToLocalLine(c);
+    CHECKF(want && got == want, "%s: got \"%s\" want \"%s\"", c.name, got.c_str(), want ? want : "(none)");
+  }
+}
+
+static void TestFrameDevThreshold() {
+  for (const auto& c : scan::ToLocalCases()) {
+    if (std::string(c.name).rfind("dev_", 0) != 0) continue;
+    const char* want = nullptr;
+    for (const auto& e : kToLocalExpected)
+      if (std::string(c.name) == e.name) want = e.summary;
+    const std::string got = scan::ToLocalLine(c);
+    CHECKF(want && got == want, "%s: got \"%s\" want \"%s\"", c.name, got.c_str(), want ? want : "(none)");
+  }
+  // dev exactly 1e-6 rotates: q0 = 0.1 - 0.5 + (0.2 - 0.25) * 1e-6, not 0.1 - 0.5
+  const auto cs = scan::ToLocalCases();
+  const sl::Frame f = sl::FrameOf(std::vector<double>(cs[1].w.begin(), cs[1].w.end()));
+  CHECK(f.dev == 1e-6 && sl::ToLocal(cs[1].v, f, false)[0] != 0.1 - 0.5);
+}
+
+static void TestVidsOneToOne() {
+  // O3: decl 0 and decl 1 both use vertex numbers 0..2 -> six vids; decl 0's vertices drawn by two keys (tex 4, tex 5)
+  // keep one vid each; O0 and O3 share vertex numbers 0..2 and get different vids.
+  const auto s2 = scan::ScanOf("base", 2);
+  std::set<std::array<uint32_t, 3>> srcs;
+  std::set<uint32_t> keys3, vids3;
+  if (s2) {
+    for (const auto& v : s2->vid_src) srcs.insert(v);
+    for (const auto& t : s2->tris)
+      if (s2->vid_src[t.vid[0]][0] == 3) {
+        keys3.insert(t.key);
+        for (uint32_t v : t.vid) vids3.insert(v);
+      }
+  }
+  CHECKF(s2 && srcs.size() == s2->vid_src.size(), "vid sources are distinct");
+  CHECKF(keys3.size() == 2 && vids3.size() == 6, "object 3: %zu keys, %zu vids", keys3.size(), vids3.size());
+}
+
+static void TestKeyFieldsSeparate() {
+  // KeyScene(k): mesh B differs from mesh A in ONE key field; each gives one key more than key_equal.
+  const auto keys = [](const std::string& n, int kind) {
+    const auto s = scan::ScanOf(n, kind);
+    return s ? static_cast<long long>(s->keys.size()) : -1LL;
+  };
+  const long long base2 = keys("key_equal", 2), base4 = keys("key_equal", 4);
+  CHECK(base2 > 0 && base4 > 0);
+  for (const char* n : {"key_node", "key_tex", "key_pass", "key_flag", "key_word4", "key_m70", "key_m80"}) {
+    CheckScanCase(n);
+    CHECKF(keys(n, 2) == base2 + 1, "%s: %lld keys, key_equal %lld", n, keys(n, 2), base2);
+  }
+  CheckScanCase("key_equal");
+  // kind 4 keys by node only: no field but the node moves a kind-4 triangle. key_node sends O0's second triangle from
+  // node 15 to node 16, a key O1 already made (Python's rows: k3 in both, nodes4 [15,15,...] -> [15,16,...]).
+  const auto e4 = scan::ScanOf("key_equal", 4), n4 = scan::ScanOf("key_node", 4), t4 = scan::ScanOf("key_tex", 4);
+  CHECKF(e4 && n4 && t4 && e4->tris.size() > 1 && n4->tris.size() == e4->tris.size() &&
+             e4->keys[e4->tris[1].key].node == 15 && n4->keys[n4->tris[1].key].node == 16 &&
+             keys("key_node", 4) == base4 && keys("key_tex", 4) == base4 &&
+             scan::RowNodesOf(*t4) == scan::RowNodesOf(*e4),
+         "kind 4 keys by node only");
+}
+
+static void TestIndexSliceClamps() {
+  // O5 mesh B: istart 8 + count 100 past the 13 indices -> Python's shorter slice, no refusal (2 triangles)
+  const auto s4 = scan::ScanOf("base", 4);
+  CHECK(s4 && scan::NodesOfObject(*s4, 5).size() == 5);
+  CheckScanCase("short_mesh");  // m[0x80:0xC0] of a 0x80-byte record is empty
+  const auto sm = scan::ScanOf("short_mesh", 2);
+  CHECK(sm && !sm->keys.empty() && sm->keys[0].m80.empty() && sm->keys[0].m70.size() == 4);
+  CheckScanCase("vertex_past_vbuf");
+}
+
+static void TestOutOfRangeRefuses() {
+  CheckScanCase("x_vertex_past_data");
+  CheckScanCase("x_infos_short");
+  CHECK(!scan::ScanOf("x_vertex_past_data", 4) && !scan::ScanOf("x_infos_short", 2));
+}
+
+static void TestKind4PayloadHasNoAttributes() {
+  const auto s2 = scan::ScanOf("base", 2), s4 = scan::ScanOf("base", 4);
+  bool k4 = s4 && !s4->payload.empty(), k2 = s2 && !s2->payload.empty();
+  if (s4)
+    for (const auto& p : s4->payload) k4 = k4 && p.nrm_n == 0 && p.uv_n == 0;
+  if (s2)
+    for (const auto& p : s2->payload) k2 = k2 && p.nrm_n == 3 && p.uv_n == 2;
+  CHECK(k4 && k2);
+  // payload index = 3 t + c, its triangle and corner
+  bool idx = s4.has_value();
+  if (s4)
+    for (size_t t = 0; t < s4->tris.size(); ++t)
+      for (uint32_t c = 0; c < 3; ++c) {
+        const auto& p = s4->payload[s4->tris[t].payload[c]];
+        idx = idx && s4->tris[t].payload[c] == 3 * t + c && p.tri == t && p.corner == c && p.vid == s4->tris[t].vid[c];
+      }
+  CHECK(idx);
+}
+
+static void TestScanRefusals() {
+  for (const char* n : {"r_bind_missing", "r_bind_mm", "r_two_groups", "r_named_twice", "r_parent_outside",
+                        "r_shadow_child", "r_no_9002", "r_no_node", "r_no_uv", "r_pass"})
+    CheckScanCase(n);
+  // every case has its row and every row its case
+  size_t rows = 0, found = 0;
+  for (const auto& e : kScanExpected) {
+    ++rows;
+    found += scan::FindCase(e.name) != nullptr;
+  }
+  CHECKF(rows == found && rows == scan::ScanCases().size(), "rows %zu found %zu cases %zu", rows, found,
+         scan::ScanCases().size());
+  size_t trows = 0;
+  for (const auto& e : kToLocalExpected) (void)e, ++trows;
+  CHECKF(trows == scan::ToLocalCases().size(), "to_local rows %zu", trows);
+}
+
+// --bench: the scan's time on a synthetic suit of about 25000 triangles (not a check)
+static int Bench() {
+  scan::Scene sc = scan::Base();
+  for (size_t o = 0; o < sc.objs.size(); ++o) {
+    scan::DeclDef d;
+    for (uint16_t k = 0; k < 4200; ++k) {
+      const double x = static_cast<double>(o) + 0.001 * (k / 2), y = 0.01 * (k % 2);
+      d.verts.push_back(scan::V({x, y, 0.001 * (k % 7)}, {0.5, 0.25, 0.25, 0}));
+      d.idx.push_back(k);
+    }
+    sc.objs[o].decls = {d};
+    sc.objs[o].meshes = {synth::MeshSpec{.decl = 0, .istart = 0, .icount = 4200, .tex = static_cast<uint32_t>(o + 1)}};
+    sc.objs[o].infos_short = 0;
+  }
+  const scan::ScanCase c{"bench", sc};
+  const scan::Loaded ld = scan::Load(c.name, scan::BuildCase(c));
+  const sl::Layout lay = sl::MakeLayout(ld.suit, ld.ref);
+  double best = 1e9;
+  size_t n = 0;
+  for (int rep = 0; rep < 5; ++rep) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const sl::Scan a = sl::ScanKind(ld.suit, ld.ref, lay, 2), b = sl::ScanKind(ld.suit, ld.ref, lay, 4);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    best = std::min(best, ms);
+    n = a.tris.size() + b.tris.size();
+  }
+  std::printf("bench: scan kinds 2 + 4 of %zu + %zu triangles: best of 5 %.2f ms\n", n / 2, n - n / 2, best);
+  return 0;
+}
+
 // ---------------------------------------------------------------- dump mode
 static int Dump(const fs::path& dir) {
   fs::create_directories(dir);
@@ -1249,6 +2199,27 @@ static int Dump(const fs::path& dir) {
     grid::WriteGridCase(dir / "grid", c);
     ++n;
   }
+  fs::create_directories(dir / "scan");
+  for (const scan::ScanCase& c : scan::ScanCases()) {
+    const scan::Built b = scan::BuildCase(c);
+    put(dir / "scan" / (c.name + ".tpr"), b.tpr);
+    put(dir / "scan" / (c.name + ".cat"), b.cat);
+    put(dir / "scan" / (c.name + ".ref.tpr"), b.ref_tpr);
+    put(dir / "scan" / (c.name + ".ref.cat"), b.ref_cat);
+    ++n;
+  }
+  {
+    std::string t;
+    for (const auto& c : scan::ToLocalCases()) {
+      t += std::string(c.name) + " w";
+      for (double v : c.w) t += " " + scan::Hex16(scan::Bits(v));
+      t += " v";
+      for (double v : c.v) t += " " + scan::Hex16(scan::Bits(v));
+      t += std::string(" dir ") + (c.direction ? "1" : "0") + "\n";
+      ++n;
+    }
+    put(dir / "scan" / "tolocal.txt", Bytes(t.begin(), t.end()));
+  }
   std::printf("dumped %d cases to %s\n", n, dir.string().c_str());
   return 0;
 }
@@ -1257,6 +2228,7 @@ int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   doa4::suitconv::num::FpEnvGuard fp;
   if (argc == 3 && std::strcmp(argv[1], "--dump") == 0) return Dump(argv[2]);
+  if (argc == 2 && std::strcmp(argv[1], "--bench") == 0) return Bench();
   RunGroup(TestSynthRoundTrip, "synth_round_trip");
   RunGroup(TestStripRemovesCopies, "strip_removes_copies");
   RunGroup(TestStripNotTrailing, "strip_not_trailing_in_list_order");
@@ -1280,6 +2252,26 @@ int main(int argc, char** argv) {
   RunGroup(TestCellMeanIsSequential, "cell_mean_is_sequential");
   RunGroup(TestVidMembership, "vid_membership");
   RunGroup(TestGridRefusals, "grid_refusals");
+  RunGroup(TestChannelLowestCode, "channel_lowest_code");
+  RunGroup(TestShallowestThenLowestId, "shallowest_then_lowest_id");
+  RunGroup(TestIdsFromOwnCount, "ids_from_own_count");
+  RunGroup(TestHeaviestTieLowestBone, "heaviest_tie_lowest_bone");
+  RunGroup(TestFirstVertexAfterSwap, "first_vertex_after_swap");
+  RunGroup(TestStripTrisRestart, "strip_tris_restart");
+  RunGroup(TestCornerAddsWorldTranslation, "corner_adds_world_translation");
+  RunGroup(TestWorldMatsCompensated, "world_mats_compensated");
+  RunGroup(TestT1FirstRowPerCode, "t1_first_row_per_code");
+  RunGroup(TestNeckN2, "neck_n2");
+  RunGroup(TestKind2SkipsUntextured, "kind2_skips_untextured");
+  RunGroup(TestMatsrcFirstMesh, "matsrc_first_mesh");
+  RunGroup(TestToLocalCompensated, "to_local_compensated");
+  RunGroup(TestFrameDevThreshold, "frame_dev_threshold");
+  RunGroup(TestVidsOneToOne, "vids_one_to_one");
+  RunGroup(TestKeyFieldsSeparate, "key_fields_separate");
+  RunGroup(TestIndexSliceClamps, "index_slice_clamps");
+  RunGroup(TestOutOfRangeRefuses, "out_of_range_refuses");
+  RunGroup(TestKind4PayloadHasNoAttributes, "kind4_payload_has_no_attributes");
+  RunGroup(TestScanRefusals, "scan_refusals");
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
     return 1;

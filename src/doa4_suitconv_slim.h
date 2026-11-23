@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -24,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "doa4_suitconv_core.h"
 #include "doa4_suitconv_num.h"
 #include "doa4_suitconv_tpr.h"
 
@@ -135,5 +137,80 @@ struct Suit {
 Suit ReadSuit(std::string_view name, std::span<const uint8_t> tpr, std::span<const uint8_t> cat);
 // slim_addon.rebuild: the container with nothing added (USER1-3 re-encoded from the parsed lists), Build(1).
 Bytes Rebuild(const Suit& suit);
+
+// ---------------------------------------------------------------- bind guard, layout, scan (Task 5)
+// Bodies in doa4_suitconv_slimscan.cpp. The reference is a core::Model from core::LoadModel (convert.Model; in the game
+// the reference is the suit's own file). The type-2 map is read with ParseMap (convert.parse_t2's CURRENT grammar),
+// never with tpr::ParseT2 or core::ChannelMapOf (the older grammar).
+
+// slim_addon.ref_groups(ref): the reference's type-2 map at dict(cat_dir(ref.cat))[2].
+std::vector<MapGroup> RefGroups(const core::Model& ref);
+// convert.channel_map(ref)[0]: channel code -> reference node id over the main group, the shallowest node (Hie depth)
+// then the lowest id per code, then CHANNEL_ALIAS in sorted code order for a code the main group lacks.
+std::map<uint32_t, int64_t> ChannelMap(const core::Model& ref);
+
+// slim_addon.bind_guard: every node of the reference's main group is in the suit, at the same world translation
+// (1e-5 m). Throws the two SlimErrors.
+void BindGuard(const Suit& suit, const core::Model& ref);
+
+// lod_chain._frame(w): R rows, t, dev = max |R - I| (Python's max: the first of equal values).
+struct Frame {
+  std::array<std::array<double, 3>, 3> R;
+  std::array<double, 3> t;
+  double dev;
+};
+Frame FrameOf(const std::vector<double>& w);
+// lod_chain._to_local(v, R, t, dev): q = v - t (direction: q = v, Python's t=None); dev < 1e-6 gives q, otherwise
+// q_j = sum(q[i] * R[j][i] for i in 0..2) with Python's built-in sum (num::PySum).
+std::array<double, 3> ToLocal(const std::array<double, 3>& v, const Frame& f, bool direction);
+
+// One copy group of slim_addon.Layout (kind 2 or 4).
+struct CopyGroup {
+  std::vector<std::pair<uint32_t, uint8_t>> rows;  // the reference group's (code, id) rows in file order
+  std::vector<int64_t> ids;                        // sorted distinct reference ids
+  std::map<int64_t, int64_t> new_id;               // reference id -> new id
+  std::vector<tpr::Node> nodes;                    // the group's Hie nodes (new ids, in reference-id order)
+  std::map<uint32_t, int64_t> node_of_code;        // code -> new id: the shallowest node, then the lowest new id
+};
+// slim_addon.Layout: the two copy groups of the reference; new ids from len(suit.nodes), 0x02 first, then 0x04.
+struct Layout {
+  CopyGroup g2, g4;
+  std::vector<std::pair<MapGroup::Kind, uint8_t>> kinds;  // groups[1:]'s kinds in map order (state groups included)
+  std::vector<tpr::Node> allnodes;                         // the suit's nodes, then g2's, then g4's
+  std::map<int64_t, Frame> frame;                          // node id (suit or new) -> Frame of WorldMats(allnodes)
+  const CopyGroup& Of(int kind) const;                     // 2 or 4; any other kind is the KeyError
+};
+// Throws the four Layout SlimErrors (and KeyError / IndexError texts where Python raises them).
+Layout MakeLayout(const Suit& suit, const core::Model& ref);
+
+// slim_addon._scan(suit, ref, kind, lay): the copy group's triangles in traversal order (object, decl, mesh, strip).
+// Python's tuples become indices into tables: Tri.key -> keys (dense, first-traversal order), Tri.vid[c] -> vid_src
+// (dense, first-appearance order over the whole scan, one-to-one with Python's (object, decl, vertex)), Tri.payload[c]
+// = 3 * t + c -> payload. Tri.pos[c] is the decoded position plus the object's world translation.
+struct ScanKey {
+  int64_t node = 0;  // k[0]: the copy node's new id
+  // kind 2 only (zero / empty for kind 4): the matkey (stage-0 texture, LOD_PASS[pass], flag, mesh u32 at 4,
+  // mesh bytes 0x70:0x74 and 0x80:0xC0 as clamped slices) and matsrc, the whole record of the FIRST mesh that made the key
+  uint32_t tex = 0, pass = 0, flag = 0, word4 = 0;
+  Bytes m70, m80, matsrc;
+};
+struct ScanPayload {
+  uint32_t vid = 0;
+  uint32_t tri = 0;    // t, the triangle's index in the scan
+  uint8_t corner = 0;  // ci
+  // kind 2: decode_elem(...)[:3] and [:2] (a shorter element gives fewer values: nrm_n / uv_n count them); kind 4: none
+  uint8_t nrm_n = 0, uv_n = 0;
+  std::array<double, 3> nrm{};
+  std::array<double, 2> uv{};
+};
+struct Scan {
+  std::vector<Tri> tris;
+  std::vector<ScanKey> keys;
+  std::vector<std::array<uint32_t, 3>> vid_src;  // vid -> (object, decl, vertex)
+  std::vector<ScanPayload> payload;              // 3 per triangle
+};
+// Throws the four _scan SlimErrors; every other raise of the Python (a read past the data, an index past a list, a
+// missing key) is a ConvertError naming the Python exception type. Never reads out of bounds.
+Scan ScanKind(const Suit& suit, const core::Model& ref, const Layout& lay, int kind);
 
 }  // namespace doa4::suitconv::slim

@@ -17,6 +17,10 @@ Grid mode (Task 4): py -3 -I tests/host/slim_expect.py --grid TOOL_DIR DUMP_DIR/
     {"<case>", "REFUSED <SlimError text>"} or "REFUSED <ExceptionType>: <text>" for math.floor's and the division's
   errors. A .grid file: 'case NAME', then 'merge none|<h bits>' or 'choose <target>', then one line per triangle
   't KEY vid x y z payload vid x y z payload vid x y z payload' (doubles as their IEEE bits, 16 hex digits).
+
+Scan mode (Task 5): py -3 -I tests/host/slim_expect.py --scan TOOL_DIR DUMP_DIR/scan
+  runs read_suit, load_ref, bind_guard, Layout and _scan (kinds 2 and 4) on every case and lod_chain._frame /
+  _to_local on tolocal.txt; prints the kScanExpected and kToLocalExpected rows (see scan_main).
 """
 import os
 import struct
@@ -103,9 +107,123 @@ def grid_main(tool, gdir):
     return 1 if bad else 0
 
 
+def scan_layout(lay):
+    """Layout's canonical text (the C++ test's LayoutCanon()): per kind rows, ids, new ids, nodes, node_of_code (sorted
+    by code); the kinds; the allnodes ids; every frame (sorted by id) as R, t, dev bits."""
+    out = []
+    for kind in (2, 4):
+        out.append(f'G{kind}:r=' + ','.join(f'{c:x}:{i}' for c, i in lay.rows[kind]))
+        out.append(';i=' + ','.join(str(i) for i in lay.ids[kind]))
+        out.append(';n=' + ','.join(f'{o}>{n}' for o, n in lay.new_id[kind].items()))
+        out.append(';h=' + ','.join(f'{nd.id}/{nd.parent}/' + '.'.join(str(c) for c in nd.children)
+                                    for nd in lay.nodes[kind]))
+        out.append(';c=' + ','.join(f'{c:x}>{n}' for c, n in sorted(lay.node_of_code[kind].items())) + '|')
+    out.append('k=' + ','.join(f's{k[1]:x}' if isinstance(k, tuple) else f'{k:x}' for k in lay.kinds) + '|')
+    out.append('a=' + ','.join(str(nd.id) for nd in lay.allnodes) + '|')
+    for nid in sorted(lay.frame):
+        R, t, dev = lay.frame[nid]
+        out.append(f'f{nid}:' + ','.join(dbits(R[r][c]) for r in range(3) for c in range(3)) + ',' +
+                   ','.join(dbits(x) for x in t) + ',' + dbits(dev) + ';')
+    return ''.join(out)
+
+
+def scan_text(kind, tris, matsrc):
+    """_scan's result as the C++ test's ScanCanon(): keys (dense, first-traversal order), vids (dense, first appearance),
+    then per triangle its key id and per corner vid, position bits and payload (vid id, triangle, corner[, normal bits,
+    uv bits])."""
+    keys, vids = {}, {}
+    ktext, vtext, ttext = [], [], []
+    for key, cs in tris:
+        if key not in keys:
+            keys[key] = len(keys)
+            if kind == 2:
+                node, (tex, lp, flag, w4, m70, m80) = key
+                ktext.append(f'{node},{tex:x},{lp},{flag},{w4:x},{m70.hex()},{m80.hex()},{fnv(matsrc[key]):016x};')
+            else:
+                ktext.append(f'{key[0]};')
+        parts = [f'{keys[key]}:']
+        for vid, pos, pl in cs:
+            if vid not in vids:
+                vids[vid] = len(vids)
+                vtext.append(f'{vid[0]}.{vid[1]}.{vid[2]};')
+            p = f'{vids[pl[0]]}.{pl[1]}.{pl[2]}'
+            if kind == 2:
+                p += '.' + '.'.join(dbits(x) for x in pl[3]) + '/' + '.'.join(dbits(x) for x in pl[4])
+            parts.append(f'{vids[vid]},{dbits(pos[0])},{dbits(pos[1])},{dbits(pos[2])},{p};')
+        ttext.append(''.join(parts))
+    text = 'K' + ''.join(ktext) + 'V' + ''.join(vtext) + 'T' + '|'.join(ttext)
+    nodes = ','.join(str(key[0]) for key, cs in tris)
+    return f'S{kind}=n{len(tris)} k{len(keys)} v{len(vids)} fnv={fnv(text.encode("ascii")):016x} nodes{kind}=[{nodes}]'
+
+
+def scan_main(tool, sdir):
+    """--scan mode (Task 5): every <case>.tpr / <case>.cat (the suit) with <case>.ref.tpr / <case>.ref.cat (the
+    reference) the test exe's `--dump DIR` wrote under DIR/scan, through read_suit, load_ref, bind_guard, Layout and
+    _scan for kinds 2 and 4; prints the kScanExpected rows
+        {"<case>", "L=<fnv of LayoutCanon> noc2=[...] noc4=[...] S2=... S4=..."}
+    where a part is "REFUSED <SlimError text>" or "RAISED" (any other exception, its type in a comment line); then the
+    to_local rows of DIR/scan/tolocal.txt (one case per line: 'NAME w <16 bits> v <3 bits> dir 0|1')."""
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, tool)
+    import slim_addon as sa                 # noqa: E402
+    import lod_chain                        # noqa: E402
+    print(f'# tool {os.path.abspath(sa.__file__)}')
+    names = sorted(f[:-4] for f in os.listdir(sdir) if f.endswith('.tpr') and not f.endswith('.ref.tpr'))
+    bad = 0
+
+    def guard(case, what, fn):
+        try:
+            return fn(), None
+        except sa.SlimError as e:
+            return None, f'REFUSED {e}'
+        except Exception as e:  # noqa: BLE001
+            print(f'# {case} {what}: RAISED {type(e).__name__}: {e}')
+            return None, 'RAISED'
+    for name in names:
+        base = os.path.join(sdir, name)
+        try:
+            s = sa.read_suit(base + '.tpr', base + '.cat')
+            ref = sa.load_ref(base + '.ref.tpr', base + '.ref.cat')
+        except Exception as e:  # noqa: BLE001
+            print(f'    {{{c_str(name)}, {c_str("ERROR " + type(e).__name__ + ": " + str(e))}}},')
+            bad += 1
+            continue
+
+        def layout():
+            sa.bind_guard(s, ref)
+            return sa.Layout(s, ref)
+        lay, err = guard(name, 'layout', layout)
+        if err:
+            line = err
+        else:
+            parts = [f'L={fnv(scan_layout(lay).encode("ascii")):016x}']
+            for kind in (2, 4):
+                parts.append(f'noc{kind}=[' + ','.join(f'{c:x}>{n}' for c, n in sorted(lay.node_of_code[kind].items()))
+                             + ']')
+            for kind in (2, 4):
+                res, err = guard(name, f'scan {kind}', lambda: sa._scan(s, ref, kind, lay))
+                parts.append(f'S{kind}={err}' if err else scan_text(kind, *res))
+            line = ' '.join(parts)
+        print(f'    {{{c_str(name)}, {c_str(line)}}},')
+    print('# to_local (kToLocalExpected)')
+    for ln in open(os.path.join(sdir, 'tolocal.txt'), encoding='ascii').read().split('\n'):
+        if not ln:
+            continue
+        w = ln.split(' ')
+        assert w[1] == 'w' and w[18] == 'v' and w[22] == 'dir', ln
+        m = [bits_d(x) for x in w[2:18]]
+        v = [bits_d(x) for x in w[19:22]]
+        R, t, dev = lod_chain._frame(m)
+        q = lod_chain._to_local(v, R, None if w[23] == '1' else t, dev)
+        print(f'    {{{c_str(w[0])}, "dev={dbits(dev)} q={",".join(dbits(x) for x in q)}"}},')
+    return 1 if bad else 0
+
+
 def main():
     if len(sys.argv) == 4 and sys.argv[1] == '--grid':
         return grid_main(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 4 and sys.argv[1] == '--scan':
+        return scan_main(sys.argv[2], sys.argv[3])
     if len(sys.argv) != 3:
         print(__doc__)
         return 2
