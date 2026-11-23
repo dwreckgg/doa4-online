@@ -19,6 +19,10 @@
   The cross-fade after YOU LOSE / CONTINUE? (and other fades drawn the same way) now fades into the next round
   instead of holding the old picture for about half a second and then cutting. If a picture looks wrong,
   `d3d12_constant_alpha_blend_factor = false` in `dead_or_alive_4.toml` draws as 0.3.7 did.
+- **Online Tag matches: no false "desync" at the character select.** When the second fighters were picked, the
+  online check could end the session as a desync although both games were in step: a drawing pointer of the menus,
+  which can differ for a few frames with each PC's loading speed, was part of the check. It is left out now, like
+  the other drawing and timing values. Tested with four online Tag sessions that hit the old cause.
 
 ## 0.3.7 (2026-11-19)
 
