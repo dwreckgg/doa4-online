@@ -22,9 +22,10 @@
 // bounds_radius_compensated, placeholder_bytes, placeholder_texture_from_merged_order, collapse_refused,
 // full_mode_never_refuses, map_rule_i1, kind_order_follows_marker_order, buffers_at_4k, user0_recomputed,
 // ids_out_of_step_refused, twice_equal, self_reference, nrm_uv_short_refused, vertex_limit_edges,
-// slim_copies_refusal_contract, add_refusals, add_rows; the slim oracle (Task 7, real files: DOA4_SLIM_ORACLE, and
-// DOA4_SLIM_ORACLE_TIME=1 for the start-up time; see RunSlimOracle). `--bench` prints the scan's time and AddCopies' (slim mode) on a
-// synthetic suit of about 25000 triangles. Last line: "PASSED: N checks, 0 failures" or "FAILED: ...".
+// slim_copies_refusal_contract, add_refusals, add_rows, malformed_sweep (final fix wave F5); the slim oracle (Task 7,
+// real files: DOA4_SLIM_ORACLE, and DOA4_SLIM_ORACLE_TIME=1 for the start-up time; see RunSlimOracle). `--bench`
+// prints the scan's time and AddCopies' (slim mode) on a synthetic suit of about 25000 triangles. Last line:
+// "PASSED: N checks, 0 failures" or "FAILED: ...".
 
 #include "../../src/doa4_suitconv_slim.h"
 #include "slim_synth.h"
@@ -47,6 +48,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -1607,6 +1609,41 @@ static std::vector<ScanCase> ScanCases() {
     sc.objs[2].infos_short = 1;
     v.push_back({"x_infos_short", sc});
   }
+  // The data-end edge (final fix wave F4). O5's vertices sit at data offset 3328 + 48 v and the data section is 3872
+  // bytes long (read off the Python tool's own error texts for these files). Kind 2 reads position (+0, 12 bytes),
+  // normal (+12, 12) and uv: vertex 10 is its last that fits, vertex 11's normal (3868..3880) runs 8 bytes past.
+  // Kind 4 reads the position only: vertex 11 (3856..3868) is its last, vertex 12 (3904..3916) its first past. At
+  // byte grain: vertex 11 with its normal element moved to offset 4 ends exactly at the data end (3856 + 4 + 12 =
+  // 3872, read), at offset 5 one byte past it (Python raises); in both its uv element moves to offset 0 (3856..3864).
+  for (const auto& [name, vertex, nrm_at] :
+       std::vector<std::tuple<const char*, uint16_t, uint16_t>>{{"x_vertex_last_in_data", 10, 12},
+                                                                {"x_vertex_first_past_data", 11, 12},
+                                                                {"x_vertex_first_past_data_k4", 12, 12},
+                                                                {"x_vertex_ends_at_data_end", 11, 4},
+                                                                {"x_vertex_one_byte_past", 11, 5}}) {
+    Scene sc = Base();
+    sc.objs[5].decls[0].idx[2] = vertex;
+    sc.objs[5].decls[0].elems[1].b = nrm_at;
+    if (nrm_at != 12) sc.objs[5].decls[0].elems[2].b = 0;
+    v.push_back({name, sc});
+  }
+  // The bind guard's edge (final fix wave F3): a reference main node at exactly 1e-5 m (accepted: the test is d >
+  // 1e-5) and one double step past it (refused). Nodes 6 -> 7 -> 8 in a chain on y: the suit's y translations are
+  // the three float32 parts of the double 1e-5 (0x1.4f8b58p-17 + 0x1.1c6d1ep-42 + 0x1p-69, every partial sum exact),
+  // the reference's are 0, and only node 8 is in the main group, so d at node 8 is the double 1e-5 itself; with
+  // 0x1p-68 as the last part it is the next double up. Nodes 6 and 7 differ by more but are not checked.
+  for (const auto& [name, last] : std::vector<std::pair<const char*, double>>{{"bind_at_1e-5", 0x1p-69},
+                                                                              {"r_bind_past_1e-5", 0x1p-68}}) {
+    Scene sc = Base();
+    const double ys[3] = {0x1.4f8b58p-17, 0x1.1c6d1ep-42, last};
+    for (int k = 0; k < 3; ++k) {
+      sc.suit_nodes.insert(sc.suit_nodes.begin() + 6 + k, NodeDef{6 + k, k ? 5 + k : -1, 0.0, ys[k], 0.0});
+      sc.ref_nodes.insert(sc.ref_nodes.begin() + 6 + k, NodeDef{6 + k, k ? 5 + k : -1, 0.0, 0.0, 0.0});
+    }
+    sc.main.push_back({0x9009, 8});
+    sc.ref_main.push_back({0x9009, 8});
+    v.push_back({name, sc});
+  }
   return v;
 }
 
@@ -1836,10 +1873,11 @@ static std::string ToLocalLine(const ToLocalCase& c) {
 //   tests/host/run_suitconv_slim_test.bat --dump DIR
 //   py -3 -I tests/host/slim_expect.py --scan <doax2_work>/physics_spike/scripts DIR/scan
 static const Expected kScanExpected[] = {
-    {"base", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"alias_9004", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
-    {"heaviest_sum", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n14 k7 v28 fnv=e9be1f64dddcfedc nodes2=[6,6,8,8,8,9,9,9,13,8,8,8,8,8] S4=n15 k3 v28 fnv=22854a0abbf78b81 nodes4=[15,15,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"base", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"bind_at_1e-5", "L=35193e1a48a671fb noc2=[9002>9,9003>10,9004>11,9005>12,9006>13,9008>14,9101>16] noc4=[9002>18,9003>19,9005>20] S2=n15 k7 v29 fnv=1579764acc6a6c31 nodes2=[9,9,10,10,11,11,12,12,12,16,11,11,11,11,11] S4=n16 k3 v29 fnv=5f3ffe8a6d872a0e nodes4=[18,18,19,19,19,19,19,20,20,20,20,19,19,19,19,19]"},
     {"chan_shallowest", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"heaviest_sum", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n14 k7 v28 fnv=e9be1f64dddcfedc nodes2=[6,6,8,8,8,9,9,9,13,8,8,8,8,8] S4=n15 k3 v28 fnv=22854a0abbf78b81 nodes4=[15,15,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"ids_own_count", "L=92866ca5f3475738 noc2=[9002>7,9003>8,9004>9,9005>10,9006>11,9008>12,9101>14] noc4=[9002>16,9003>17,9005>18] S2=n16 k8 v32 fnv=09018aea29f3f060 nodes2=[7,7,8,8,9,9,10,10,10,14,9,9,9,9,9,7] S4=n17 k3 v32 fnv=f6ffccd18cea5b55 nodes4=[16,16,17,17,17,17,17,18,18,18,18,17,17,17,17,17,16]"},
     {"key_equal", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v31 fnv=c6ca70044c9dced9 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"key_flag", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k8 v31 fnv=07aa977d29639f1e nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
@@ -1852,6 +1890,7 @@ static const Expected kScanExpected[] = {
     {"packed_elems", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=618423fdbfdee2da nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"r_bind_missing", "REFUSED r_bind_missing: reference node 9 (0x9009) missing from the suit"},
     {"r_bind_mm", "REFUSED r_bind_mm: node 1 (0x9003) is 1.235 mm from the reference bind"},
+    {"r_bind_past_1e-5", "REFUSED r_bind_past_1e-5: node 8 (0x9009) is 0.010 mm from the reference bind"},
     {"r_named_twice", "REFUSED r_named_twice: a group-0x2 node named twice in the reference"},
     {"r_no_9002", "L=5cd0f2adaa535532 noc2=[9001>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=REFUSED r_no_9002: reference group 0x2 has no 0x9002 row S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"r_no_node", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=REFUSED r_no_node: object 6 has no node of that id S4=REFUSED r_no_node: object 6 has no node of that id"},
@@ -1865,6 +1904,11 @@ static const Expected kScanExpected[] = {
     {"vertex_past_vbuf", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=782f3167a3822b42 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=0a8561153ddedb47 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"world_comp", "L=d175ca871c4d8aa6 noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=bbec5af60ef42134 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=87354e0992bb2c4f nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"x_infos_short", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=RAISED S4=RAISED"},
+    {"x_vertex_ends_at_data_end", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=b4e87299163e3cb0 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=a02464f2253802f7 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"x_vertex_first_past_data", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=RAISED S4=n16 k3 v29 fnv=a02464f2253802f7 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"x_vertex_first_past_data_k4", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=RAISED S4=RAISED"},
+    {"x_vertex_last_in_data", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4ffe59436e7587e3 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=416293f9233bc65e nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"x_vertex_one_byte_past", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=RAISED S4=n16 k3 v29 fnv=a02464f2253802f7 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"x_vertex_past_data", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=RAISED S4=RAISED"},
 };
 static const Expected kToLocalExpected[] = {
@@ -2148,6 +2192,14 @@ static void TestOutOfRangeRefuses() {
   CheckScanCase("x_vertex_past_data");
   CheckScanCase("x_infos_short");
   CHECK(!scan::ScanOf("x_vertex_past_data", 4) && !scan::ScanOf("x_infos_short", 2));
+  // the data-end edge, by vertex (kind 2: 10 last, 11 first past; kind 4: 11 last, 12 first past) and by byte (a
+  // read ending exactly at the data end is read, one byte further refuses)
+  for (const char* n : {"x_vertex_last_in_data", "x_vertex_first_past_data", "x_vertex_first_past_data_k4",
+                        "x_vertex_ends_at_data_end", "x_vertex_one_byte_past"})
+    CheckScanCase(n);
+  CHECK(scan::ScanOf("x_vertex_last_in_data", 2) && !scan::ScanOf("x_vertex_first_past_data", 2));
+  CHECK(scan::ScanOf("x_vertex_first_past_data", 4) && !scan::ScanOf("x_vertex_first_past_data_k4", 4));
+  CHECK(scan::ScanOf("x_vertex_ends_at_data_end", 2) && !scan::ScanOf("x_vertex_one_byte_past", 2));
 }
 
 static void TestKind4PayloadHasNoAttributes() {
@@ -2173,6 +2225,10 @@ static void TestScanRefusals() {
   for (const char* n : {"r_bind_missing", "r_bind_mm", "r_two_groups", "r_named_twice", "r_parent_outside",
                         "r_shadow_child", "r_no_9002", "r_no_node", "r_no_uv", "r_pass"})
     CheckScanCase(n);
+  // the bind guard's edge: d exactly the double 1e-5 passes (d > 1e-5 refuses), the next double up refuses
+  CheckScanCase("bind_at_1e-5");
+  CheckScanCase("r_bind_past_1e-5");
+  CHECK(scan::ScanOf("bind_at_1e-5", 2) && scan::ScanOf("bind_at_1e-5", 4));
   // every case has its row and every row its case
   size_t rows = 0, found = 0;
   for (const auto& e : kScanExpected) {
@@ -3139,8 +3195,8 @@ static void TestTwiceEqual() {
 
 static void TestSelfReference() {
   // the suit with stand-in copies at ids 6..17 is its own reference: the copies are stripped, new ids start at 6 (where
-  // the old copies started), and objects 0..5 are written as they were read. The slim targets (the stand-ins' own counts
-  // minus the node count: 0x02 6+..+14 - 9 = 81, 0x04 15+16+17 - 3 = 45) are NOT exercised here: both exceed the
+  // the old copies started), and objects 0..5 are written as they were read. The slim targets (the stand-ins' own
+  // counts minus the node count: 0x02 6+..+14 - 9 = 81, 0x04 15+16+17 - 3 = 45) are NOT exercised here: both exceed the
   // vertex count at H_LO, so h stays at H_LO and slim equals full (target_no_minus is caught by neg_target and dense)
   CheckAddBoth("self");
   const add::AddCase* c = add::FindAdd("self");
@@ -3203,6 +3259,65 @@ static void TestSlimCopiesRefusalContract() {
   CHECK(ok2 && err2 == "untouched" && direct && built.tpr == direct->tpr && built.cat == direct->cat);
 }
 
+// Malformed input through the public entry (final fix wave F5): the synthetic "base" add case's files, each of the
+// four truncated at a spread of lengths and each header word of the suit's tpr and cat (and of the reference's tpr)
+// flipped, in both modes. Per call: no crash, and either a build (*out replaced) or a refusal that leaves *out as it
+// was (a sentinel) with a non-empty error. Prints how many built and how many refused.
+static void TestMalformedSweep() {
+  const add::AddCase* c = add::FindAdd("base");
+  CHECK(c != nullptr);
+  if (!c) return;
+  const add::Files f = add::FilesOf(*c);
+  const uint32_t hs = tp::Xpr::Parse(f.tpr).hs.value_or(0);
+  CHECK(hs > 0 && 12 + hs < f.tpr.size());
+  int built = 0, refused = 0, calls = 0;
+  const auto run = [&](const char* what, size_t at, const Bytes& tpr, const Bytes& cat, const Bytes& ref_tpr,
+                       const Bytes& ref_cat) {
+    for (const CopyMode m : {CopyMode::kSlim, CopyMode::kFull}) {
+      const sl::Result sentinel{{0xA5, 0x5A, 0x01}, {0x02, 0x03}};
+      sl::Result out = sentinel;
+      std::string err;
+      const bool ok = sl::SlimCopies("base", tpr, cat, ref_tpr, ref_cat, m, &out, &err);
+      ++calls;
+      if (ok) {
+        ++built;
+        CHECKF(err.empty() && !(out.tpr == sentinel.tpr) && !out.tpr.empty() && !out.cat.empty(),
+               "%s at %zu: a build leaves the error empty and replaces *out", what, at);
+      } else {
+        ++refused;
+        CHECKF(!err.empty() && out.tpr == sentinel.tpr && out.cat == sentinel.cat,
+               "%s at %zu: a refusal leaves *out untouched and names a reason (error '%s')", what, at, err.c_str());
+      }
+    }
+  };
+  const auto cut = [](const Bytes& b, size_t n) { return Bytes(b.begin(), b.begin() + static_cast<ptrdiff_t>(n)); };
+  const auto flip = [](Bytes b, size_t o) {
+    for (size_t k = o; k < o + 4 && k < b.size(); ++k) b[k] ^= 0xFF;
+    return b;
+  };
+  const auto lengths = [&](const Bytes& b, std::initializer_list<size_t> extra) {
+    std::set<size_t> s = {0, 4, 12, b.size() / 2, b.size() - 1};
+    for (size_t e : extra)
+      if (e < b.size()) s.insert(e);
+    return s;
+  };
+  for (size_t n : lengths(f.tpr, {12 + hs - 4, 12 + hs, 12 + hs + 4}))
+    run("tpr cut", n, cut(f.tpr, n), f.cat, f.ref_tpr, f.ref_cat);
+  for (size_t n : lengths(f.cat, {16, 32}))
+    run("cat cut", n, f.tpr, cut(f.cat, n), f.ref_tpr, f.ref_cat);
+  for (size_t n : lengths(f.ref_tpr, {12 + hs}))
+    run("ref tpr cut", n, f.tpr, f.cat, cut(f.ref_tpr, n), f.ref_cat);
+  for (size_t n : lengths(f.ref_cat, {16}))
+    run("ref cat cut", n, f.tpr, f.cat, f.ref_tpr, cut(f.ref_cat, n));
+  for (size_t o = 0; o < 12 + hs && o < 0x80; o += 4) run("tpr flip", o, flip(f.tpr, o), f.cat, f.ref_tpr, f.ref_cat);
+  run("tpr flip", 12 + hs, flip(f.tpr, 12 + hs), f.cat, f.ref_tpr, f.ref_cat);
+  for (size_t o = 0; o < 0x40 && o < f.cat.size(); o += 4)
+    run("cat flip", o, f.tpr, flip(f.cat, o), f.ref_tpr, f.ref_cat);
+  for (size_t o = 0; o < 0x20; o += 4) run("ref tpr flip", o, f.tpr, f.cat, flip(f.ref_tpr, o), f.ref_cat);
+  std::printf("malformed_sweep: %d calls, %d built, %d refused\n", calls, built, refused);
+  CHECK(refused > 0 && calls == built + refused);
+}
+
 // every refusal branch of the writers and the assembly, each by its text (Python's REFUSED rows; for a Python raise
 // the C++ text that names the exception type, Python's type and text in expect4.log's comment lines)
 static void TestAddRefusals() {
@@ -3219,7 +3334,8 @@ static void TestAddRefusals() {
     CheckAddBoth(n);
   // fix round 1 (review findings 1, 2, 3, 6), each by its text:
   for (const char* n : {"lost2", "inf_pos", "nrm_short_rot", "id_overflow"}) CheckAddBoth(n);
-  // 2: two lost nodes in first-fed order (13, fed 3 triangles by O0 and O4, before 9); by id the text would name node 9 and [9, 13]
+  // 2: two lost nodes in first-fed order (13, fed 3 triangles by O0 and O4, before 9); by id the text would name
+  // node 9 and [9, 13]
   CHECK(AddRow("lost2/slim") ==
         "REFUSED lost2: copy 0x02: node 13 had 3 triangles before the merge and none after (nodes [13, 9])");
   // 1: merge's own OverflowError passes unwrapped (Python: RAISED OverflowError, no "<name>: copy 0x02:" prefix)
@@ -3565,12 +3681,15 @@ static void SlimOracleBody(const std::string& manifest, bool timed, int* lines_r
 // Not through RunGroup: unset, the group prints only its SKIPPED line and counts nothing.
 static void RunSlimOracle() {
   const std::optional<std::string> manifest = OracleVar("DOA4_SLIM_ORACLE");
+  const std::optional<std::string> tv = OracleVar("DOA4_SLIM_ORACLE_TIME");
   if (!manifest) {
     std::printf("slim oracle: SKIPPED (DOA4_SLIM_ORACLE unset)\n");
+    if (tv) std::printf("slim oracle time: NOT taken (DOA4_SLIM_ORACLE_TIME is set but DOA4_SLIM_ORACLE is unset)\n");
     return;
   }
-  const std::optional<std::string> tv = OracleVar("DOA4_SLIM_ORACLE_TIME");
   const bool timed = tv && *tv == "1";
+  if (tv && !timed)
+    std::printf("slim oracle time: NOT taken (DOA4_SLIM_ORACLE_TIME is '%s'; only 1 takes the time)\n", tv->c_str());
   const int before = g_checks, fb = g_failures;
   int lines_read = 0;
   try {
@@ -3653,6 +3772,7 @@ int main(int argc, char** argv) {
   RunGroup(TestSlimCopiesRefusalContract, "slim_copies_refusal_contract");
   RunGroup(TestAddRefusals, "add_refusals");
   RunGroup(TestAddRows, "add_rows");
+  RunGroup(TestMalformedSweep, "malformed_sweep");
   RunSlimOracle();
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);

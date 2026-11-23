@@ -739,7 +739,7 @@ std::pair<std::vector<T2Group>, uint64_t> ParseT2(std::span<const uint8_t> c, ui
       if (b == 0) return {std::move(groups), static_cast<uint64_t>(p + 1)};
       if (b == 0x60) {
         const uint8_t nn = r.U8(p + 1);
-        // seen: 0x10-0x12, 0x20, 0x21; a 00 or top-bit byte here would be an end byte or an entry swallowed
+        // a state value is 1..0x7F; a 00 or top-bit byte here would be an end byte or an entry swallowed
         if (nn == 0 || (nn & 0x80)) {
           char buf[96];
           std::snprintf(buf, sizeof buf, "type-2 map: state switch 60 %02x at 0x%llx", nn,
