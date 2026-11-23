@@ -18,7 +18,8 @@ namespace doa4::vanilla {
 inline constexpr const char* kOffText = "off: vanilla mode";
 
 namespace detail {
-// Read by the Age hook on the morph worker threads: atomics. Latch is called once, on the UI thread, before any of them runs.
+// Read by the start-up code (SetUpSuits, SetUpExtras) and the menu; kept atomic so a reader on another thread stays safe.
+// Latch is called once, on the UI thread, before any of them runs.
 inline std::atomic<bool> g_latched{false};
 inline std::atomic<bool> g_running{false};
 }  // namespace detail
