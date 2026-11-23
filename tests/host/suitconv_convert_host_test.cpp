@@ -796,6 +796,144 @@ static void TestAttachFrame() {
 // start = min of every offset the block names = 0x20 and end = 0x70 + 8 + 4 * 2 = 0x80, so 96 bytes are copied. The
 // target .cat is 48 bytes with its directory (one type-2 entry) at 0x20, so the block lands at 48 and every non-zero
 // offset field moves by 48 - 0x20 = 16. Expected values are written out by hand, not computed by the port.
+// build_cat's type-2 map (Task 6b): convert.build_cat on a hand-made reference .cat against BuildCat. The reference is
+// built here exactly as cat_of() in tests/host/suitconv_t2_expect.py builds it (asserted below against that script's
+// "in:" bytes), and every expected output is that script's "out:" line:
+//   py -3 -I tests/host/suitconv_t2_expect.py <doax2_work>/physics_spike/scripts
+// The maps are synthetic (no game byte); kHel has hel05's shape: main, '60 10' state (object 1), '60 11' state with
+// the 0xDX entry d4 14 10 00 (object 0), marker 0x04 (object 6), marker 0x02 (object 7).
+static std::vector<uint8_t> T2CatOf(const std::string& map_hex) {
+  std::vector<uint8_t> out = {'C', 'A', 'T', 0};
+  out.resize(24, 0);
+  for (size_t i = 0; i + 1 < map_hex.size(); i += 2) out.push_back(uint8_t(std::stoul(map_hex.substr(i, 2), nullptr, 16)));
+  while (out.size() % 8) out.push_back(0);
+  const uint32_t t5 = uint32_t(out.size());
+  for (int v = 0x50; v < 0x60; ++v) out.push_back(uint8_t(v));
+  const uint32_t t4 = uint32_t(out.size());
+  out.push_back(0xFF), out.push_back(0xFF);
+  out.resize(out.size() + 6, 0);
+  const uint32_t d = uint32_t(out.size());
+  auto u32 = [&](uint32_t v) {
+    for (int i = 3; i >= 0; --i) out.push_back(uint8_t(v >> (8 * i)));
+  };
+  for (const auto& [t, v] : {std::pair<uint8_t, uint32_t>{2, 0x18}, {5, t5}, {4, t4}}) {
+    out.push_back(1), out.push_back(0), out.push_back(t), out.push_back(0);
+    u32(v);
+  }
+  out.resize(out.size() + 8, 0);
+  for (int i = 0; i < 4; ++i) out[4 + i] = uint8_t(d >> (8 * (3 - i)));
+  return out;
+}
+
+static std::string T2Hex(const std::vector<uint8_t>& b) {
+  std::string s;
+  char h[3];
+  for (uint8_t v : b) {
+    std::snprintf(h, sizeof h, "%02x", v);
+    s += h;
+  }
+  return s;
+}
+
+static void TestBuildCatT2Grammar() {
+  Group("build_cat_t2_grammar");
+  const std::string kHel = "900102900203910304900405" "6010901001" "6011d4141000" "04900106" "02900207" "00";
+  const std::string kHel2 =
+      "900102900203910304900405" "6010901001" "6011d4141000901104" "04900106" "02900207" "00";
+  const std::string kEmpty = "900102" "04" "02900207" "00";
+  const std::string kDxMain = "900102d4141003900204" "00";
+  const std::string kHelIn =
+      "43415400000000500000000000000000000000000000000090010290020391030490040560109010016011d4141000049001060290020700505"
+      "152535455565758595a5b5c5d5e5fffff0000000000000100020000000018010005000000003801000400000000480000000000000000";
+  struct Case {
+    const char* name;
+    const std::string* map;
+    std::vector<int> sections;
+    std::vector<int64_t> kept;
+    const char* in;   // the script's "in:" line (the reference .cat), or nullptr for kHelIn
+    const char* out;  // the script's "out:" line
+  };
+  const Case cases[] = {
+      // the four Helena suits' case: both state groups name objects 0 / 1 (not kept), 0x04 / 0x02 name 6 / 7: Python
+      // writes main + 00. The old grammar (and the shipped importer) wrote main + '60 60 11 d4 14 10 00'.
+      {"hel_keep2345", &kHel, {2}, {2, 3, 4, 5}, nullptr,
+       "434154000000002800000000000000000000000000000000900102900203910304900405000000000100020000000018000000000000000000"
+       "00000000000000"},
+      // a kept state group is written '60 10 ...'; the '60 11' state (object 0) is dropped. Old grammar: '60' (empty,
+      // kept), '10' (9010/1, kept), then the empty bogus groups '60 11 d4 14 10': main + 60 10 90 10 01 60 11 d4 14 10 00.
+      {"hel_keep12345", &kHel, {2}, {1, 2, 3, 4, 5}, nullptr,
+       "43415400000000300000000000000000000000000000000090010290020391030490040560109010010000000000000001000200000000180"
+       "000000000000000"},
+      // both states kept: the 0xDX entry is written as its 4 bytes 'd4 14 10 00' after '60 11'. The old grammar gives
+      // the SAME file here (observed in the RED run: its bogus markers 60 10 .. 60 11 d4 14 10 and end byte are these
+      // bytes, and the alignment zeros hide the missing last 00), so hel2 below separates them.
+      {"hel_keep012345", &kHel, {2}, {0, 1, 2, 3, 4, 5}, nullptr,
+       "43415400000000300000000000000000000000000000000090010290020391030490040560109010016011d4141000000100020000000018"
+       "0000000000000000"},
+      // hel2: the '60 11' state holds the 0xDX entry (object 0) and then 9011/4. Python keeps and writes both. Old
+      // grammar: the 0xDX entry's 00 ends the map, so 9011/4 and every later group are lost.
+      {"hel2_keep012345", &kHel2, {2}, {0, 1, 2, 3, 4, 5},
+       "43415400000000580000000000000000000000000000000090010290020391030490040560109010016011d4141000901104049001060290"
+       "0207000000000000505152535455565758595a5b5c5d5e5fffff0000000000000100020000000018010005000000004001000400000000500"
+       "000000000000000",
+       "43415400000000380000000000000000000000000000000090010290020391030490040560109010016011d414100090110400000000000001"
+       "0002000000001800000000000000000000000000000000"},
+      // an empty marker group is KEPT (Python's all([]) is True); 0x02 (object 7) is dropped. Old and new grammar agree;
+      // this pins the keep rule against the reading "drop empty groups".
+      {"empty_keep2", &kEmpty, {2}, {2},
+       "43415400000000400000000000000000000000000000000090010204029002070000000000000000505152535455565758595a5b5c5d5e5ff"
+       "fff0000000000000100020000000018010005000000002801000400000000380000000000000000",
+       "434154000000002000000000000000000000000000000000900102040000000001000200000000180000000000000000"},
+      // a kept 0xDX entry in the main group is written as its 4 bytes. Old and new grammar give the same bytes here (the
+      // old one re-emits d4 14 10 03 as four kept empty markers); this case is for the writer (a 3-byte 0xDX write).
+      {"dxmain_keep234", &kDxMain, {2}, {2, 3, 4},
+       "434154000000004000000000000000000000000000000000900102d4141003900204000000000000505152535455565758595a5b5c5d5e5f"
+       "ffff0000000000000100020000000018010005000000002801000400000000380000000000000000",
+       "434154000000002800000000000000000000000000000000900102d41410039002040000000000000100020000000018000000000000000000"
+       "00000000000000"},
+      // the main group's 0xDX entry (object 3) dropped: Python writes main 9001/2, 9002/4. Old grammar: d4, 14, 10 kept as
+      // empty markers and 9002/4 under marker 03: main + d4 14 10 03 90 02 04.
+      {"dxmain_keep24", &kDxMain, {2}, {2, 4},
+       "434154000000004000000000000000000000000000000000900102d4141003900204000000000000505152535455565758595a5b5c5d5e5f"
+       "ffff0000000000000100020000000018010005000000002801000400000000380000000000000000",
+       "434154000000002000000000000000000000000000000000900102900204000001000200000000180000000000000000"},
+      // R3, the has(5) branch: the reference bytes from the END of its type-2 map (0x38, past the 0xDX entry) up to the
+      // type-5 span's end are copied to the same offsets. Old grammar: the map ends at 0x2f, inside the 0xDX entry, so
+      // the copy starts there and carries '0490010602900207' and padding before the type-5 bytes.
+      {"hel_t5_keep2345", &kHel, {2, 5}, {2, 3, 4, 5}, nullptr,
+       "43415400000000480000000000000000000000000000000090010290020391030490040500000000000000000000000000000000000000005"
+       "05152535455565758595a5b5c5d5e5f010002000000001801000500000000380000000000000000"},
+  };
+  // the two refusals reach BuildCat as Python's ValueError (the script's "build_cat refuse_*" lines; old grammar: no
+  // refusal, '60 00' read as marker 0x60 and the end byte, 0xb0 as a marker)
+  const std::string kState00 = "901001" "6000" "00", kUnknownB0 = "901001" "b00102" "00";
+  const Case refusals[] = {
+      {"refuse_state00", &kState00, {2}, {1},
+       "4341540000000038000000000000000000000000000000009010016000000000505152535455565758595a5b5c5d5e5fffff00000000000001"
+       "00020000000018010005000000002001000400000000300000000000000000",
+       "THREW ValueError: type-2 map: state switch 60 00 at 0x1b"},
+      {"refuse_unknown_b0", &kUnknownB0, {2}, {1},
+       "434154000000003800000000000000000000000000000000901001b001020000505152535455565758595a5b5c5d5e5fffff00000000000001"
+       "00020000000018010005000000002001000400000000300000000000000000",
+       "THREW ValueError: type-2 map: unknown entry code 0xb0 at 0x1b"},
+  };
+  std::vector<Case> all(std::begin(cases), std::end(cases));
+  all.insert(all.end(), std::begin(refusals), std::end(refusals));
+  for (const Case& c : all) {
+    core::Model ref;
+    ref.cat = std::make_shared<const std::vector<uint8_t>>(T2CatOf(*c.map));
+    const std::string in = T2Hex(*ref.cat);
+    CKF(in == (c.in ? c.in : kHelIn.c_str()), "%s: the reference is not the script's (%s)", c.name, in.c_str());
+    std::string got;
+    try {
+      got = T2Hex(core::BuildCat(ref, core::Model{}, c.sections, c.kept, {}));
+    } catch (const std::exception& e) {
+      got = std::string("THREW ") + e.what();
+    }
+    CKF(got == c.out, "%s: %s", c.name, got.c_str());
+  }
+}
+
 static void TestAttachApa() {
   Group("attach_apa_synthetic");
   auto put = [](std::vector<uint8_t>& b, size_t at, uint32_t v) {
@@ -1687,6 +1825,34 @@ static InputSet* OpenSet(const OracleEnv& env) {
 
 static std::string Stem(const SuitRecipe& s) { return std::string(s.design) + "_" + std::to_string(s.colour); }
 
+// Task 6b (extras-copies, ledger X36): Helena's four own suits read hel05's type-2 map, whose state switches and 0xDX
+// entry the census grammar reads and the older one did not, so their Python outputs changed at every level. Their
+// expected files and traces are today's convert.py's, in DOA4_SUITCONV_T2FIX_DIR (same layout as the plan-2 oracle:
+// levels/<L>/, traces/<L>/, m1/ for the shipped-level files); every other suit keeps DOA4_SUITCONV_LEVELS_DIR,
+// DOA4_SUITCONV_TRACE_DIR and DOA4_SUITCONV_ORACLE_DIR. With the variable unset, a Helena suit's oracle read fails
+// (it is not skipped): the old folders hold the old bytes.
+static bool IsT2FixStem(const std::string& stem) {
+  return stem == "vhe_cm_a_0" || stem == "vhe_on_d_0" || stem == "vhe_sk_a_0" || stem == "vhe_dl_l_0";
+}
+static fs::path T2FixDir(const char* sub) {
+  const char* d = Env("DOA4_SUITCONV_T2FIX_DIR");
+  if (!d) {
+    std::printf("  DOA4_SUITCONV_T2FIX_DIR unset: a Helena suit has no expected files\n");
+    return fs::path(L"<DOA4_SUITCONV_T2FIX_DIR unset>");
+  }
+  return fs::path(d) / sub;
+}
+// <levels>/<lv>/<stem><ext>, <traces>/<lv>/<stem>.trace and <oracle>/<stem><ext>, with the Helena suits redirected
+static fs::path LevelFile(const char* levels, const char* lv, const std::string& stem, const char* ext) {
+  return (IsT2FixStem(stem) ? T2FixDir("levels") : fs::path(levels)) / lv / (stem + ext);
+}
+static fs::path TraceFile(const char* traces, const char* lv, const std::string& stem) {
+  return (IsT2FixStem(stem) ? T2FixDir("traces") : fs::path(traces)) / lv / (stem + ".trace");
+}
+static fs::path ShippedFile(const char* odir, const std::string& stem, const char* ext) {
+  return (IsT2FixStem(stem) ? T2FixDir("m1") : fs::path(odir)) / (stem + ext);
+}
+
 // The suits that convert at level m1, written once. The first 16 need no feature after the hands; the next 11 add the hair
 // collision spares (Kasumi, Kokoro and Lei Fang as the wearer) or Tina's carried head physics; the next 5 carry the suit's own
 // authored cloth (--port-cloth, with the collider fit, unstick, back margin and hamstring sink where the recipe gives them);
@@ -1737,7 +1903,7 @@ static int OracleOne(InputSet& set, const OracleEnv& env, const SuitRecipe& s, L
   }
   std::unique_ptr<CompareTrace> ct;
   if (compare_trace) {
-    const auto tb = ReadFile(fs::path(env.traces) / lv / (stem + ".trace"));
+    const auto tb = ReadFile(TraceFile(env.traces, lv, stem));
     CKF(tb.has_value(), "%s: no oracle trace", stem.c_str());
     if (!tb) return 0;
     ct = std::make_unique<CompareTrace>(SplitLines(*tb));
@@ -1762,8 +1928,8 @@ static int OracleOne(InputSet& set, const OracleEnv& env, const SuitRecipe& s, L
   }
   CKF(!ct || ct->Equal(), "%s: trace", stem.c_str());
   if (files && out) {
-    const auto wt = ReadFile(fs::path(env.levels) / lv / (stem + ".tpr"));
-    const auto wc = ReadFile(fs::path(env.levels) / lv / (stem + ".cat"));
+    const auto wt = ReadFile(LevelFile(env.levels, lv, stem, ".tpr"));
+    const auto wc = ReadFile(LevelFile(env.levels, lv, stem, ".cat"));
     CKF(wt.has_value() && wc.has_value(), "%s: no oracle files", stem.c_str());
     if (!wt || !wc) return 0;
     const bool et = CompareFile(stem.c_str(), "tpr", out->tpr, *wt);
@@ -2052,8 +2218,8 @@ static void TestOracleM1WithoutExtras() {
     const auto m1 = ConvertSuit(s, *girl, in, Level::kM1, nullptr, nullptr, &f);
     CKF(m1.has_value(), "%s: m1 converted (%s: %s)", stem.c_str(), f.stage.c_str(), f.what.c_str());
     if (!m1) continue;
-    const auto wt = ReadFile(fs::path(odir) / (stem + ".tpr"));
-    const auto wc = ReadFile(fs::path(odir) / (stem + ".cat"));
+    const auto wt = ReadFile(ShippedFile(odir, stem, ".tpr"));
+    const auto wc = ReadFile(ShippedFile(odir, stem, ".cat"));
     CKF(wt.has_value() && wc.has_value(), "%s: no shipped m1 files", stem.c_str());
     if (!wt || !wc) continue;
     const bool et = CompareFile(stem.c_str(), "tpr", m1->tpr, *wt);
@@ -2112,8 +2278,8 @@ static void TestOracleM1SparesHead() {
     const auto m1 = ConvertSuit(s, *girl, in, Level::kM1, nullptr, nullptr, &f);
     CKF(m1.has_value(), "%s: m1 converted (%s: %s)", stem.c_str(), f.stage.c_str(), f.what.c_str());
     if (!m1) continue;
-    const auto wt = ReadFile(fs::path(odir) / (stem + ".tpr"));
-    const auto wc = ReadFile(fs::path(odir) / (stem + ".cat"));
+    const auto wt = ReadFile(ShippedFile(odir, stem, ".tpr"));
+    const auto wc = ReadFile(ShippedFile(odir, stem, ".cat"));
     CKF(wt.has_value() && wc.has_value(), "%s: no shipped m1 files", stem.c_str());
     if (!wt || !wc) continue;
     const bool et = CompareFile(stem.c_str(), "tpr", m1->tpr, *wt);
@@ -2163,7 +2329,7 @@ static bool AuthoredCloth(const SuitRecipe& s) { return s.port_cloth && !s.gen_c
 
 static int64_t OracleNrows(const OracleEnv& env, const std::string& stem) {
   if (!env.traces) return -1;
-  const auto tb = ReadFile(fs::path(env.traces) / "m1" / (stem + ".trace"));
+  const auto tb = ReadFile(TraceFile(env.traces, "m1", stem));
   if (!tb) return -2;
   for (const std::string& l : SplitLines(*tb))
     if (l.rfind("K nrows ", 0) == 0) return std::stoll(l.substr(8));
@@ -2201,8 +2367,8 @@ static void TestOracleM1Cloth() {
     const auto m1 = ConvertSuit(s, *girl, in, Level::kM1, nullptr, nullptr, &f);
     CKF(m1.has_value(), "%s: m1 converted (%s: %s)", stem.c_str(), f.stage.c_str(), f.what.c_str());
     if (!m1) continue;
-    const auto wt = ReadFile(fs::path(odir) / (stem + ".tpr"));
-    const auto wc = ReadFile(fs::path(odir) / (stem + ".cat"));
+    const auto wt = ReadFile(ShippedFile(odir, stem, ".tpr"));
+    const auto wc = ReadFile(ShippedFile(odir, stem, ".cat"));
     CKF(wt.has_value() && wc.has_value(), "%s: no shipped m1 files", stem.c_str());
     if (!wt || !wc) continue;
     const bool et = CompareFile(stem.c_str(), "tpr", m1->tpr, *wt);
@@ -2306,8 +2472,8 @@ static void TestOracleM1Gen() {
     const auto m1 = ConvertSuit(s, *girl, in, Level::kM1, nullptr, &mt, &f);
     CKF(m1.has_value(), "%s: m1 converted (%s: %s)", stem.c_str(), f.stage.c_str(), f.what.c_str());
     if (!m1) continue;
-    const auto wt = ReadFile(fs::path(odir) / (stem + ".tpr"));
-    const auto wc = ReadFile(fs::path(odir) / (stem + ".cat"));
+    const auto wt = ReadFile(ShippedFile(odir, stem, ".tpr"));
+    const auto wc = ReadFile(ShippedFile(odir, stem, ".cat"));
     CKF(wt.has_value() && wc.has_value(), "%s: no shipped m1 files", stem.c_str());
     if (!wt || !wc) continue;
     const bool et = CompareFile(stem.c_str(), "tpr", m1->tpr, *wt);
@@ -2813,14 +2979,14 @@ static void TestArgsortIsWhatMatters() {
         CKF(false, "%s: ReadSuitInputs: %s", stem.c_str(), e.what());
         continue;
       }
-      const auto tb = ReadFile(fs::path(env.traces) / "m1" / (stem + ".trace"));
+      const auto tb = ReadFile(TraceFile(env.traces, "m1", stem));
       CKF(tb.has_value(), "%s: no oracle trace", stem.c_str());
       if (!tb) continue;
       CompareTrace ct(SplitLines(*tb));
       ConvertFailure f;
       const auto m1 = ConvertSuit(s, *girl, in, Level::kM1, nullptr, &ct, &f);
-      const auto wt = ReadFile(fs::path(odir) / (stem + ".tpr"));
-      const auto wc = ReadFile(fs::path(odir) / (stem + ".cat"));
+      const auto wt = ReadFile(ShippedFile(odir, stem, ".tpr"));
+      const auto wc = ReadFile(ShippedFile(odir, stem, ".cat"));
       const bool files_equal = m1 && wt && wc && m1->tpr == *wt && m1->cat == *wc;
       const bool trace_equal = ct.Equal();
       if (!m1) std::printf("  %s: ConvertSuit failed at stage %s: %s\n", stem.c_str(), f.stage.c_str(), f.what.c_str());
@@ -2872,6 +3038,7 @@ int main() {
   RunGroup(TestGenNumeric, "gen_numeric");
   RunGroup(TestWalkRejectsUnterminatedWrites, "walk_rejects_unterminated_writes");
   RunGroup(TestAttachFrame, "attach_frame");
+  RunGroup(TestBuildCatT2Grammar, "build_cat_t2_grammar");
   RunGroup(TestAttachApa, "attach_apa_synthetic");
   RunGroup(TestAttachClothPins, "attach_cloth_pins");
   RunGroup(TestSparesMustEndFile, "spares_must_end_file");

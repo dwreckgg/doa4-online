@@ -208,13 +208,26 @@ ElemValue DecodeElem(std::span<const uint8_t> d, int64_t o, uint32_t typ);
 // cat_dir(c): the (type, value) pairs of the directory at u32(c, 4), up to the first zero type.
 std::vector<std::pair<uint8_t, uint32_t>> CatDir(std::span<const uint8_t> c);
 
+// One group of the type-2 map in convert.py's current grammar (parse_t2 / t2_bytes, the census grammar of 2026-11-20):
+// the main group (first, no marker), a group opened by a marker byte (value = that byte; 0x02 low-detail copy, 0x04
+// shadow copy) or a state group opened by '60 NN' (kind ('state', NN), value = NN). A code is 16 bits for a 0x9X / 0xAX
+// entry (3 bytes) and 24 bits for a 0xDX entry (4 bytes: hel05's 'd4 14 10 00'). The ONE implementation of the grammar:
+// slim::MapGroup is this type and slim::ParseMap / slim::T2Bytes call these.
 struct T2Group {
-  bool is_main = true;  // the first group's kind is 'main'
-  uint8_t kind = 0;     // otherwise the byte that started the group
-  std::vector<std::pair<uint16_t, uint8_t>> items;
+  enum class Kind { kMain, kMarker, kState };
+  Kind kind = Kind::kMain;
+  uint8_t value = 0;  // the marker byte, or NN of '60 NN'
+  std::vector<std::pair<uint32_t, uint8_t>> items;  // (code, object id)
 };
-// parse_t2(c, off): the groups and the offset just past the terminating zero.
+// parse_t2(c, off): the groups and the offset just past the end byte (0x00). Throws ConvertError with the ValueError's
+// text (no type prefix) for an entry byte with the top bit set that is not 0x9X / 0xAX / 0xDX ("type-2 map: unknown
+// entry code 0xb0 at 0x1b") and for '60 NN' with NN 0 or NN's top bit set ("type-2 map: state switch 60 00 at 0x1b");
+// a read past the buffer throws as every be::Reader read does.
 std::pair<std::vector<T2Group>, uint64_t> ParseT2(std::span<const uint8_t> c, uint64_t off);
+// t2_bytes(kind, recs): one group back to bytes (the main group has no marker byte; a state group is '60 NN'; a code
+// above 0xFFFF is written as 3 bytes). The reader's accept set is asserted with the AssertionError's text (no type
+// prefix): a marker 1..0x7F other than 0x60, a state NN 1..0x7F, every code 0x9000..0xAFFF or 0xD00000..0xDFFFFF.
+Bytes T2Bytes(const T2Group& group);
 
 // t4_records(c, off): 0x40-byte records until one starts with 0xFFFF.
 std::vector<Bytes> T4Records(std::span<const uint8_t> c, uint64_t off);

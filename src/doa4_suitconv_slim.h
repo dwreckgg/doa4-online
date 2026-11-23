@@ -98,13 +98,9 @@ Chosen ChooseH(std::span<const Tri>, size_t target);  // Fail when the count at 
 // One group of the type-2 map in convert.py's CURRENT grammar (parse_t2 / t2_bytes): the main group, a group opened
 // by a marker byte (kind = that byte; 0x02 low-detail copy, 0x04 shadow copy) or a state group opened by '60 NN'
 // (kind ('state', NN)). A code is 16 bits for a 0x9X / 0xAX entry (3 bytes) and 24 bits for a 0xDX entry (4 bytes).
-// (tpr::T2Group / tpr::ParseT2, the converter's, keep the older 0x90 / 0x91 grammar and are not used here.)
-struct MapGroup {
-  enum class Kind { kMain, kMarker, kState };
-  Kind kind = Kind::kMain;
-  uint8_t value = 0;  // the marker byte, or NN of '60 NN'
-  std::vector<std::pair<uint32_t, uint8_t>> items;  // (code, object id)
-};
+// Since Task 6b this is tpr::T2Group, and ParseMap / T2Bytes call tpr::ParseT2 / tpr::T2Bytes: the converter and the
+// slim core share one implementation of the grammar.
+using MapGroup = tpr::T2Group;
 // convert.parse_t2(c, off): the groups and the offset just past the end byte. Refusals (ValueError texts): an entry
 // byte with the top bit set that is not 0x9X / 0xAX / 0xDX, and '60 NN' with NN 0 or NN's top bit set.
 std::pair<std::vector<MapGroup>, uint64_t> ParseMap(std::span<const uint8_t> c, uint64_t off);
@@ -148,8 +144,8 @@ Bytes Rebuild(const Suit& suit);
 
 // ---------------------------------------------------------------- bind guard, layout, scan (Task 5)
 // Bodies in doa4_suitconv_slimscan.cpp. The reference is a core::Model from core::LoadModel (convert.Model; in the game
-// the reference is the suit's own file). The type-2 map is read with ParseMap (convert.parse_t2's CURRENT grammar),
-// never with tpr::ParseT2 or core::ChannelMapOf (the older grammar).
+// the reference is the suit's own file). The type-2 map is read with ParseMap (convert.parse_t2's CURRENT grammar; since
+// Task 6b ParseMap is tpr::ParseT2, which core::ChannelMapOf also reads).
 
 // slim_addon.ref_groups(ref): the reference's type-2 map at dict(cat_dir(ref.cat))[2].
 std::vector<MapGroup> RefGroups(const core::Model& ref);

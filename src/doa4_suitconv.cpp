@@ -110,6 +110,7 @@ void RunConvert(Job& job) {
     }
     tr.K("main_n", std::to_string(cm.main.size()));
     std::vector<uint8_t> m;
+    // trace_m1's struct.pack('>HB', c, i): a 24-bit 0xDX code would raise there; no reference's main group holds one
     for (const auto& [code, id] : cm.main) {
       m.push_back(uint8_t(code >> 8));
       m.push_back(uint8_t(code));

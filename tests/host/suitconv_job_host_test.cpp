@@ -14,7 +14,8 @@
 // second_import_over_kept_python_old, writes_only_under_user_data, manifest_order_independent_of_finish, workers,
 // verify_import_folder; and the real sections, gated by DOA4_SUITCONV_DISC, DOA4_SUITCONV_GAME_DIR and DOA4_SUITCONV_ORACLE_DIR
 // ("<group>: SKIPPED (...)" when unset), which use the player's disc and game files and the reference converter's folder
-// (68 suit files and manifest.txt): real_import_equals_oracle (one production import, 69 files plus the marker equal the
+// (68 suit files and manifest.txt; Helena's four own suits and the manifest from DOA4_SUITCONV_T2FIX_DIR/m1, Task 6b, which
+// the real sections need too): real_import_equals_oracle (one production import, 69 files plus the marker equal the
 // reference by size and SHA-1), real_import_worker_counts (1, 4 and 8 workers, equal folders), real_reverse_order_one_process
 // (ConvertSuit over the 34 in reverse order), real_fma3_toggle (the C runtime's FMA3 switch off and on, on the converting
 // threads), real_dirty_mxcsr (FTZ, DAZ and round-up on the calling thread and on direct ConvertSuit threads),
@@ -2446,6 +2447,28 @@ static Files LoadOracle(const RealEnv& env) {
   CKF(problem.empty(), "oracle folder:%s", problem.c_str());
   CKF(f.size() == 69 && f.count("manifest.txt") == 1, "oracle folder holds %zu files (69 expected: 68 suit files and manifest.txt)",
       f.size());
+  // Task 6b: Helena's four own suits (vhe_cm_a, vhe_on_d, vhe_sk_a, vhe_dl_l) and the manifest that names them are today's
+  // convert.py's (its type-2 map grammar reads hel05's state switches): DOA4_SUITCONV_T2FIX_DIR/m1. Without it the
+  // reference keeps the shipped Helena files, which the importer no longer writes, and the comparison fails.
+  const char* t2 = std::getenv("DOA4_SUITCONV_T2FIX_DIR");
+  CKF(t2 && *t2, "DOA4_SUITCONV_T2FIX_DIR unset: the reference holds the shipped Helena files");
+  if (t2 && *t2) {
+    std::string p2;
+    const Files nf = ListFiles(fs::path(t2) / "m1", &p2);
+    CKF(p2.empty(), "T2FIX folder:%s", p2.c_str());
+    int replaced = 0;
+    for (const char* d : {"vhe_cm_a_0", "vhe_on_d_0", "vhe_sk_a_0", "vhe_dl_l_0"})
+      for (const char* ext : {".tpr", ".cat"}) {
+        const std::string name = std::string(d) + ext;
+        const auto it = nf.find(name);
+        CKF(it != nf.end() && f.count(name), "%s: not in both folders", name.c_str());
+        if (it != nf.end() && f.count(name)) f[name] = it->second, ++replaced;
+      }
+    const auto m = nf.find("manifest.txt");
+    CKF(m != nf.end(), "no manifest.txt in DOA4_SUITCONV_T2FIX_DIR/m1");
+    if (m != nf.end()) f["manifest.txt"] = m->second, ++replaced;
+    CKF(replaced == 9, "%d reference files taken from DOA4_SUITCONV_T2FIX_DIR", replaced);
+  }
   return f;
 }
 

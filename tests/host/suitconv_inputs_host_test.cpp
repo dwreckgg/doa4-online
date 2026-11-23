@@ -8,7 +8,10 @@
 //   real_game    DOA4_SUITCONV_GAME_DIR  the DOA4 game folder (chrone.afs, chrtwo.afs, chrthree.afs); 21/21 entries
 //   real_oracle  DOA4_SUITCONV_ORACLE_DIR  the reference converter's output folder (its manifest.txt): the reference sizes and
 //                                          SHA-1s equal it; with DOA4_SUITCONV_BUST_FILE (the reference converter's bust
-//                                          strengths, a JSON file of design -> [down, up]) also the bust strengths equal it
+//                                          strengths, a JSON file of design -> [down, up]) also the bust strengths equal it;
+//                                          Helena's four own suits (vhe_cm_a, vhe_on_d, vhe_sk_a, vhe_dl_l) are compared
+//                                          with DOA4_SUITCONV_T2FIX_DIR/m1/manifest.txt instead (today's convert.py, whose
+//                                          type-2 map grammar reads hel05's state switches; Task 6b), and fail without it
 // The synthetic images and folders are made from seeded bytes under %TEMP%\doa4_suitconv_inputs\a b (c), <u umlaut>\ and
 // deleted at the end. The real inputs are only read. Last lines: "skipped sections: K", then
 // "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
@@ -941,6 +944,23 @@ static void TestRealOracle() {
   } else {
     std::printf("real_oracle: bust strengths SKIPPED (DOA4_SUITCONV_BUST_FILE unset)\n");
   }
+  // Helena's four own suits: the lines of today's convert.py's manifest (Task 6b), by design
+  std::map<std::string, std::vector<std::string>> t2fix;
+  if (const char* t2 = Env("DOA4_SUITCONV_T2FIX_DIR")) {
+    std::string text;
+    CKF(ReadText(fs::path(t2) / "m1" / "manifest.txt", &text), "cannot read %s/m1/manifest.txt", t2);
+    std::istringstream tin(text);
+    for (std::string line; std::getline(tin, line);) {
+      std::istringstream ls(line);
+      std::vector<std::string> w;
+      for (std::string x; ls >> x;) w.push_back(x);
+      if (w.size() == 15 && w[0] == "suit") t2fix[w[7]] = w;
+    }
+  }
+  auto is_t2fix = [](const std::string& d) {
+    return d == "vhe_cm_a" || d == "vhe_on_d" || d == "vhe_sk_a" || d == "vhe_dl_l";
+  };
+  size_t t2fix_used = 0;
   // The manifest: header, then 34 suit lines; the reference sizes and SHA-1s of the Python converter's outputs.
   std::istringstream in(manifest);
   std::string line;
@@ -957,6 +977,16 @@ static void TestRealOracle() {
     CKF(w.size() == 15 && i < Suits().size(), "manifest line %zu has %zu words", i, w.size());
     if (w.size() != 15 || i >= Suits().size()) break;
     const SuitRecipe& s = Suits()[i];
+    if (is_t2fix(s.design)) {
+      const auto it = t2fix.find(s.design);
+      CKF(it != t2fix.end(), "%s: no line in DOA4_SUITCONV_T2FIX_DIR/m1/manifest.txt", s.design);
+      if (it != t2fix.end()) {
+        // the shipped line and today's differ only in the .cat's size and SHA-1
+        for (size_t k = 0; k < 13; ++k) CKF(it->second[k] == w[k], "%s: today's manifest word %zu differs", s.design, k);
+        w = it->second;
+        ++t2fix_used;
+      }
+    }
     CKF(w[7] == s.design && std::stoi(w[8]) == s.colour, "manifest line %zu is %s %s", i, w[7].c_str(), w[8].c_str());
     CKF(w[9] == std::string(s.design) + "_" + std::to_string(s.colour) + ".tpr" &&
             w[12] == std::string(s.design) + "_" + std::to_string(s.colour) + ".cat",
@@ -966,6 +996,8 @@ static void TestRealOracle() {
     ++i;
   }
   CKF(i == 34, "manifest has %zu suit lines", i);
+  CKF(t2fix_used == 4, "%zu Helena lines taken from today's manifest", t2fix_used);
+  std::printf("real_oracle: %zu Helena lines from DOA4_SUITCONV_T2FIX_DIR\n", t2fix_used);
 }
 
 int main() {
