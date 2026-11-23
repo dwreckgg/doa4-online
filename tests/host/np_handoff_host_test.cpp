@@ -245,6 +245,10 @@ static const NotCarried kSdkNotCarried[] = {
     {"pad_remap_p2", "input"},
     {"pad_remap_p3", "input"},
     {"pad_remap_p4", "input"},
+    {"pad_vibration_p1", "input"},
+    {"pad_vibration_p2", "input"},
+    {"pad_vibration_p3", "input"},
+    {"pad_vibration_p4", "input"},
     {"perf_log_csv", "log"},
     {"physical_protect_timing", "log"},  // 0.3.8: only logs the physical protect stats line
     {"pre_mask_resolve_l2_block", "gpu-render"},
@@ -351,7 +355,7 @@ static constexpr size_t kSdkCount = sizeof(kSdkNames) / sizeof(kSdkNames[0]);
 static constexpr size_t kSdkNotCarriedCount = sizeof(kSdkNotCarried) / sizeof(kSdkNotCarried[0]);
 static constexpr size_t kPortNotCarriedCount = sizeof(kPortNotCarried) / sizeof(kPortNotCarried[0]);
 static constexpr size_t kTrustedCount = sizeof(kTrusted) / sizeof(kTrusted[0]);
-static constexpr size_t kSdkTotal = 209;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend)
+static constexpr size_t kSdkTotal = 213;  // the distinct cvar names the SDK's src defines at that commit (+1 Task 8, +1 Task 9, +1 Task 9b, +2 Task 9c, +1 audio_volume, +2 GPU trial diagnostics, +1 gpu_upload_prefetch, +1 pad_fresh_read, +2 Intel depth clear, +2 cheap physical protect, +1 constant-alpha blend, +4 pad vibration)
 
 // The expected names: the carried list, then the Extras tweak cvars of the tweaks module.
 // The port's own carried settings beyond the tweaks: they change guest memory and are no trust matter (np_handoff.cpp
@@ -2572,6 +2576,13 @@ static void TestSdkNames(const std::string& sdk_src, const std::string& port_src
   CHECK(sdk.count("headless"));          // defined, deliberately not carried (the session forces it)
   CHECK(port.count("doa4_tag_all_stages"));
   CHECK(!sdk.count("no_such_cvar_xyz") && !port.count("no_such_cvar_xyz"));
+  // the per-slot vibration switch (issue #25): on by default, as the game shipped; each player's own (not carried)
+  for (const char* n : {"pad_vibration_p1", "pad_vibration_p2", "pad_vibration_p3", "pad_vibration_p4"}) {
+    g_ctx = n;
+    const auto it = sdk.find(n);
+    CHECK(it != sdk.end() && it->second.default_token == "true");
+  }
+  g_ctx.clear();
 
   // the two lists: no repeats, no overlap, and together the pinned total
   std::set<std::string> carried(kSdkNames, kSdkNames + kSdkCount), not_carried;

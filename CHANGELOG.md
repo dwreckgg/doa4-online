@@ -13,6 +13,10 @@
   Playground; the game's state was identical with the change off and on. On Windows the call was already cheap.
   If anything misbehaves, `cheap_physical_protect = false` in `dead_or_alive_4.toml` goes back to 0.3.7's
   behaviour.
+- **Turn controller vibration off** ([issue #25](https://github.com/dwreckgg/doa4-online/issues/25)). Esc menu >
+  Controls: under Player 1 to 4, a "Vibration" box for each controller slot (on by default). Off means that pad never
+  rumbles; unticking it during a rumble stops it at once. It is your own setting: online, the other player's game is
+  not affected.
 
 ### Fixed
 - **Story mode fades: no half-second still picture** ([issue #23](https://github.com/dwreckgg/doa4-online/issues/23)).
