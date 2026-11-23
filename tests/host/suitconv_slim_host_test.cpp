@@ -22,7 +22,8 @@
 // bounds_radius_compensated, placeholder_bytes, placeholder_texture_from_merged_order, collapse_refused,
 // full_mode_never_refuses, map_rule_i1, kind_order_follows_marker_order, buffers_at_4k, user0_recomputed,
 // ids_out_of_step_refused, twice_equal, self_reference, nrm_uv_short_refused, vertex_limit_edges,
-// slim_copies_refusal_contract, add_refusals, add_rows. `--bench` prints the scan's time and AddCopies' (slim mode) on a
+// slim_copies_refusal_contract, add_refusals, add_rows; the slim oracle (Task 7, real files: DOA4_SLIM_ORACLE, and
+// DOA4_SLIM_ORACLE_TIME=1 for the start-up time; see RunSlimOracle). `--bench` prints the scan's time and AddCopies' (slim mode) on a
 // synthetic suit of about 25000 triangles. Last line: "PASSED: N checks, 0 failures" or "FAILED: ...".
 
 #include "../../src/doa4_suitconv_slim.h"
@@ -39,6 +40,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -3417,6 +3419,169 @@ static int Dump(const fs::path& dir) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The slim oracle (Task 7): the C++ core against the Python tool's own output on real files, byte for byte.
+// DOA4_SLIM_ORACLE = Task 2's manifest (one case per line, 8 space-separated fields:
+// <case> <mode> <in.tpr> <in.cat> <ref.tpr> <ref.cat> <expected.tpr> <expected.cat>, mode slim or full). The files are
+// game-derived: they are read, never copied, and no byte of them is printed (a mismatch prints sizes and the first
+// differing offset only). DOA4_SLIM_ORACLE_TIME=1 (with DOA4_SLIM_ORACLE) also times the three X_*_slim cases, the ones
+// the game builds at start-up: 5 repeats of the three SlimCopies calls, median at most 300 ms.
+// ---------------------------------------------------------------------------------------------------------------
+
+static constexpr int kOracleLines = 108;
+static constexpr double kOracleTimeBarMs = 300.0;
+
+static std::optional<std::string> OracleVar(const char* name) {
+  char* buf = nullptr;
+  size_t len = 0;
+  if (_dupenv_s(&buf, &len, name) != 0 || !buf) return std::nullopt;
+  std::string v = buf;
+  free(buf);
+  if (v.empty()) return std::nullopt;
+  return v;
+}
+
+// The whole file, or nullopt when it cannot be opened or read, or is empty (no oracle file is empty).
+static std::optional<Bytes> ReadAll(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return std::nullopt;
+  Bytes b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  if (f.bad() || b.empty()) return std::nullopt;
+  return b;
+}
+
+static std::vector<std::string> Fields(const std::string& line) {
+  std::vector<std::string> out;
+  size_t i = 0;
+  while (i < line.size()) {
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    size_t j = i;
+    while (j < line.size() && line[j] != ' ' && line[j] != '\t') ++j;
+    if (j > i) out.push_back(line.substr(i, j - i));
+    i = j;
+  }
+  return out;
+}
+
+// Empty when equal; else "<what>: sizes A vs B (ours vs expected), first difference at offset N".
+static std::string FirstDiff(const char* what, const Bytes& ours, const Bytes& want) {
+  if (ours == want) return {};
+  const size_t n = std::min(ours.size(), want.size());
+  size_t off = 0;
+  while (off < n && ours[off] == want[off]) ++off;
+  char t[160];
+  std::snprintf(t, sizeof t, "%s: sizes %zu vs %zu (ours vs expected), first difference at offset %zu", what, ours.size(),
+                want.size(), off);
+  return t;
+}
+
+struct OracleInputs {
+  std::string name;
+  sl::CopyMode mode;
+  Bytes tpr, cat, ref_tpr, ref_cat;
+};
+
+static void SlimOracleBody(const std::string& manifest, bool timed, int* lines_read) {
+  std::ifstream mf(manifest, std::ios::binary);
+  CHECKF(static_cast<bool>(mf), "manifest cannot be opened: %s", manifest.c_str());
+  if (!mf) return;
+  std::vector<OracleInputs> timed_cases;
+  int passed = 0;
+  std::string line;
+  while (std::getline(mf, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    ++*lines_read;
+    const std::vector<std::string> f = Fields(line);
+    if (f.size() != 8) {
+      CHECKF(false, "manifest line %d: %zu fields, not 8", *lines_read, f.size());
+      continue;
+    }
+    const std::string& cs = f[0];
+    if (f[1] != "slim" && f[1] != "full") {
+      CHECKF(false, "%s: mode '%s' is neither slim nor full", cs.c_str(), f[1].c_str());
+      continue;
+    }
+    const sl::CopyMode mode = f[1] == "slim" ? sl::CopyMode::kSlim : sl::CopyMode::kFull;
+    std::optional<Bytes> b[6];
+    bool readable = true;
+    for (int k = 0; k < 6; ++k) {
+      b[k] = ReadAll(f[2 + k]);
+      if (!b[k]) {
+        CHECKF(false, "%s: cannot read %s", cs.c_str(), f[2 + k].c_str());
+        readable = false;
+        break;
+      }
+    }
+    if (!readable) continue;
+    const std::string name = fs::path(f[2]).stem().string();
+    sl::Result out;
+    std::string error;
+    const bool built = sl::SlimCopies(name, *b[0], *b[1], *b[2], *b[3], mode, &out, &error);
+    if (!built) {
+      CHECKF(false, "%s: refused: %s", cs.c_str(), error.c_str());
+      continue;
+    }
+    const std::string dt = FirstDiff("tpr", out.tpr, *b[4]);
+    const std::string dc = FirstDiff("cat", out.cat, *b[5]);
+    if (!dt.empty()) CHECKF(false, "%s: %s", cs.c_str(), dt.c_str());
+    if (!dc.empty()) CHECKF(false, "%s: %s", cs.c_str(), dc.c_str());
+    if (dt.empty() && dc.empty()) {
+      CHECK(true);
+      ++passed;
+    }
+    if (timed && mode == sl::CopyMode::kSlim && cs.rfind("X_", 0) == 0)
+      timed_cases.push_back({name, mode, std::move(*b[0]), std::move(*b[1]), std::move(*b[2]), std::move(*b[3])});
+  }
+  std::printf("slim oracle: %d of %d cases passed\n", passed, *lines_read);
+  CHECKF(*lines_read == kOracleLines, "manifest lines read: %d, expected %d", *lines_read, kOracleLines);
+  if (!timed) return;
+
+  // The start-up time: the three X_*_slim cases (hel03, hak03, hak08), inputs already in memory.
+  CHECKF(timed_cases.size() == 3, "timed cases: %zu X_*_slim lines, expected 3", timed_cases.size());
+  if (timed_cases.size() != 3) return;
+  std::vector<double> sums;
+  size_t sink = 0;
+  for (int r = 0; r < 5; ++r) {
+    bool all_built = true;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (const OracleInputs& c : timed_cases) {
+      sl::Result out;
+      std::string error;
+      all_built = sl::SlimCopies(c.name, c.tpr, c.cat, c.ref_tpr, c.ref_cat, c.mode, &out, &error) && all_built;
+      sink += out.tpr.size() + out.cat.size();
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    CHECKF(all_built, "timed repeat %d: a SlimCopies call refused", r + 1);
+    sums.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+    std::printf("slim oracle time: repeat %d: %.3f ms\n", r + 1, sums.back());
+  }
+  std::vector<double> sorted = sums;
+  std::sort(sorted.begin(), sorted.end());
+  const double median = sorted[2];
+  std::printf("slim oracle time: median %.3f ms (bar %.0f ms, %zu output bytes)\n", median, kOracleTimeBarMs, sink);
+  CHECKF(median <= kOracleTimeBarMs, "start-up median %.3f ms is over %.0f ms", median, kOracleTimeBarMs);
+}
+
+// Not through RunGroup: unset, the group prints only its SKIPPED line and counts nothing.
+static void RunSlimOracle() {
+  const std::optional<std::string> manifest = OracleVar("DOA4_SLIM_ORACLE");
+  if (!manifest) {
+    std::printf("slim oracle: SKIPPED (DOA4_SLIM_ORACLE unset)\n");
+    return;
+  }
+  const std::optional<std::string> tv = OracleVar("DOA4_SLIM_ORACLE_TIME");
+  const bool timed = tv && *tv == "1";
+  const int before = g_checks, fb = g_failures;
+  int lines_read = 0;
+  try {
+    SlimOracleBody(*manifest, timed, &lines_read);
+  } catch (const std::exception& e) {
+    Check(false, __FILE__, __LINE__, "group threw", "slim oracle: %s", e.what());
+  }
+  std::printf("slim oracle: %d checks, %d failures, %d manifest lines read%s\n", g_checks - before, g_failures - fb,
+              lines_read, timed ? ", timed" : "");
+}
+
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   doa4::suitconv::num::FpEnvGuard fp;
@@ -3488,6 +3653,7 @@ int main(int argc, char** argv) {
   RunGroup(TestSlimCopiesRefusalContract, "slim_copies_refusal_contract");
   RunGroup(TestAddRefusals, "add_refusals");
   RunGroup(TestAddRows, "add_rows");
+  RunSlimOracle();
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
     return 1;

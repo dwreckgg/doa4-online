@@ -9,6 +9,11 @@ rem the converter's floating-point flags for every translation unit (x86-64-v2 w
 rem no fast-math, no errno). Converter objects go to %TEMP%\doa4_suitconv_test\obj\ (named after their source), where
 rem suitconv_fp_scan.py scans them before the test runs; the test's own object goes to ...\testobj\.
 rem DOA4_SUITCONV_OUT, if set, replaces that output folder (the mutation probes build their copies elsewhere).
+rem DOA4_SLIM_ORACLE, if set, is the path of Task 2's oracle manifest (108 lines; game-derived files, never in the
+rem repository): the "slim oracle" group then checks the core's .tpr and .cat against the Python tool's, byte for byte,
+rem for every line, and fails unless 108 lines were read. Unset, it prints "slim oracle: SKIPPED (DOA4_SLIM_ORACLE
+rem unset)" and counts nothing. DOA4_SLIM_ORACLE_TIME=1 (only with DOA4_SLIM_ORACLE) also times the three X_*_slim
+rem cases (the start-up builds): 5 repeats, the median must be at most 300 ms.
 rem Prints one "<group>: N checks, M failures" line per group, then "PASSED: N checks, 0 failures" (or FAILED) as its
 rem last line.
 setlocal
