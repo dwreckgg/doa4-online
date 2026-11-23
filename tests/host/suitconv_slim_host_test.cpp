@@ -196,8 +196,8 @@ struct Case {
 
 static synth::Model StatesModel() {
   synth::Model m = Front();
-  m.SetGroups({Main({{0x9001, 0}, {0x9002, 1}, {0xD41410, 0}, {0x9003, 2}, {0x9004, 3}}),
-               synth::State(0x10, {{0x9003, 2}}), synth::State(0x11, {{0x9004, 3}, {0xD01410, 1}}),
+  m.SetGroups({Main({{0x9001, 0}, {0x9002, 1}, {0xD00102, 2}, {0x9003, 2}, {0x9004, 3}}),
+               synth::State(0x31, {{0x9003, 2}}), synth::State(0x32, {{0x9004, 3}, {0xD00304, 1}}),
                Group(2, {{0x9002, 4}, {0x9003, 5}}), Group(4, {{0x9002, 6}})});
   return m;
 }
@@ -251,7 +251,7 @@ static std::vector<Case> Cases() {
   cs.push_back(ReadCase("strip_trail_unordered", TrailingUnordered()));
   cs.push_back(ReadCase("strip_trail_ordered", TrailingOrdered()));
   // the current map grammar: a 0xDX entry (24-bit code) in the main group and two '60 NN' state groups before the
-  // copy groups (as Helena's reference hel05 holds them)
+  // copy groups (the shape of a reference with a 0xDX entry and state groups; every code, id and state number made up)
   cs.push_back(ReadCase("strip_states", StatesModel()));
   // fix round 1, I1: a copy's buffer base past the data end (VB4 at 0x10000, the kept VB3 at 0x11000, data ending at
   // 0xF800): both spans pass the 4 KiB check and the strip slices x.data[p:a] past its end, which Python clamps
@@ -388,8 +388,8 @@ static const Expected kExpected[] = {
     {"cat_ref_apa", "REFUSED type-5 block at 0x60 is not an apa block"},
     {"cat_ref_header", "REFUSED cat header not of the converter shape"},
     {"cat_ref_shape", "REFUSED cat directory [(2, 32), (5, 112), (4, 128)] not of the converter shape"},
-    {"cat_states_changed", "OK fnv=9b3fb8f004c39145 len=208"},
-    {"cat_states_same", "OK fnv=6897cbd0931fd329 len=192"},
+    {"cat_states_changed", "OK fnv=27db24acd0f40be7 len=208"},
+    {"cat_states_same", "OK fnv=53037409cf82aae7 len=192"},
     {"nocopy", "OK fnv=2b5cfef084a35e7a len=45056 stripped=nothing ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3]"},
     {"ref_buffer_shared", "REFUSED ref_buffer_shared: a buffer is shared by a kept object and an old copy"},
     {"ref_child_out", "REFUSED ref_child_out: Hie node 2 has a child at position 99, outside 0..6"},
@@ -413,7 +413,7 @@ static const Expected kExpected[] = {
     {"strip_base_past_end", "OK fnv=5a8cedd8414d5bdb len=49152 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_front", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_renumber", "OK fnv=5d3a8f26b074fee2 len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
-    {"strip_states", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,d41410:0,9003:2,9004:3] s10[9003:2] s11[9004:3,d01410:1] 02[9002:4,9003:5] 04[9002:6]"},
+    {"strip_states", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,d00102:2,9003:2,9004:3] s31[9003:2] s32[9004:3,d00304:1] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_trail_ordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
     {"strip_trail_unordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
 };

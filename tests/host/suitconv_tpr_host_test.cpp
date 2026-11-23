@@ -824,19 +824,22 @@ static void TestCatHelpers() {
       }
       return std::string("NOT REFUSED");
     };
-    // hel05's shape. Old grammar (0x90/0x91 entries, every other byte a marker): '60' and '10' become markers, the 0x00
-    // inside the 0xDX entry ends the map at 27 and the 0x04 / 0x02 groups are never seen (RED run, observed:
-    // "end=27 groups=main:9001/2,9002/3,9103/4,9004/5 60: 10:9010/1 60: 11: d4: 14: 10:").
-    const char* kHel = "900102900203910304900405" "6010901001" "6011d4141000" "04900106" "02900207" "00";
+    // The shape of a reference with a 0xDX entry inside a state group (every code, id and state number made up). Old
+    // grammar (0x90/0x91 entries, every other byte a marker): '60', '31', '60', '32', 'd2' become markers, the 00 byte
+    // inside the 0xDX entry ends the map at 25 and the 0x04 / 0x02 groups are never seen
+    // (observed on the old grammar: "end=25 groups=main:9001/2,9002/3,9103/4,9004/5 60: 31:9031/1 60: 32: d2:").
+    const char* kHel = "900102900203910304900405" "6031903101" "6032d2000308" "04900106" "02900207" "00";
     const std::string hel = parse_repr(kHel);
-    CKF(hel == "end=36 groups=main:9001/2,9002/3,9103/4,9004/5 s10:9010/1 s11:d41410/0 04:9001/6 02:9002/7", "%s", hel.c_str());
+    CKF(hel == "end=36 groups=main:9001/2,9002/3,9103/4,9004/5 s31:9031/1 s32:d20003/8 04:9001/6 02:9002/7", "%s", hel.c_str());
     // 0xAX and 0x92 entries are entries (old grammar, observed: "end=11 groups=main: a0: 05: 03: 92: 07: 04:")
     const std::string ax = parse_repr("a00503920704" "00");
     CKF(ax == "end=11 groups=main:a005/3,9207/4", "%s", ax.c_str());
-    // a 0xDX entry in the main group, its last byte not zero (old grammar: d4 a marker, then 14, 10, 03 markers, the
-    // last holding 9002/4)
-    const std::string dxm = parse_repr("900102d4141003900204" "00");
-    CKF(dxm == "end=15 groups=main:9001/2,d41410/3,9002/4", "%s", dxm.c_str());
+    // a 0xDX entry in the main group (old grammar: d2 a marker, the 00 inside the entry the end: "end=9 groups=main:9001/2 d2:")
+    const std::string dxm = parse_repr("900102d2000303900204" "00");
+    CKF(dxm == "end=15 groups=main:9001/2,d20003/3,9002/4", "%s", dxm.c_str());
+    // an EMPTY state group is a group (old grammar: "end=15 groups=main:9001/2 60: 33: 60: 34:9034/7")
+    const std::string est = parse_repr("900102" "6033" "6034903407" "00");
+    CKF(est == "end=15 groups=main:9001/2 s33: s34:9034/7", "%s", est.c_str());
     // an empty marker group is a group (both grammars agree here; it is the empty group BuildCat must keep)
     const std::string emp = parse_repr("900102" "04" "02900207" "00");
     CKF(emp == "end=13 groups=main:9001/2 04: 02:9002/7", "%s", emp.c_str());
@@ -851,7 +854,7 @@ static void TestCatHelpers() {
     CKF(r4 == "type-2 map: unknown entry code 0x80 at 0x4", "%s", r4.c_str());
     // a 0xDX entry cut short by the end of the buffer: the object id read leaves the buffer
     {
-      Bytes cut = {0x90, 0x01, 0x02, 0xD4, 0x14, 0x10};
+      Bytes cut = {0x90, 0x01, 0x02, 0xD2, 0x01, 0x03};
       CK(Throws([&] { tp::ParseT2(Sp(cut), 0); }));
     }
   }

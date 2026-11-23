@@ -211,7 +211,7 @@ std::vector<std::pair<uint8_t, uint32_t>> CatDir(std::span<const uint8_t> c);
 // One group of the type-2 map in convert.py's current grammar (parse_t2 / t2_bytes, the census grammar of 2026-11-20):
 // the main group (first, no marker), a group opened by a marker byte (value = that byte; 0x02 low-detail copy, 0x04
 // shadow copy) or a state group opened by '60 NN' (kind ('state', NN), value = NN). A code is 16 bits for a 0x9X / 0xAX
-// entry (3 bytes) and 24 bits for a 0xDX entry (4 bytes: hel05's 'd4 14 10 00'). The ONE implementation of the grammar:
+// entry (3 bytes) and 24 bits for a 0xDX entry (4 bytes: code, then object id). The ONE implementation of the grammar:
 // slim::MapGroup is this type and slim::ParseMap / slim::T2Bytes call these.
 struct T2Group {
   enum class Kind { kMain, kMarker, kState };

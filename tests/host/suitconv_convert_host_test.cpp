@@ -789,19 +789,13 @@ static void TestAttachFrame() {
   CK(catx::Al(b, 16) == 32);
 }
 
-// _add_apa on a hand-built donor. The donor's layout (offsets in hex): header with the directory offset 0xC0 at +4;
-// rule data 0x20..0x30; map data 0x30..0x40; a rule directory at 0x40 (one rule whose offset 0x20 is at +4); entry 0 at
-// 0x50 {nmap 1, mp 0x30, nrules 1, rp 0x40}; entry 1 at 0x60 {nmap 1, mp 0x38, nrules 0, rp 0}; the apa block at 0x70
-// {'apa', count 2, entries 0x50 and 0x60}; the directory at 0xC0 lists a type-2 entry (0x10) and the type-5 entry (0x70).
-// start = min of every offset the block names = 0x20 and end = 0x70 + 8 + 4 * 2 = 0x80, so 96 bytes are copied. The
-// target .cat is 48 bytes with its directory (one type-2 entry) at 0x20, so the block lands at 48 and every non-zero
-// offset field moves by 48 - 0x20 = 16. Expected values are written out by hand, not computed by the port.
 // build_cat's type-2 map (Task 6b): convert.build_cat on a hand-made reference .cat against BuildCat. The reference is
 // built here exactly as cat_of() in tests/host/suitconv_t2_expect.py builds it (asserted below against that script's
 // "in:" bytes), and every expected output is that script's "out:" line:
 //   py -3 -I tests/host/suitconv_t2_expect.py <doax2_work>/physics_spike/scripts
-// The maps are synthetic (no game byte); kHel has hel05's shape: main, '60 10' state (object 1), '60 11' state with
-// the 0xDX entry d4 14 10 00 (object 0), marker 0x04 (object 6), marker 0x02 (object 7).
+// The maps, codes, object ids and state numbers are made up (no game byte). kHel has the shape of a reference with a
+// 0xDX entry inside a state group: main (objects 2-5), state 0x31 (object 1), state 0x32 holding the 0xDX entry
+// d2 00 03 08 (object 8; a 00 byte inside the entry), marker 0x04 (object 6), marker 0x02 (object 7).
 static std::vector<uint8_t> T2CatOf(const std::string& map_hex) {
   std::vector<uint8_t> out = {'C', 'A', 'T', 0};
   out.resize(24, 0);
@@ -837,14 +831,15 @@ static std::string T2Hex(const std::vector<uint8_t>& b) {
 
 static void TestBuildCatT2Grammar() {
   Group("build_cat_t2_grammar");
-  const std::string kHel = "900102900203910304900405" "6010901001" "6011d4141000" "04900106" "02900207" "00";
+  const std::string kHel = "900102900203910304900405" "6031903101" "6032d2000308" "04900106" "02900207" "00";
   const std::string kHel2 =
-      "900102900203910304900405" "6010901001" "6011d4141000901104" "04900106" "02900207" "00";
+      "900102900203910304900405" "6031903101" "6032d2000308903204" "04900106" "02900207" "00";
   const std::string kEmpty = "900102" "04" "02900207" "00";
-  const std::string kDxMain = "900102d4141003900204" "00";
+  const std::string kEmptyState = "900102" "6033" "6034903407" "00";
+  const std::string kDxMain = "900102d2000303900204" "00";
   const std::string kHelIn =
-      "43415400000000500000000000000000000000000000000090010290020391030490040560109010016011d4141000049001060290020700505"
-      "152535455565758595a5b5c5d5e5fffff0000000000000100020000000018010005000000003801000400000000480000000000000000";
+      "43415400000000500000000000000000000000000000000090010290020391030490040560319031016032d2000308049001060290020700"
+      "505152535455565758595a5b5c5d5e5fffff0000000000000100020000000018010005000000003801000400000000480000000000000000";
   struct Case {
     const char* name;
     const std::string* map;
@@ -854,67 +849,68 @@ static void TestBuildCatT2Grammar() {
     const char* out;  // the script's "out:" line
   };
   const Case cases[] = {
-      // the four Helena suits' case: both state groups name objects 0 / 1 (not kept), 0x04 / 0x02 name 6 / 7: Python
-      // writes main + 00. The old grammar (and the shipped importer) wrote main + '60 60 11 d4 14 10 00'.
+      // both state groups name objects 1 / 8 (not kept), 0x04 / 0x02 name 6 / 7: Python writes main + 00. The old
+      // grammar reads 60, 31, 60, 32, d2 as markers, the 00 inside the 0xDX entry as the end, and keeps the empty
+      // bogus groups: main + '60 60 32 d2 00' (the shape of the shipped importer's stray Helena tail).
       {"hel_keep2345", &kHel, {2}, {2, 3, 4, 5}, nullptr,
-       "434154000000002800000000000000000000000000000000900102900203910304900405000000000100020000000018000000000000000000"
-       "00000000000000"},
-      // a kept state group is written '60 10 ...'; the '60 11' state (object 0) is dropped. Old grammar: '60' (empty,
-      // kept), '10' (9010/1, kept), then the empty bogus groups '60 11 d4 14 10': main + 60 10 90 10 01 60 11 d4 14 10 00.
-      {"hel_keep12345", &kHel, {2}, {1, 2, 3, 4, 5}, nullptr,
-       "43415400000000300000000000000000000000000000000090010290020391030490040560109010010000000000000001000200000000180"
-       "000000000000000"},
-      // both states kept: the 0xDX entry is written as its 4 bytes 'd4 14 10 00' after '60 11'. The old grammar gives
-      // the SAME file here (observed in the RED run: its bogus markers 60 10 .. 60 11 d4 14 10 and end byte are these
-      // bytes, and the alignment zeros hide the missing last 00), so hel2 below separates them.
-      {"hel_keep012345", &kHel, {2}, {0, 1, 2, 3, 4, 5}, nullptr,
-       "43415400000000300000000000000000000000000000000090010290020391030490040560109010016011d4141000000100020000000018"
+       "4341540000000028000000000000000000000000000000009001029002039103049004050000000001000200000000180000000000000000"
        "0000000000000000"},
-      // hel2: the '60 11' state holds the 0xDX entry (object 0) and then 9011/4. Python keeps and writes both. Old
-      // grammar: the 0xDX entry's 00 ends the map, so 9011/4 and every later group are lost.
-      {"hel2_keep012345", &kHel2, {2}, {0, 1, 2, 3, 4, 5},
-       "43415400000000580000000000000000000000000000000090010290020391030490040560109010016011d4141000901104049001060290"
-       "0207000000000000505152535455565758595a5b5c5d5e5fffff0000000000000100020000000018010005000000004001000400000000500"
-       "000000000000000",
-       "43415400000000380000000000000000000000000000000090010290020391030490040560109010016011d414100090110400000000000001"
-       "0002000000001800000000000000000000000000000000"},
+      // a kept state group is written '60 31 ...'; the '60 32' state (object 8) is dropped. Old grammar: '60' (empty,
+      // kept), '31' (9031/1, kept), then the empty bogus groups 60 32 d2: main + 60 31 90 31 01 60 32 d2 00.
+      {"hel_keep12345", &kHel, {2}, {1, 2, 3, 4, 5}, nullptr,
+       "4341540000000030000000000000000000000000000000009001029002039103049004056031903101000000000000000100020000000018"
+       "0000000000000000"},
+      // both states kept: the 0xDX entry is written as its 4 bytes 'd2 00 03 08' after '60 32'. Old grammar: the
+      // map ends at the 00 inside the entry (main + 60 31 90 31 01 60 32 d2 00).
+      {"hel_keep123458", &kHel, {2}, {1, 2, 3, 4, 5, 8}, nullptr,
+       "43415400000000300000000000000000000000000000000090010290020391030490040560319031016032d2000308000100020000000018"
+       "0000000000000000"},
+      // hel2: the '60 32' state holds the 0xDX entry (object 8) and then 9032/4. Python keeps and writes both. Old
+      // grammar: the entry's 00 byte ends the map, so 9032/4 and every later group are lost.
+      {"hel2_keep123458", &kHel2, {2}, {1, 2, 3, 4, 5, 8}, "43415400000000580000000000000000000000000000000090010290020391030490040560319031016032d2000308903204049001060290"
+       "0207000000000000505152535455565758595a5b5c5d5e5fffff000000000000010002000000001801000500000000400100040000000050"
+       "0000000000000000",
+       "43415400000000380000000000000000000000000000000090010290020391030490040560319031016032d2000308903204000000000000"
+       "010002000000001800000000000000000000000000000000"},
       // an empty marker group is KEPT (Python's all([]) is True); 0x02 (object 7) is dropped. Old and new grammar agree;
       // this pins the keep rule against the reading "drop empty groups".
-      {"empty_keep2", &kEmpty, {2}, {2},
-       "43415400000000400000000000000000000000000000000090010204029002070000000000000000505152535455565758595a5b5c5d5e5ff"
-       "fff0000000000000100020000000018010005000000002801000400000000380000000000000000",
-       "434154000000002000000000000000000000000000000000900102040000000001000200000000180000000000000000"},
-      // a kept 0xDX entry in the main group is written as its 4 bytes. Old and new grammar give the same bytes here (the
-      // old one re-emits d4 14 10 03 as four kept empty markers); this case is for the writer (a 3-byte 0xDX write).
-      {"dxmain_keep234", &kDxMain, {2}, {2, 3, 4},
-       "434154000000004000000000000000000000000000000000900102d4141003900204000000000000505152535455565758595a5b5c5d5e5f"
+      {"empty_keep2", &kEmpty, {2}, {2}, "43415400000000400000000000000000000000000000000090010204029002070000000000000000505152535455565758595a5b5c5d5e5f"
        "ffff0000000000000100020000000018010005000000002801000400000000380000000000000000",
-       "434154000000002800000000000000000000000000000000900102d41410039002040000000000000100020000000018000000000000000000"
-       "00000000000000"},
-      // the main group's 0xDX entry (object 3) dropped: Python writes main 9001/2, 9002/4. Old grammar: d4, 14, 10 kept as
-      // empty markers and 9002/4 under marker 03: main + d4 14 10 03 90 02 04.
-      {"dxmain_keep24", &kDxMain, {2}, {2, 4},
-       "434154000000004000000000000000000000000000000000900102d4141003900204000000000000505152535455565758595a5b5c5d5e5f"
+       "434154000000002000000000000000000000000000000000900102040000000001000200000000180000000000000000"},
+      // fix round 1, M2: an EMPTY state group '60 33' is kept and written as '60 33'; state 0x34 (object 7) is dropped.
+      // Old grammar: markers 60, 33, 60 (all empty, kept) and 34 (9034/7, dropped): main + 60 33 60 00.
+      {"emptystate_keep2", &kEmptyState, {2}, {2}, "43415400000000400000000000000000000000000000000090010260336034903407000000000000505152535455565758595a5b5c5d5e5f"
+       "ffff0000000000000100020000000018010005000000002801000400000000380000000000000000",
+       "434154000000002000000000000000000000000000000000900102603300000001000200000000180000000000000000"},
+      // a kept 0xDX entry in the main group is written as its 4 bytes. Old grammar: d2 a marker, the 00 inside the
+      // entry the end of the map (main 9001/2 + d2 00).
+      {"dxmain_keep234", &kDxMain, {2}, {2, 3, 4}, "434154000000004000000000000000000000000000000000900102d2000303900204000000000000505152535455565758595a5b5c5d5e5f"
+       "ffff0000000000000100020000000018010005000000002801000400000000380000000000000000",
+       "434154000000002800000000000000000000000000000000900102d200030390020400000000000001000200000000180000000000000000"
+       "0000000000000000"},
+      // the main group's 0xDX entry (object 3) dropped: Python writes main 9001/2, 9002/4. Old grammar: main 9001/2,
+      // then d2 (empty, kept) and the end at the 00: main + d2 00.
+      {"dxmain_keep24", &kDxMain, {2}, {2, 4}, "434154000000004000000000000000000000000000000000900102d2000303900204000000000000505152535455565758595a5b5c5d5e5f"
        "ffff0000000000000100020000000018010005000000002801000400000000380000000000000000",
        "434154000000002000000000000000000000000000000000900102900204000001000200000000180000000000000000"},
       // R3, the has(5) branch: the reference bytes from the END of its type-2 map (0x38, past the 0xDX entry) up to the
-      // type-5 span's end are copied to the same offsets. Old grammar: the map ends at 0x2f, inside the 0xDX entry, so
-      // the copy starts there and carries '0490010602900207' and padding before the type-5 bytes.
+      // type-5 span's end are copied to the same offsets. Old grammar: the map ends inside the 0xDX entry, so the copy
+      // starts there and carries the rest of the map before the type-5 bytes.
       {"hel_t5_keep2345", &kHel, {2, 5}, {2, 3, 4, 5}, nullptr,
-       "43415400000000480000000000000000000000000000000090010290020391030490040500000000000000000000000000000000000000005"
-       "05152535455565758595a5b5c5d5e5f010002000000001801000500000000380000000000000000"},
+       "4341540000000048000000000000000000000000000000009001029002039103049004050000000000000000000000000000000000000000"
+       "505152535455565758595a5b5c5d5e5f010002000000001801000500000000380000000000000000"},
   };
   // the two refusals reach BuildCat as Python's ValueError (the script's "build_cat refuse_*" lines; old grammar: no
   // refusal, '60 00' read as marker 0x60 and the end byte, 0xb0 as a marker)
   const std::string kState00 = "901001" "6000" "00", kUnknownB0 = "901001" "b00102" "00";
   const Case refusals[] = {
       {"refuse_state00", &kState00, {2}, {1},
-       "4341540000000038000000000000000000000000000000009010016000000000505152535455565758595a5b5c5d5e5fffff00000000000001"
-       "00020000000018010005000000002001000400000000300000000000000000",
+       "4341540000000038000000000000000000000000000000009010016000000000505152535455565758595a5b5c5d5e5fffff000000000000"
+       "0100020000000018010005000000002001000400000000300000000000000000",
        "THREW ValueError: type-2 map: state switch 60 00 at 0x1b"},
       {"refuse_unknown_b0", &kUnknownB0, {2}, {1},
-       "434154000000003800000000000000000000000000000000901001b001020000505152535455565758595a5b5c5d5e5fffff00000000000001"
-       "00020000000018010005000000002001000400000000300000000000000000",
+       "434154000000003800000000000000000000000000000000901001b001020000505152535455565758595a5b5c5d5e5fffff000000000000"
+       "0100020000000018010005000000002001000400000000300000000000000000",
        "THREW ValueError: type-2 map: unknown entry code 0xb0 at 0x1b"},
   };
   std::vector<Case> all(std::begin(cases), std::end(cases));
@@ -934,6 +930,13 @@ static void TestBuildCatT2Grammar() {
   }
 }
 
+// _add_apa on a hand-built donor. The donor's layout (offsets in hex): header with the directory offset 0xC0 at +4;
+// rule data 0x20..0x30; map data 0x30..0x40; a rule directory at 0x40 (one rule whose offset 0x20 is at +4); entry 0 at
+// 0x50 {nmap 1, mp 0x30, nrules 1, rp 0x40}; entry 1 at 0x60 {nmap 1, mp 0x38, nrules 0, rp 0}; the apa block at 0x70
+// {'apa', count 2, entries 0x50 and 0x60}; the directory at 0xC0 lists a type-2 entry (0x10) and the type-5 entry (0x70).
+// start = min of every offset the block names = 0x20 and end = 0x70 + 8 + 4 * 2 = 0x80, so 96 bytes are copied. The
+// target .cat is 48 bytes with its directory (one type-2 entry) at 0x20, so the block lands at 48 and every non-zero
+// offset field moves by 48 - 0x20 = 16. Expected values are written out by hand, not computed by the port.
 static void TestAttachApa() {
   Group("attach_apa_synthetic");
   auto put = [](std::vector<uint8_t>& b, size_t at, uint32_t v) {
