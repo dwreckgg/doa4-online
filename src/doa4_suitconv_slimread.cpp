@@ -237,7 +237,7 @@ std::pair<int64_t, std::vector<int64_t>> ApaFields(std::span<const uint8_t> c, i
 
 // _map_in_place(c, new_map, ents)
 Bytes MapInPlace(std::span<const uint8_t> c, const Bytes& new_map, const std::vector<std::pair<uint8_t, uint32_t>>& ents) {
-  const uint64_t end = tpr::ParseT2(c, 0x18).second;
+  const uint64_t end = ParseMap(c, 0x18).second;
   const int64_t old = static_cast<int64_t>(end) - 0x18;
   if (static_cast<int64_t>(new_map.size()) > old) {
     Fail("cat directory " + DirRepr(ents) + " not of the converter shape: new type-2 map " +
@@ -280,7 +280,7 @@ Bytes CatWithMapBytes(std::span<const uint8_t> c, const Bytes& new_map) {
     if (get(2) == std::optional<uint32_t>(0x18)) return MapInPlace(c, new_map, ents);
     Fail("cat directory " + DirRepr(ents) + " not of the converter shape");
   }
-  const int64_t end = static_cast<int64_t>(tpr::ParseT2(c, 0x18).second);
+  const int64_t end = static_cast<int64_t>(ParseMap(c, 0x18).second);
   if (AnyNonZero(r.Slice(end, Al(end, 8)))) Fail("bytes after the type-2 map");
   const auto [B, fields] = ApaFields(c, d.at(5));
   std::vector<int64_t> heads;
@@ -355,24 +355,84 @@ Bytes CatWithMapBytes(std::span<const uint8_t> c, const Bytes& new_map) {
 }  // namespace
 
 // ---------------------------------------------------------------- type-2 map
-// convert.t2_bytes
-Bytes T2Bytes(const tpr::T2Group& g) {
-  if (!g.is_main && !(g.kind > 0 && g.kind < 0x80 && g.kind != 0x60))
-    Fail("assert ('type-2 group kind out of range', " + Dec(g.kind) + ")");
+// convert.parse_t2
+std::pair<std::vector<MapGroup>, uint64_t> ParseMap(std::span<const uint8_t> c, uint64_t off) {
+  const Reader r(c);
+  std::vector<MapGroup> groups;
+  MapGroup cur;  // its kind is the kind of the group being read ('main' first)
+  int64_t p = static_cast<int64_t>(off);
+  for (;;) {
+    const uint8_t b = r.U8(p);
+    if (b & 0x80) {
+      if ((b & 0xF0) == 0x90 || (b & 0xF0) == 0xA0) {
+        cur.items.emplace_back(r.U16(p), r.U8(p + 2));
+        p += 3;
+      } else if ((b & 0xF0) == 0xD0) {
+        const auto s = r.Slice(p, p + 3);  // int.from_bytes(c[p:p + 3], 'big'): a clamped slice
+        uint32_t code = 0;
+        for (uint8_t v : s) code = (code << 8) | v;
+        cur.items.emplace_back(code, r.U8(p + 3));
+        p += 4;
+      } else {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "type-2 map: unknown entry code 0x%02x at %s", b, Hex(p).c_str());
+        Fail(buf);
+      }
+    } else {
+      groups.push_back(std::move(cur));
+      cur = MapGroup{};
+      if (b == 0) return {std::move(groups), static_cast<uint64_t>(p + 1)};
+      if (b == 0x60) {
+        const uint8_t nn = r.U8(p + 1);
+        // seen: 0x10-0x12, 0x20, 0x21; a 00 or top-bit byte here would be an end byte or an entry swallowed
+        if (nn == 0 || (nn & 0x80)) {
+          char buf[96];
+          std::snprintf(buf, sizeof buf, "type-2 map: state switch 60 %02x at %s", nn, Hex(p).c_str());
+          Fail(buf);
+        }
+        cur.kind = MapGroup::Kind::kState;
+        cur.value = nn;
+        p += 2;
+      } else {
+        cur.kind = MapGroup::Kind::kMarker;
+        cur.value = b;
+        p += 1;
+      }
+    }
+  }
+}
+
+// convert.t2_bytes; the assert texts are str() of the assert's tuple, as AssertionError prints it
+Bytes T2Bytes(const MapGroup& g) {
+  if (g.kind == MapGroup::Kind::kState && !(g.value > 0 && g.value < 0x80))
+    Fail("('type-2 group kind out of range', ('state', " + Dec(g.value) + "))");
+  if (g.kind == MapGroup::Kind::kMarker && !(g.value > 0 && g.value < 0x80 && g.value != 0x60))
+    Fail("('type-2 group kind out of range', " + Dec(g.value) + ")");
   for (const auto& [code, id] : g.items)
-    if (!(0x9000 <= code && code <= 0xAFFF))
-      Fail("assert ('type-2 entry out of range', '" + Hex(code) + "', " + Dec(id) + ")");
+    if (!((0x9000 <= code && code <= 0xAFFF) || (0xD00000 <= code && code <= 0xDFFFFF)))
+      Fail("('type-2 entry out of range', '" + Hex(code) + "', " + Dec(id) + ")");
   Writer w;
-  if (!g.is_main) w.U8(g.kind);
+  if (g.kind == MapGroup::Kind::kState) {
+    w.U8(0x60);
+    w.U8(g.value);
+  } else if (g.kind == MapGroup::Kind::kMarker) {
+    w.U8(g.value);
+  }
   for (const auto& [code, id] : g.items) {
-    w.U16(code);
+    if (code > 0xFFFF) {
+      w.U8(code >> 16);
+      w.U8((code >> 8) & 0xFF);
+      w.U8(code & 0xFF);
+    } else {
+      w.U16(code);
+    }
     w.U8(id);
   }
   return w.Take();
 }
 
 // slim_addon.map_bytes
-Bytes MapBytes(std::span<const tpr::T2Group> groups) {
+Bytes MapBytes(std::span<const MapGroup> groups) {
   Bytes out;
   for (const auto& g : groups) {
     const Bytes b = T2Bytes(g);
@@ -383,7 +443,7 @@ Bytes MapBytes(std::span<const tpr::T2Group> groups) {
 }
 
 // slim_addon.cat_with_map(cat, map_bytes(groups))
-Bytes CatWithMap(std::span<const uint8_t> cat, std::span<const tpr::T2Group> map) {
+Bytes CatWithMap(std::span<const uint8_t> cat, std::span<const MapGroup> map) {
   return CatWithMapBytes(cat, MapBytes(map));
 }
 
@@ -419,14 +479,14 @@ Suit ReadSuit(std::string_view name_in, std::span<const uint8_t> tpr_bytes, std:
     for (const auto& [t, v] : tpr::CatDir(S(s.cat)))
       if (t == 2) t2 = v;
     if (!t2) Fail("KeyError: 2");
-    s.groups = tpr::ParseT2(S(s.cat), *t2).first;
+    s.groups = ParseMap(S(s.cat), *t2).first;
   }
   s.main = s.groups.at(0).items;
   s.stripped = "nothing";
   std::set<int64_t> cid_set;
   for (size_t gi = 1; gi < s.groups.size(); ++gi) {
     const auto& g = s.groups[gi];
-    if (!g.is_main && (g.kind == 2 || g.kind == 4))
+    if (g.kind == MapGroup::Kind::kMarker && (g.value == 2 || g.value == 4))
       for (const auto& [code, id] : g.items) cid_set.insert(id);
   }
   const std::vector<int64_t> copy_ids(cid_set.begin(), cid_set.end());

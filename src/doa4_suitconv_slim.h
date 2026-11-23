@@ -70,16 +70,30 @@ struct Chosen {
 Chosen ChooseH(std::span<const Tri>, size_t target);  // Fail when the count at H_HI exceeds the target
 
 // ---------------------------------------------------------------- container layer (Task 3)
-// convert.t2_bytes(kind, recs): one group of the type-2 map back to bytes (the main group has no marker byte). The
-// reader's accept set is asserted: kind 1..0x7F other than 0x60, every code 0x9000..0xAFFF.
-Bytes T2Bytes(const tpr::T2Group& group);
+// One group of the type-2 map in convert.py's CURRENT grammar (parse_t2 / t2_bytes): the main group, a group opened
+// by a marker byte (kind = that byte; 0x02 low-detail copy, 0x04 shadow copy) or a state group opened by '60 NN'
+// (kind ('state', NN)). A code is 16 bits for a 0x9X / 0xAX entry (3 bytes) and 24 bits for a 0xDX entry (4 bytes).
+// (tpr::T2Group / tpr::ParseT2, the converter's, keep the older 0x90 / 0x91 grammar and are not used here.)
+struct MapGroup {
+  enum class Kind { kMain, kMarker, kState };
+  Kind kind = Kind::kMain;
+  uint8_t value = 0;  // the marker byte, or NN of '60 NN'
+  std::vector<std::pair<uint32_t, uint8_t>> items;  // (code, object id)
+};
+// convert.parse_t2(c, off): the groups and the offset just past the end byte. Refusals (ValueError texts): an entry
+// byte with the top bit set that is not 0x9X / 0xAX / 0xDX, and '60 NN' with NN 0 or NN's top bit set.
+std::pair<std::vector<MapGroup>, uint64_t> ParseMap(std::span<const uint8_t> c, uint64_t off);
+// convert.t2_bytes(kind, recs): one group back to bytes (the main group has no marker byte). The reader's accept set is
+// asserted with the AssertionError's text: a marker 1..0x7F other than 0x60, a state NN 1..0x7F, every code
+// 0x9000..0xAFFF or 0xD00000..0xDFFFFF.
+Bytes T2Bytes(const MapGroup& group);
 // slim_addon.map_bytes(groups): the groups' bytes and the end byte.
-Bytes MapBytes(std::span<const tpr::T2Group> groups);
+Bytes MapBytes(std::span<const MapGroup> groups);
 // slim_addon.cat_with_map(cat, map_bytes(groups)): the cat with its type-2 map at 0x18 replaced. A cat of the
 // converter's directory shape is laid out again (every later part moved, absolute offsets moved with it); any other
 // cat whose map is at 0x18 gets the new map written in place when it is no longer than the old one (zero-filled to the
 // old map's end, nothing else changed) and is refused when it is longer (port contract (i)).
-Bytes CatWithMap(std::span<const uint8_t> cat, std::span<const tpr::T2Group> map);
+Bytes CatWithMap(std::span<const uint8_t> cat, std::span<const MapGroup> map);
 
 // tpr.buf_set(desc, base, size): the descriptor with its last two words' addresses replaced (low 2 bits kept). base and
 // size are Python ints: each must be a multiple of 4 (assert) and the result must fit a u32 (struct.error).
@@ -96,8 +110,8 @@ struct Suit {
   std::vector<tpr::ObjGeo> geo;    // MdlGeo objects, stripped
   std::vector<tpr::ObjInfo> info;  // MdlInfo objects, stripped
   std::vector<tpr::Node> nodes;    // Hie nodes, stripped (kept nodes in file order, positions remapped)
-  std::vector<tpr::T2Group> groups;                  // the input's type-2 map
-  std::vector<std::pair<uint16_t, uint8_t>> main;    // its main group (groups[0])
+  std::vector<MapGroup> groups;                      // the input's type-2 map
+  std::vector<std::pair<uint32_t, uint8_t>> main;    // its main group (groups[0])
   std::string stripped;            // "nothing" or "old copies ids A..B, N buffers"
 };
 // slim_addon.read_suit: parse, then strip the old group 0x02/0x04 copies by id. `name` is what the Python tool takes

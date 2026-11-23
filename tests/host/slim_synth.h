@@ -62,7 +62,7 @@ struct Model {
   std::vector<Tex> textures;
   std::vector<Buf> vbufs, ibufs;
   uint32_t data_end = 0;
-  std::vector<tp::T2Group> groups;              // the type-2 map
+  std::vector<sl::MapGroup> groups;              // the type-2 map
   std::optional<std::vector<uint32_t>> user0;   // when set, USER0's 12 words as given (a refusal fixture)
 
   void SetNodes(std::vector<Node> v) { nodes = std::move(v); }
@@ -71,7 +71,7 @@ struct Model {
   void SetVbufs(std::vector<Buf> v) { vbufs = std::move(v); }
   void SetIbufs(std::vector<Buf> v) { ibufs = std::move(v); }
   void SetDataEnd(uint32_t v) { data_end = v; }
-  void SetGroups(std::vector<tp::T2Group> v) { groups = std::move(v); }
+  void SetGroups(std::vector<sl::MapGroup> v) { groups = std::move(v); }
 
   std::vector<tp::Node> HieNodes() const {
     std::vector<tp::Node> out;
@@ -275,16 +275,24 @@ struct Model {
   }
 };
 
-inline tp::T2Group Main(std::vector<std::pair<uint16_t, uint8_t>> items) {
-  tp::T2Group g;
-  g.is_main = true;
+inline sl::MapGroup Main(std::vector<std::pair<uint32_t, uint8_t>> items) {
+  sl::MapGroup g;
+  g.kind = sl::MapGroup::Kind::kMain;
   g.items = std::move(items);
   return g;
 }
-inline tp::T2Group Group(uint8_t kind, std::vector<std::pair<uint16_t, uint8_t>> items) {
-  tp::T2Group g;
-  g.is_main = false;
-  g.kind = kind;
+inline sl::MapGroup Group(uint8_t kind, std::vector<std::pair<uint32_t, uint8_t>> items) {
+  sl::MapGroup g;
+  g.kind = sl::MapGroup::Kind::kMarker;
+  g.value = kind;
+  g.items = std::move(items);
+  return g;
+}
+// a '60 NN' state group
+inline sl::MapGroup State(uint8_t nn, std::vector<std::pair<uint32_t, uint8_t>> items) {
+  sl::MapGroup g;
+  g.kind = sl::MapGroup::Kind::kState;
+  g.value = nn;
   g.items = std::move(items);
   return g;
 }

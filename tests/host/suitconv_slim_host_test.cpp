@@ -9,7 +9,7 @@
 // A summary is "OK fnv=<FNV-1a 64 of the output> len=<bytes> ..." or "REFUSED <the SlimError text>".
 //
 // Groups: synth_round_trip, strip_removes_copies, strip_not_trailing_in_list_order, strip_refusals, cat_map_converter,
-// cat_map_in_place, cat_refusals, buf_set. Last line: "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
+// cat_map_in_place, cat_refusals, map_grammar, buf_set. Last line: "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
 
 #include "../../src/doa4_suitconv_slim.h"
 #include "slim_synth.h"
@@ -171,22 +171,53 @@ struct Case {
   bool is_cat = false;
 };
 
+static synth::Model StatesModel() {
+  synth::Model m = Front();
+  m.SetGroups({Main({{0x9001, 0}, {0x9002, 1}, {0xD41410, 0}, {0x9003, 2}, {0x9004, 3}}),
+               synth::State(0x10, {{0x9003, 2}}), synth::State(0x11, {{0x9004, 3}, {0xD01410, 1}}),
+               Group(2, {{0x9002, 4}, {0x9003, 5}}), Group(4, {{0x9002, 6}})});
+  return m;
+}
+
+// The groups as slim_expect.py's desc() prints them: "main[9001:0,...] s10[...] 02[...]".
+static std::string Desc(const std::vector<sl::MapGroup>& groups) {
+  std::string s;
+  char buf[32];
+  for (size_t k = 0; k < groups.size(); ++k) {
+    const auto& g = groups[k];
+    if (k) s += " ";
+    if (g.kind == sl::MapGroup::Kind::kMain) {
+      s += "main";
+    } else {
+      std::snprintf(buf, sizeof buf, g.kind == sl::MapGroup::Kind::kState ? "s%02x" : "%02x", g.value);
+      s += buf;
+    }
+    s += "[";
+    for (size_t i = 0; i < g.items.size(); ++i) {
+      std::snprintf(buf, sizeof buf, "%s%x:%u", i ? "," : "", g.items[i].first, unsigned(g.items[i].second));
+      s += buf;
+    }
+    s += "]";
+  }
+  return s;
+}
+
 static Case ReadCase(const std::string& name, const synth::Model& m) { return {name, m.MakeTpr(), m.MakeCat(), {}, false}; }
-static Case CatCase(const std::string& name, Bytes cat, const std::vector<tp::T2Group>& groups) {
+static Case CatCase(const std::string& name, Bytes cat, const std::vector<sl::MapGroup>& groups) {
   return {name, {}, std::move(cat), sl::MapBytes(groups), true};
 }
 
 // the retail-shaped cat's maps (port contract (i), test_slim_addon check_cat_map_in_place)
-static std::vector<tp::T2Group> RetailOld() {
+static std::vector<sl::MapGroup> RetailOld() {
   return {Main({{0x9001, 0}, {0x9002, 1}, {0x9003, 2}}), Group(4, {{0x9002, 3}}), Group(2, {{0x9002, 4}})};
 }
-static std::vector<tp::T2Group> RetailSame() {
+static std::vector<sl::MapGroup> RetailSame() {
   return {Main({{0x9001, 1}, {0x9002, 0}, {0x9003, 2}}), Group(4, {{0x9002, 3}}), Group(2, {{0x9002, 4}})};
 }
-static std::vector<tp::T2Group> RetailShort() {
+static std::vector<sl::MapGroup> RetailShort() {
   return {Main({{0x9001, 0}, {0x9002, 1}}), Group(4, {{0x9002, 3}}), Group(2, {{0x9002, 4}})};
 }
-static std::vector<tp::T2Group> RetailLong() {
+static std::vector<sl::MapGroup> RetailLong() {
   return {Main({{0x9001, 0}, {0x9002, 1}, {0x9003, 2}, {0x9004, 5}}), Group(4, {{0x9002, 3}}), Group(2, {{0x9002, 4}})};
 }
 
@@ -196,6 +227,19 @@ static std::vector<Case> Cases() {
   cs.push_back(ReadCase("strip_front", Front()));
   cs.push_back(ReadCase("strip_trail_unordered", TrailingUnordered()));
   cs.push_back(ReadCase("strip_trail_ordered", TrailingOrdered()));
+  // the current map grammar: a 0xDX entry (24-bit code) in the main group and two '60 NN' state groups before the
+  // copy groups (as Helena's reference hel05 holds them)
+  cs.push_back(ReadCase("strip_states", StatesModel()));
+  {
+    Case c = ReadCase("ref_map_unknown", Front());  // an entry byte 0xB0 (top bit set, not 0x9X / 0xAX / 0xDX)
+    c.cat = synth::Model::MakeCatWith({0x90, 0x01, 0x00, 0xB0, 0x00, 0x00, 0x00});
+    cs.push_back(std::move(c));
+  }
+  {
+    Case c = ReadCase("ref_map_state00", Front());  // '60 00'
+    c.cat = synth::Model::MakeCatWith({0x90, 0x01, 0x00, 0x60, 0x00, 0x00});
+    cs.push_back(std::move(c));
+  }
   // refusals, one per SlimError of _users, _check_user0, _remove_resources, read_suit
   {
     Case c = ReadCase("ref_users", Front());
@@ -235,6 +279,14 @@ static std::vector<Case> Cases() {
   cs.push_back(CatCase("cat_place_same", retail, RetailSame()));
   cs.push_back(CatCase("cat_place_short", retail, RetailShort()));
   cs.push_back(CatCase("cat_place_long", retail, RetailLong()));
+  // cat_with_map with the current grammar: the same map back, and a changed one (a third state group, a second Dx)
+  const Bytes states = StatesModel().MakeCat();
+  cs.push_back(CatCase("cat_states_same", states, StatesModel().groups));
+  {
+    auto g = StatesModel().groups;
+    g.insert(g.begin() + 3, synth::State(0x12, {{0x9001, 0}, {0xD01020, 1}}));
+    cs.push_back(CatCase("cat_states_changed", states, g));
+  }
   // cat_with_map: refusals
   {
     Bytes moved = retail;  // the directory's type-2 entry at 0x20
@@ -249,7 +301,7 @@ static std::vector<Case> Cases() {
   }
   {
     // a non-zero byte between the map's end byte and the next 8-byte boundary: a 4-byte map ends at 0x1c
-    const std::vector<tp::T2Group> one = {Main({{0x9001, 0}})};
+    const std::vector<sl::MapGroup> one = {Main({{0x9001, 0}})};
     Bytes junk = synth::Model::MakeCatWith(sl::MapBytes(one));
     junk.at(0x1c) = 0x5A;
     cs.push_back(CatCase("cat_ref_after_map", junk, one));
@@ -267,11 +319,11 @@ static std::vector<Case> Cases() {
 // What the C++ gives for a case, in slim_expect.py's format.
 static std::string Summary(const Case& c) {
   try {
-    if (c.is_cat) return OkLine(sl::CatWithMap(c.cat, tp::ParseT2(c.map, 0).first));
+    if (c.is_cat) return OkLine(sl::CatWithMap(c.cat, sl::ParseMap(c.map, 0).first));
     const sl::Suit s = sl::ReadSuit(c.name, c.tpr, c.cat);
     std::string ids = "[";
     for (size_t k = 0; k < s.nodes.size(); ++k) ids += (k ? ", " : "") + std::to_string(s.nodes[k].id);
-    return OkLine(sl::Rebuild(s)) + " stripped=" + s.stripped + " ids=" + ids + "]";
+    return OkLine(sl::Rebuild(s)) + " stripped=" + s.stripped + " ids=" + ids + "] groups=" + Desc(s.groups);
   } catch (const doa4::suitconv::ConvertError& e) {
     return std::string("REFUSED ") + e.what();
   } catch (const std::exception& e) {  // never a refusal: a row fails by its text, the run goes on
@@ -299,7 +351,9 @@ static const Expected kExpected[] = {
     {"cat_ref_apa", "REFUSED type-5 block at 0x60 is not an apa block"},
     {"cat_ref_header", "REFUSED cat header not of the converter shape"},
     {"cat_ref_shape", "REFUSED cat directory [(2, 32), (5, 112), (4, 128)] not of the converter shape"},
-    {"nocopy", "OK fnv=2b5cfef084a35e7a len=45056 stripped=nothing ids=[0, 1, 2, 3]"},
+    {"cat_states_changed", "OK fnv=9b3fb8f004c39145 len=208"},
+    {"cat_states_same", "OK fnv=6897cbd0931fd329 len=192"},
+    {"nocopy", "OK fnv=2b5cfef084a35e7a len=45056 stripped=nothing ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3]"},
     {"ref_buffer_shared", "REFUSED ref_buffer_shared: a buffer is shared by a kept object and an old copy"},
     {"ref_child_out", "REFUSED ref_child_out: Hie node 2 has a child at position 99, outside 0..6"},
     {"ref_copy_kept_child", "REFUSED ref_copy_kept_child: old copy node 4 has a kept child 2"},
@@ -310,6 +364,8 @@ static const Expected kExpected[] = {
     {"ref_kept_copy_child", "REFUSED ref_kept_copy_child: kept node 3 has a child among the old copies"},
     {"ref_kept_copy_parent", "REFUSED ref_kept_copy_parent: kept node 2 has an old-copy parent 4"},
     {"ref_main_names_copy", "REFUSED ref_main_names_copy: the main group names an old copy node"},
+    {"ref_map_state00", "REFUSED type-2 map: state switch 60 00 at 0x1b"},
+    {"ref_map_unknown", "REFUSED type-2 map: unknown entry code 0xb0 at 0x1b"},
     {"ref_parent_out", "REFUSED ref_parent_out: Hie node 3 has its parent at position 99, outside 0..6"},
     {"ref_span_end", "REFUSED ref_span_end: copy buffer span 0x1000..0x2800 not on 4 KiB boundaries"},
     {"ref_span_shared", "REFUSED ref_span_shared: resource 7 shares a span with a copy buffer"},
@@ -317,9 +373,10 @@ static const Expected kExpected[] = {
     {"ref_top_ids", "REFUSED ref_top_ids: old copies 4..6 are not the top 3 ids of the 8 nodes/objects"},
     {"ref_user0", "REFUSED ref_user0: USER0 [7, 4, 2, 5, 7, 6, 7, 13, 1, 2, 3, 16] does not describe its resource list [7, 4, 2, 4, 7, 6, 7, 13, 1, 2, 3, 16]"},
     {"ref_users", "REFUSED USER resources at [0, 1, 2, 4], expected 0..3"},
-    {"strip_front", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3]"},
-    {"strip_trail_ordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3]"},
-    {"strip_trail_unordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3]"},
+    {"strip_front", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
+    {"strip_states", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,d41410:0,9003:2,9004:3] s10[9003:2] s11[9004:3,d01410:1] 02[9002:4,9003:5] 04[9002:6]"},
+    {"strip_trail_ordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
+    {"strip_trail_unordered", "OK fnv=2b5cfef084a35e7a len=45056 stripped=old copies ids 4..6, 6 buffers ids=[0, 1, 2, 3] groups=main[9001:0,9002:1,9003:2,9004:3] 02[9002:4,9003:5] 04[9002:6]"},
 };
 
 static const char* ExpectedFor(const std::string& name) {
@@ -341,7 +398,7 @@ static void CheckCase(const std::string& name) {
 
 // ---------------------------------------------------------------- non-throwing drivers (a refusal is one failed check,
 // never the end of a group)
-static Bytes CatOr(std::span<const uint8_t> cat, const std::vector<tp::T2Group>& groups) {
+static Bytes CatOr(std::span<const uint8_t> cat, const std::vector<sl::MapGroup>& groups) {
   try {
     return sl::CatWithMap(cat, groups);
   } catch (const std::exception&) {
@@ -350,7 +407,7 @@ static Bytes CatOr(std::span<const uint8_t> cat, const std::vector<tp::T2Group>&
 }
 // ReadSuit then Rebuild; empty on any exception. *stripped and *groups (when given) take the suit's fields.
 static Bytes StripOr(const char* name, const Bytes& tpr, const Bytes& cat, std::string* stripped = nullptr,
-                     std::vector<tp::T2Group>* groups = nullptr) {
+                     std::vector<sl::MapGroup>* groups = nullptr) {
   try {
     const sl::Suit s = sl::ReadSuit(name, tpr, cat);
     if (stripped) *stripped = s.stripped;
@@ -366,7 +423,7 @@ static void TestSynthRoundTrip() {
   const synth::Model m = NoCopies();
   const Bytes t = m.MakeTpr(), c = m.MakeCat();
   std::string stripped;
-  std::vector<tp::T2Group> groups;
+  std::vector<sl::MapGroup> groups;
   CHECK(StripOr("nocopy", t, c, &stripped, &groups) == t);
   CHECK(stripped == "nothing");
   CHECK(!groups.empty() && CatOr(c, groups) == c);
@@ -452,6 +509,57 @@ static void TestCatRefusals() {
   CheckCase("cat_ref_apa");
 }
 
+// t2_bytes' refusals: each label's group, written by T2Bytes, against the text slim_expect.py prints for the same call
+struct T2Assert {
+  const char* label;
+  sl::MapGroup group;
+};
+static std::vector<T2Assert> T2Asserts() {
+  return {{"marker 0x60", Group(0x60, {})},
+          {"marker 0", Group(0, {})},
+          {"state 0x80", synth::State(0x80, {})},
+          {"code 0x8fff", Main({{0x9001, 0}, {0x8FFF, 5}})},
+          {"code 0xe00000", Main({{0xE00000, 1}})}};
+}
+static const Expected kT2Expected[] = {
+    {"marker 0x60", "('type-2 group kind out of range', 96)"},
+    {"marker 0", "('type-2 group kind out of range', 0)"},
+    {"state 0x80", "('type-2 group kind out of range', ('state', 128))"},
+    {"code 0x8fff", "('type-2 entry out of range', '0x8fff', 5)"},
+    {"code 0xe00000", "('type-2 entry out of range', '0xe00000', 1)"},
+};
+
+static void TestMapGrammar() {
+  CheckCase("strip_states");
+  CheckCase("ref_map_unknown");
+  CheckCase("ref_map_state00");
+  CheckCase("cat_states_same");
+  CheckCase("cat_states_changed");
+  // the map read back from the states cat and written again is the same bytes
+  const Bytes map = sl::MapBytes(StatesModel().groups);
+  Bytes again;
+  try {
+    const auto parsed = sl::ParseMap(map, 0);
+    again = sl::MapBytes(parsed.first);
+    CHECK(parsed.second == map.size());
+  } catch (const std::exception&) {
+    CHECK(false);
+  }
+  CHECK(again == map);
+  for (const auto& a : T2Asserts()) {
+    const char* want = nullptr;
+    for (const auto& e : kT2Expected)
+      if (std::strcmp(e.name, a.label) == 0) want = e.summary;
+    std::string got = "no refusal";
+    try {
+      sl::T2Bytes(a.group);
+    } catch (const std::exception& e) {
+      got = e.what();
+    }
+    CHECKF(want != nullptr && got == want, "%s: got \"%s\" want \"%s\"", a.label, got.c_str(), want ? want : "(none)");
+  }
+}
+
 static void TestBufSet() {
   const Bytes d = {0xAA, 0xBB, 0xCC, 0xDD, 0x00, 0x01, 0x20, 0x03, 0x00, 0x00, 0x04, 0x02};
   // tpr.buf_set(d, 0x3000, 0x80) = aabbccdd0000300300000082 (slim_expect.py's last line): the low two bits of each
@@ -505,6 +613,7 @@ int main(int argc, char** argv) {
   RunGroup(TestCatMapConverter, "cat_map_converter");
   RunGroup(TestCatMapInPlace, "cat_map_in_place");
   RunGroup(TestCatRefusals, "cat_refusals");
+  RunGroup(TestMapGrammar, "map_grammar");
   RunGroup(TestBufSet, "buf_set");
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
