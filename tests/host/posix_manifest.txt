@@ -74,7 +74,11 @@ tweaks | tests/host/tweaks_host_test.cpp src/doa4_tweaks.cpp src/doa4_costumes.c
 unlocks | tests/host/unlocks_host_test.cpp src/doa4_unlocks.cpp |
 update_notice | tests/host/update_notice_host_test.cpp src/doa4_update_notice.cpp src/net/np_rules.cpp src/net/np_wire.cpp | -D_GLIBCXX_ASSERTIONS
 updater_refusal | tests/host/updater_refusal_host_test.cpp src/doa4_updater.cpp src/net/np_rules.cpp src/net/np_wire.cpp | -D_GLIBCXX_ASSERTIONS -DDOA4_UPDATER_HOST_TEST -pthread -I {SDK}/thirdparty
+vanilla | tests/host/vanilla_host_test.cpp | -D_GLIBCXX_ASSERTIONS
 
+!alpha_colours | other: an include that is in no repo folder (src/doa4_gamefiles.cpp:9 crypto/TinySHA1.hpp)
+!colour_costumes | windows header: tests/host/colour_costumes_host_test.cpp:55 windows.h
+!colourgen | other: multi-step build (6 compile lines)
 !d3d12_intel_policy | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include
 !dot_product | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include, %REXSDK_DIR%\thirdparty\simde, %REXSDK_DIR%\thirdparty\fmt\include, %REXSDK_DIR%\thirdparty\spdlog\include
 !dpps | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include, %REXSDK_DIR%\thirdparty\simde

@@ -93,9 +93,9 @@ jobs:
         run: |
           set -o pipefail
           # the SDK is built by the game's own configure: generated/rexglue.cmake:10-11 adds REXSDK_DIR as a subdirectory
-          # -march=x86-64-v3 for C and C++: the Windows job passes the same pair (netplay-release.yml:102) and
-          # CMakeLists.txt:170 takes the flag from CMAKE_CXX_FLAGS; the game's linux-base preset sets no flags
-          cmake --preset linux-amd64-release -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3" -DREXSDK_DIR=$GITHUB_WORKSPACE/rexglue-sdk 2>&1 | tee configure.log
+          # -march=x86-64-v2 for C and C++: the Windows job passes the same pair (netplay-release.yml:102) and
+          # CMakeLists.txt:173 takes the flag from CMAKE_CXX_FLAGS; the game's linux-base preset sets no flags
+          cmake --preset linux-amd64-release -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 "-DCMAKE_C_FLAGS=-march=x86-64-v2" "-DCMAKE_CXX_FLAGS=-march=x86-64-v2" -DREXSDK_DIR=$GITHUB_WORKSPACE/rexglue-sdk 2>&1 | tee configure.log
           # -j 2: the recompiled game's largest files take several GB each to compile; the Windows job builds two at a
           # time beside a 16 GB page file. "Runner size" above prints this runner's memory, for a later round to raise it.
           cmake --build --preset linux-amd64-release -- -j 2 2>&1 | tee build.log

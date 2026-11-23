@@ -2326,8 +2326,8 @@ def test_linux_workflow(root):
     check(len(builds) == 1 and "| tee build.log" in builds[0] and "set -o pipefail" in builds[0].split("| tee build.log")[0],
           "linux workflow: one build step, its output to build.log with set -o pipefail before it")
     check(any("objects built:" in s for s in steps), "linux workflow: a step prints 'objects built:'")
-    check(len(conf) == 1 and '"-DCMAKE_C_FLAGS=-march=x86-64-v3"' in conf[0].split() and '"-DCMAKE_CXX_FLAGS=-march=x86-64-v3"' in conf[0].split(),
-          f"linux workflow: the configure passes -march=x86-64-v3 for C and C++, as every other build of this code: {conf}")
+    check(len(conf) == 1 and '"-DCMAKE_C_FLAGS=-march=x86-64-v2"' in conf[0].split() and '"-DCMAKE_CXX_FLAGS=-march=x86-64-v2"' in conf[0].split(),
+          f"linux workflow: the configure passes -march=x86-64-v2 for C and C++, as every other build of this code: {conf}")
     check(len(conf) == 1 and any(w.startswith("-DREXSDK_DIR=") and len(w) > len("-DREXSDK_DIR=") for w in conf[0].split()),
           f"linux workflow: the configure names the SDK folder with -DREXSDK_DIR=: {conf}")
     counts = [s for s in steps if "objects built:" in s]
