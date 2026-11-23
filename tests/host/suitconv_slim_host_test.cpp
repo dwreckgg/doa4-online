@@ -2532,6 +2532,47 @@ static std::vector<AddCase> AddCases() {
   v.push_back({"lim4_65535", Strip(65535, false)});
   v.push_back({"self", SelfRef(), 6, false, true});
   v.push_back({"ids_step", AddBase(), 40, false, false, true});
+  // fix round 1. lost2: two nodes collapse, the higher id fed first: O0 (palette [4]: the neck's bone, copy node 13)
+  // and O4 (node 13) shrunk to 1e-7, O3 (node 9, fed after O0) too; lost = [13, 9] in first-fed order (by id: [9, 13])
+  {
+    Scene sc = AddBase();
+    const auto tiny = [](double x, double y, double z, std::array<double, 4> w = {1, 0, 0, 0}) {
+      return std::vector<Bytes>{V({x, y, z}, w), V({x + 1e-7, y, z}, w), V({x, y + 1e-7, z}, w),
+                                V({x + 1e-7, y + 1e-7, z}, w)};
+    };
+    sc.objs[0].palette = {4};
+    sc.objs[0].decls[0].verts = tiny(0.0004, 0.0004, 0.0004);
+    for (auto& d : sc.objs[3].decls) {
+      d.verts = tiny(0.0004, 0.0004, 0.0004);
+      d.verts.resize(3);
+    }
+    sc.objs[4].decls[0].verts = tiny(0.00043, 1.00043, 0.00043, {0.625, 0.375, 0, 0});
+    sc.objs[4].decls[0].verts.resize(3);
+    v.push_back({"lost2", sc});
+  }
+  {  // an infinite vertex x in O0: slim mode's merge raises math.floor's OverflowError, passed on unwrapped
+    Scene sc = AddBase();
+    sc.objs[0].decls[0].verts[3] = V({std::numeric_limits<double>::infinity(), 0.25, 0.125});
+    v.push_back({"inf_pos", sc});
+  }
+  {  // a short (F2) normal on a ROTATED copy node (reference node 6, 90 degrees about z): _to_local's IndexError
+    Scene sc = AddBase();
+    sc.objs[0].decls[0].elems = {tp::DeclElem{0, 0, 0x2A23B9, 0, 0, 0, 0}, tp::DeclElem{0, 12, 0x2C23A5, 0, 3, 0, 0},
+                                 tp::DeclElem{0, 24, 0x2C23A5, 0, 5, 0, 0}, tp::DeclElem{0, 32, 0x1A23A6, 0, 1, 0, 0}};
+    sc.ref_nodes[6].mat = std::array<double, 16>{0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0.5, 1.0, 0.25, 1};
+    v.push_back({"nrm_short_rot", sc});
+  }
+  {  // 250 more suit nodes (empty objects): the first copy id is 256, past the map's one-byte id (t2_bytes' assert)
+    Scene sc = AddBase();
+    for (int64_t id = 6; id < 256; ++id) {
+      sc.suit_nodes.push_back({id, 0, 0.0, 0.0, 0.0});
+      ObjDef o;
+      o.decls = {DeclDef{{V({0, 0, 0})}, {}}};
+      o.meshes = {MS{.decl = 0, .istart = 0, .icount = 0, .tex = 1}};
+      sc.objs.push_back(o);
+    }
+    v.push_back({"id_overflow", sc});
+  }
   // the refusal branches: a negative slim target (count 0: 0 - 9), no textured mesh (group 0x02 gets no triangle:
   // origin's SlimError in slim mode, every node a placeholder of texture 0 in full mode), an empty group 0x02 (the
   // report's min() raises), the template mesh of the wrong shape, a suit mesh record shorter than 0xC0 (lod_chain
@@ -2794,8 +2835,12 @@ static const Expected kAddExpected[] = {
     {"frames0/slim", "tpr=6698c6887607a3fccd52307d4218ab96ff39fa97:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
     {"g4_first/full", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=68fbba35913ea2dcf6fc2a84bc150190075def70:224"},
     {"g4_first/slim", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=68fbba35913ea2dcf6fc2a84bc150190075def70:224"},
+    {"id_overflow/full", "RAISED"},
+    {"id_overflow/slim", "RAISED"},
     {"ids_step/full", "REFUSED ids_step: copy ids out of step with the objects"},
     {"ids_step/slim", "REFUSED ids_step: copy ids out of step with the objects"},
+    {"inf_pos/full", "tpr=28b44a7fd3eda2931979f577bdd6656349531a68:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"inf_pos/slim", "RAISED"},
     {"keys60/full", "tpr=c044984972c4fe88e3f2de2203280ecb10311f6a:192512 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
     {"keys60/slim", "tpr=c044984972c4fe88e3f2de2203280ecb10311f6a:192512 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
     {"lim2_65534/full", "tpr=7439497e619147e5c713e3096849d2924f56e98e:7327744 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
@@ -2804,6 +2849,8 @@ static const Expected kAddExpected[] = {
     {"lim2_65535/slim", "REFUSED lim2_65535: copy 0x04: node 15 had 65533 triangles before the merge and none after (nodes [15])"},
     {"lim4_65535/full", "REFUSED lim4_65535: shadow node 15 over 65534 vertices"},
     {"lim4_65535/slim", "REFUSED lim4_65535: copy 0x04: node 15 had 65533 triangles before the merge and none after (nodes [15])"},
+    {"lost2/full", "tpr=4a1e53c3dbddf81987a46de906835e5325425f1d:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"lost2/slim", "REFUSED lost2: copy 0x02: node 13 had 3 triangles before the merge and none after (nodes [13, 9])"},
     {"map_i1/full", "tpr=e67ad05eb498bcea71b06b049f62449e52316c31:139264 cat=e752900cadca5dc3ceffaeadb35476b8c41890c1:224"},
     {"map_i1/slim", "tpr=e67ad05eb498bcea71b06b049f62449e52316c31:139264 cat=e752900cadca5dc3ceffaeadb35476b8c41890c1:224"},
     {"neg_target/full", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
@@ -2812,6 +2859,8 @@ static const Expected kAddExpected[] = {
     {"no_tex/slim", "REFUSED no_tex: copy 0x02: origin: no triangles"},
     {"nrm_short/full", "RAISED"},
     {"nrm_short/slim", "RAISED"},
+    {"nrm_short_rot/full", "RAISED"},
+    {"nrm_short_rot/slim", "RAISED"},
     {"obj_count/full", "REFUSED obj_count: 6 objects for 7 nodes"},
     {"obj_count/slim", "REFUSED obj_count: 6 objects for 7 nodes"},
     {"self/full", "tpr=827d0705f45a2d189b8f882384a91a4e78739236:135168 cat=9ebc22d3e9be63981f5bbbfea39ef001a51cd270:224"},
@@ -3088,8 +3137,9 @@ static void TestTwiceEqual() {
 
 static void TestSelfReference() {
   // the suit with stand-in copies at ids 6..17 is its own reference: the copies are stripped, new ids start at 6 (where
-  // the old copies started), the targets are the stand-ins' own counts minus the node count (0x02: 6+..+14 - 9 = 81,
-  // 0x04: 15+16+17 - 3 = 45), and objects 0..5 are written as they were read
+  // the old copies started), and objects 0..5 are written as they were read. The slim targets (the stand-ins' own counts
+  // minus the node count: 0x02 6+..+14 - 9 = 81, 0x04 15+16+17 - 3 = 45) are NOT exercised here: both exceed the
+  // vertex count at H_LO, so h stays at H_LO and slim equals full (target_no_minus is caught by neg_target and dense)
   CheckAddBoth("self");
   const add::AddCase* c = add::FindAdd("self");
   const auto f = c ? add::FilesOf(*c) : add::Files{};
@@ -3165,6 +3215,22 @@ static void TestAddRefusals() {
   };
   for (const char* n : {"neg_target", "zero_target", "no_tex", "obj_count", "tmpl_bad", "empty_g2", "short_mesh"})
     CheckAddBoth(n);
+  // fix round 1 (review findings 1, 2, 3, 6), each by its text:
+  for (const char* n : {"lost2", "inf_pos", "nrm_short_rot", "id_overflow"}) CheckAddBoth(n);
+  // 2: two lost nodes in first-fed order (13, fed 3 triangles by O0 and O4, before 9); by id the text would name node 9 and [9, 13]
+  CHECK(AddRow("lost2/slim") ==
+        "REFUSED lost2: copy 0x02: node 13 had 3 triangles before the merge and none after (nodes [13, 9])");
+  // 1: merge's own OverflowError passes unwrapped (Python: RAISED OverflowError, no "<name>: copy 0x02:" prefix)
+  const std::string inf_what = what_of("inf_pos", CopyMode::kSlim);
+  CHECKF(inf_what.rfind("OverflowError", 0) == 0 && inf_what.find("inf_pos: copy 0x02:") == std::string::npos, "%s",
+         inf_what.c_str());
+  CHECK(AddRow("inf_pos/full").rfind("tpr=", 0) == 0);
+  // 6: a short normal on a rotated node: _to_local's IndexError (the unrotated case stays struct.error, nrm_short)
+  CHECKF(what_of("nrm_short_rot", CopyMode::kFull) == "IndexError: tuple index out of range", "%s",
+         what_of("nrm_short_rot", CopyMode::kFull).c_str());
+  // 3: a first copy id of 256: convert.t2_bytes' assert, as Python's text
+  CHECKF(what_of("id_overflow", CopyMode::kFull) == "AssertionError: ('type-2 entry out of range', '0x9002', 256)", "%s",
+         what_of("id_overflow", CopyMode::kFull).c_str());
   CHECK(AddRow("zero_target/slim") ==
         "REFUSED zero_target: copy 0x02: node 6 had 2 triangles before the merge and none after (nodes [6])");
   CHECK(AddRow("neg_target/slim") == "REFUSED neg_target: copy 0x02: count 0 at H_HI = 1.0 exceeds target -9");

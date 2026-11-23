@@ -185,6 +185,9 @@ std::vector<Built> WriteLod(const Suit& suit, const core::Model& ref, const Layo
         const ScanPayload& py = sc.payload[pl];
         LVert lv;
         lv.p = ToLocal(p, frame, false);
+        // lod_chain._to_local on a short normal tuple: a rotated frame reads q[2] (IndexError here, before the vertex
+        // limit and _record); an unrotated one returns the short tuple and the pack below refuses it (struct.error)
+        if (!(frame.dev < 1e-6) && py.nrm_n < 3) Fail("IndexError: tuple index out of range");
         lv.n = ToLocal(py.nrm, frame, true);
         lv.uv = py.uv;
         lv.nn = py.nrm_n;
@@ -233,7 +236,7 @@ std::vector<Built> WriteLod(const Suit& suit, const core::Model& ref, const Layo
     }
     Built bt;
     tpr::Decl dcl;
-    dcl.head = {0, 1, 0, static_cast<uint32_t>(ib.size()), 4, static_cast<uint32_t>(lverts.size()), 1, 0, 0, 0, 0, 0};
+    dcl.head = {0, 1, 0, be::CheckU32(ib.size()), 4, static_cast<uint32_t>(lverts.size()), 1, 0, 0, 0, 0, 0};
     dcl.elems = {tpr::DeclElem{0, 0, kF3, 0, 0, 0, 0}, tpr::DeclElem{0, 12, kF3, 0, 3, 0, 0},
                  tpr::DeclElem{0, 24, kF2, 0, 5, 0, 0}, tpr::DeclElem{0xFF, 0, 0xFFFFFFFFu, 0, 0, 0, 0}};
     {
@@ -295,7 +298,7 @@ std::vector<Built> WriteShadow(const Suit& suit, const core::Model& ref, const L
       for (double v : q) PutF32(vb, v);
     Built bt;
     tpr::Decl dcl;
-    dcl.head = {0, 1, 0, static_cast<uint32_t>(ib.size()), 2, static_cast<uint32_t>(pos.size()), 1, 0, 0, 0, 0, 0};
+    dcl.head = {0, 1, 0, be::CheckU32(ib.size()), 2, static_cast<uint32_t>(pos.size()), 1, 0, 0, 0, 0, 0};
     dcl.elems = {tpr::DeclElem{0, 0, kF3, 0, 0, 0, 0}, tpr::DeclElem{0xFF, 0, 0xFFFFFFFFu, 0, 0, 0, 0}};
     {
       Writer w;
@@ -404,7 +407,7 @@ std::vector<MapGroup> NewMap(const Suit& suit, const core::Model& ref, const Lay
     for (const auto& [c, i] : cg.rows) {
       const int64_t nid = cg.new_id.at(i);
       // convert.t2_bytes' assert on the entry (an id past one byte); the code came from the parsed map
-      if (nid > 0xFF) Fail("('type-2 entry out of range', '" + Hex(c) + "', " + Dec(nid) + ")");
+      if (nid > 0xFF) Fail("AssertionError: ('type-2 entry out of range', '" + Hex(c) + "', " + Dec(nid) + ")");
       bg.items.emplace_back(c, static_cast<uint8_t>(nid));
     }
     out.push_back(std::move(bg));
