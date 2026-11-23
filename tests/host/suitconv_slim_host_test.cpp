@@ -16,14 +16,22 @@
 // ids_from_own_count, heaviest_tie_lowest_bone, first_vertex_after_swap, strip_tris_restart,
 // corner_adds_world_translation, world_mats_compensated, t1_first_row_per_code, neck_n2, kind2_skips_untextured,
 // matsrc_first_mesh, to_local_compensated, frame_dev_threshold, vids_one_to_one, key_fields_separate,
-// index_slice_clamps, out_of_range_refuses, kind4_payload_has_no_attributes, scan_refusals. `--bench` prints the scan's
-// time on a synthetic suit of about 25000 triangles. Last line: "PASSED: N checks, 0 failures" or "FAILED: ...".
+// index_slice_clamps, out_of_range_refuses, kind4_payload_has_no_attributes, scan_refusals; the writers and the assembly
+// (Task 6, doa4_suitconv_slimwrite.cpp): same_pass_keys_keep_order, fusion_by_vid_and_position,
+// vertex_order_by_first_appearance, reflection_frame_rotates_only_past_1e-6, shadow_minus_joint, bounds_signed_zero_tie,
+// bounds_radius_compensated, placeholder_bytes, placeholder_texture_from_merged_order, collapse_refused,
+// full_mode_never_refuses, map_rule_i1, kind_order_follows_marker_order, buffers_at_4k, user0_recomputed,
+// ids_out_of_step_refused, twice_equal, self_reference, nrm_uv_short_refused, vertex_limit_edges,
+// slim_copies_refusal_contract, add_refusals, add_rows. `--bench` prints the scan's time and AddCopies' (slim mode) on a
+// synthetic suit of about 25000 triangles. Last line: "PASSED: N checks, 0 failures" or "FAILED: ...".
 
 #include "../../src/doa4_suitconv_slim.h"
 #include "slim_synth.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -2176,6 +2184,1021 @@ static void TestScanRefusals() {
   CHECKF(trows == scan::ToLocalCases().size(), "to_local rows %zu", trows);
 }
 
+// ---------------------------------------------------------------- writers and assembly (Task 6, doa4_suitconv_slimwrite.cpp)
+// Every case is a scan scene (above) whose reference gives each copy object one decl of `count` vertices (the slim
+// target is the group's count sum minus its node count) and the first group-0x02 object a mesh of the native 2-stage
+// shape. Each case is dumped (--dump DIR writes DIR/add/<case>.tpr/.cat/.ref.tpr/.ref.cat, <case>.hook for a test-hook
+// case, plus DIR/add/nodeverts.txt and DIR/add/bounds.txt) and run through the Python tool:
+//   py -3 -I tests/host/slim_expect.py --add <doax2_work>/physics_spike/scripts DIR/add
+// whose rows are kAddExpected, kNodeVertsExpected and kBoundsExpected below (pasted verbatim). A row is
+// "tpr=<SHA-1>:<bytes> cat=<SHA-1>:<bytes>" of add_copies' output, "REFUSED <SlimError text>" or "RAISED" (any other
+// raise; Python names its type in a comment line), per case and mode (<case>/full, <case>/slim).
+namespace add {
+
+using scan::DeclDef;
+using scan::NodeDef;
+using scan::ObjDef;
+using scan::Rows;
+using scan::Scene;
+using scan::V;
+using MS = synth::MeshSpec;
+
+// SHA-1 (FIPS 180-4), for the rows' output hashes
+static std::string Sha1Hex(const Bytes& msg) {
+  uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+  Bytes m = msg;
+  const uint64_t bits = static_cast<uint64_t>(msg.size()) * 8;
+  m.push_back(0x80);
+  while (m.size() % 64 != 56) m.push_back(0);
+  for (int i = 7; i >= 0; --i) m.push_back(static_cast<uint8_t>(bits >> (8 * i)));
+  const auto rol = [](uint32_t x, int n) { return (x << n) | (x >> (32 - n)); };
+  for (size_t off = 0; off < m.size(); off += 64) {
+    uint32_t w[80];
+    for (int i = 0; i < 16; ++i)
+      w[i] = (uint32_t(m[off + 4 * i]) << 24) | (uint32_t(m[off + 4 * i + 1]) << 16) | (uint32_t(m[off + 4 * i + 2]) << 8) |
+             uint32_t(m[off + 4 * i + 3]);
+    for (int i = 16; i < 80; ++i) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    for (int i = 0; i < 80; ++i) {
+      uint32_t f, k;
+      if (i < 20) {
+        f = (b & c) | (~b & d), k = 0x5A827999u;
+      } else if (i < 40) {
+        f = b ^ c ^ d, k = 0x6ED9EBA1u;
+      } else if (i < 60) {
+        f = (b & c) | (b & d) | (c & d), k = 0x8F1BBCDCu;
+      } else {
+        f = b ^ c ^ d, k = 0xCA62C1D6u;
+      }
+      const uint32_t t = rol(a, 5) + f + e + k + w[i];
+      e = d, d = c, c = rol(b, 30), b = a, a = t;
+    }
+    h[0] += a, h[1] += b, h[2] += c, h[3] += d, h[4] += e;
+  }
+  char buf[48];
+  std::snprintf(buf, sizeof buf, "%08x%08x%08x%08x%08x", h[0], h[1], h[2], h[3], h[4]);
+  return buf;
+}
+
+struct AddCase {
+  std::string name;
+  Scene sc;
+  int count = 40;          // decl head word 5 of every reference copy object
+  bool g4_first = false;   // the reference's map holds group 0x04 before group 0x02
+  bool self = false;       // the suit carries stand-in copies (sc.g2 / sc.g4 over its own ids) and is its own reference
+  bool hook_swap = false;  // test hook: the last two copy nodes of Layout::allnodes swapped
+  bool tmpl_bad = false;   // the first group-0x02 object's mesh is NOT of the 2-stage shape (0x100 bytes, one stage)
+};
+
+// The reference's node ids made equal to their list positions (add_copies reads the reference's object k as node id k,
+// ref.geo[i] for a group id i, as real files are laid out): parents, group rows and extra groups follow.
+static void Renumber(Scene& sc) {
+  std::map<int64_t, int64_t> to;
+  for (size_t k = 0; k < sc.ref_nodes.size(); ++k) to[sc.ref_nodes[k].id] = static_cast<int64_t>(k);
+  for (NodeDef& n : sc.ref_nodes) {
+    n.id = to.at(n.id);
+    if (n.parent_id >= 0) n.parent_id = to.at(n.parent_id);
+  }
+  for (Rows* rows : {&sc.ref_main, &sc.g2, &sc.g4})
+    for (auto& r : *rows) r.second = static_cast<uint8_t>(to.at(r.second));
+  for (auto& g : sc.extra_groups)
+    for (auto& r : g.items) r.second = static_cast<uint8_t>(to.at(r.second));
+}
+
+// The scan base with one more shadow row (group 0x04 gains 0x9008 on a node under its root, a channel no suit node
+// has, so shadow node 18 is never fed: its placeholder), the reference renumbered by position: main 0..5, copies (scan
+// ids 20..33) 6..19 (6 root of 0x02 with 7 (0x9003), 8 (0x9004, under 7), 9 (0x9005, rotated 90 degrees), 10 (0x9006,
+// small rotation), 11 (0x9008), 12 (0x9003 deeper, under 8), 13 and 14 (0x9101); 15 in no group; 16 root of 0x04 with
+// 17 (0x9003), 18 (0x9005), 19 (0x9008)). New ids: 0x02 6..14 (equal), 0x04 16..19 -> 15..18.
+static Scene AddBase(const std::function<void(Scene&)>& before_renumber = nullptr) {
+  Scene sc = scan::Base();
+  sc.ref_nodes.push_back({33, 30, 0.1, 0.0, 0.2});
+  sc.g4.push_back({0x9008, 33});
+  if (before_renumber) before_renumber(sc);
+  Renumber(sc);
+  return sc;
+}
+
+// the reference of a case: scan::RefModel's, every copy object given one decl of `count` vertices and one mesh; the
+// first (lowest id) group-0x02 object's mesh is the native 2-stage shape (0x140 bytes, stages (0, 0, 0x99), (1, 1, 0x78))
+static synth::Model RefOf(const AddCase& c) {
+  synth::Model m = scan::RefModel(c.sc);
+  std::set<int64_t> g2, g4;
+  for (const auto& r : c.sc.g2) g2.insert(r.second);
+  for (const auto& r : c.sc.g4) g4.insert(r.second);
+  const int64_t first2 = g2.empty() ? -1 : *g2.begin();
+  for (size_t k = 0; k < c.sc.ref_nodes.size(); ++k) {
+    const int64_t id = c.sc.ref_nodes[k].id;
+    if (!g2.count(id) && !g4.count(id)) continue;
+    synth::Object o{static_cast<uint32_t>(k), static_cast<uint32_t>(k), 0, 0, 0, 0};
+    o.decls = {synth::DeclSpec{0, 0, static_cast<uint32_t>(c.count), 3, 12, {tp::DeclElem{0, 0, 0x2A23B9, 0, 0, 0, 0}}}};
+    MS ms{.decl = 0, .istart = 0, .icount = 3, .tex = 0x99};
+    if (id == first2 && !c.tmpl_bad) ms.size = 0x140, ms.nstages = 2;
+    o.meshes = {ms};
+    m.objects[k] = o;
+  }
+  if (c.g4_first) {
+    auto g = m.groups;  // main, 0x02, state, 0x04 -> main, 0x04, state, 0x02
+    std::swap(g[1], g[3]);
+    m.SetGroups(g);
+  }
+  return m;
+}
+
+struct Files {
+  Bytes tpr, cat, ref_tpr, ref_cat;
+};
+static Files FilesOf(const AddCase& c) {
+  if (c.self) {
+    synth::Model m = scan::SuitModel(c.sc);
+    // read_suit strips the stand-ins by their buffer spans, which must start and end on 4 KiB boundaries: every
+    // buffer from the copies' (decl 7 on) is moved to its own 4 KiB boundary
+    uint32_t at = static_cast<uint32_t>(tp::Al(m.data_end, 0x1000)), end = m.data_end;
+    for (size_t k = 7; k < m.vbufs.size(); ++k)
+      for (synth::Buf* b : {&m.vbufs[k], &m.ibufs[k]}) {
+        b->base = at;
+        end = at + b->size;
+        at = static_cast<uint32_t>(tp::Al(end, 0x1000));
+      }
+    m.SetDataEnd(static_cast<uint32_t>(tp::Al(end, 16)));
+    m.SetGroups({synth::Main(c.sc.main), synth::Group(2, c.sc.g2), synth::State(0x10, {{0x9001, 0}}),
+                 synth::Group(4, c.sc.g4)});
+    const Bytes t = m.MakeTpr(), k = m.MakeCat();
+    return {t, k, t, k};
+  }
+  const synth::Model s = scan::SuitModel(c.sc), r = RefOf(c);
+  return {s.MakeTpr(), s.MakeCat(), r.MakeTpr(), r.MakeCat()};
+}
+
+static void SwapLastTwo(sl::Layout& lay) {
+  const size_t n = lay.allnodes.size();
+  if (n >= 2) std::swap(lay.allnodes[n - 1], lay.allnodes[n - 2]);
+}
+
+static sl::Result RunOrThrow(const AddCase& c, sl::CopyMode mode) {
+  const Files f = FilesOf(c);
+  sl::TestHooks h;
+  if (c.hook_swap) h.layout = &SwapLastTwo;
+  return sl::AddCopies(c.name, f.tpr, f.cat, f.ref_tpr, f.ref_cat, mode, h);
+}
+
+static std::string RowOf(const sl::Result& r) {
+  return "tpr=" + Sha1Hex(r.tpr) + ":" + std::to_string(r.tpr.size()) + " cat=" + Sha1Hex(r.cat) + ":" +
+         std::to_string(r.cat.size());
+}
+
+// the row of one case and mode; *out gets the output when built
+static std::string Run(const AddCase& c, sl::CopyMode mode, std::optional<sl::Result>* out = nullptr) {
+  try {
+    sl::Result r = RunOrThrow(c, mode);
+    const std::string row = RowOf(r);
+    if (out) *out = std::move(r);
+    return row;
+  } catch (const std::exception& e) {
+    return scan::Refusal(c.name, e);
+  }
+}
+
+// O0 replaced: 60 meshes on one decl, one triangle each on its own three vertices; mesh i has texture 0x100 + i and
+// pass 8 when i % 6 == 5, pass 4 when i % 6 == 2, else pass 2 (40 pass-2 keys in a row of 60 on node 6)
+static Scene Keys60() {
+  Scene sc = AddBase();
+  ObjDef o;
+  DeclDef d;
+  for (uint16_t i = 0; i < 60; ++i) {
+    const double x = 0.05 * i;
+    d.verts.push_back(V({x, 0, 0}));
+    d.verts.push_back(V({x + 0.02, 0, 0}));
+    d.verts.push_back(V({x, 0.02, 0}));
+    for (uint16_t k = 0; k < 3; ++k) d.idx.push_back(static_cast<uint16_t>(3 * i + k));
+    const uint32_t pass = i % 6 == 5 ? 8 : i % 6 == 2 ? 4 : 2;
+    o.meshes.push_back(MS{.decl = 0, .istart = 3u * i, .icount = 3, .tex = 0x100u + i, .pass = pass});
+  }
+  o.decls = {d};
+  sc.objs[0] = o;
+  return sc;
+}
+// the texture order Keys60's copy object of node 6 must have: pass 2 in mesh order, then pass 4, then pass 8
+static std::vector<uint32_t> Keys60Order() {
+  std::vector<uint32_t> out;
+  for (uint32_t want : {2u, 4u, 8u})
+    for (uint32_t i = 0; i < 60; ++i)
+      if ((i % 6 == 5 ? 8u : i % 6 == 2 ? 4u : 2u) == want) out.push_back(0x100 + i);
+  return out;
+}
+
+// O0 replaced (node 6): M1 = tex 0x21, pass 8, flag 0, triangle (v0 v1 v2), traversed FIRST; M2 = tex 0x22, pass 2,
+// flag 1, triangle (v3 v1 v4). Writer order [M2, M1] (pass); v1's lowest appearance (t0, corner 1) is in M1, the LATER
+// key: vertex order v0 v1 v2 v3 v4 (first met: v3 v1 v4 v0 v2). Suit and reference node 0 at x = -0.0 and copy root 6
+// at x = 0.0, so M2's three vertices have x -0.0 (v1), 0.0 (v3), 0.0 (v4) in the copy frame: M2's bounds over its
+// vertices in ascending index (v1 first) give centre x -0.0, in first-use order (v3 first) 0.0.
+static Scene VOrder() {
+  Scene sc = AddBase();
+  sc.suit_nodes[0].tx = -0.0;
+  sc.ref_nodes[0].tx = -0.0;
+  sc.ref_nodes[6].tx = 0.0;
+  ObjDef o;
+  o.decls = {DeclDef{{V({0.25, 0, 0}), V({-0.0, 0.25, 0}), V({0.25, 0.25, 0.125}), V({0.0, 0.5, 0}), V({0.0, 0.5, 0.25})},
+                     {0, 1, 2, 3, 1, 4}}};
+  o.meshes = {MS{.decl = 0, .istart = 0, .icount = 3, .tex = 0x21, .pass = 8, .flag = 0},
+              MS{.decl = 0, .istart = 3, .icount = 3, .tex = 0x22, .pass = 2, .flag = 1}};
+  sc.objs[0] = o;
+  return sc;
+}
+
+// the frame cases: reference node 7 (0x9003 -> copy node 7, fed by O1) rotated by dev d7, node 9 (0x9005 -> node 9,
+// fed by O3) by d9 (both as rows (1, d, 0), (-d, 1, 0), (0, 0, 1), translation kept), shadow node 17 (0x9003 -> 16)
+// rotated 90 degrees about z
+static Scene Frames(double d7, double d9) {
+  Scene sc = AddBase();
+  sc.ref_nodes[7].mat = std::array<double, 16>{1, d7, 0, 0, -d7, 1, 0, 0, 0, 0, 1, 0, 0.125, 0.2, 0.3, 1};
+  sc.ref_nodes[9].mat = std::array<double, 16>{1, d9, 0, 0, -d9, 1, 0, 0, 0, 0, 1, 0, 0.0, 0.0, 0.0, 1};
+  sc.ref_nodes[17].mat = std::array<double, 16>{0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0.125, 0.2, 0.3, 1};
+  return sc;
+}
+
+// rule I1 (map_rule_i1): suit nodes 6, 7 under 0 (objects with no triangle), so the first copy id is 8; the reference
+// has at position 6 a node under the copy root (an orphan of main_chain) and at 7 a node under 0 (main_max 7), its
+// copies at 8..21 (new ids 0x02 8..16, 0x04 17..20). kept = {0..7} + {8..20} - {6}. State groups: 0x10 [0] kept;
+// 0x11 [6] dropped (orphan); 0x12 [8] dropped (8 = first, kept); 0x13 [7] kept (first - 1); a marker group 0x08 [1]
+// dropped (not a state group).
+static Scene MapI1() {
+  Scene sc = AddBase([](Scene& s) {
+    s.ref_nodes.insert(s.ref_nodes.begin() + 6, {{106, 20, 0.0, 0.0, 0.0}, {107, 0, 0.07, 0.0, 0.0}});
+    s.extra_groups = {synth::State(0x11, {{0x9001, 106}}), synth::State(0x12, {{0x9001, 20}}),
+                      synth::State(0x13, {{0x9001, 107}}), synth::Group(0x08, {{0x9001, 1}})};
+  });
+  for (int64_t id : {6, 7}) {
+    sc.suit_nodes.push_back({id, 0, 0.07 * (id - 6), 0.0, 0.0});
+    ObjDef o;
+    o.decls = {DeclDef{{V({0, 0, 0})}, {}}};
+    o.meshes = {MS{.decl = 0, .istart = 0, .icount = 0, .tex = 1}};
+    sc.objs.push_back(o);
+  }
+  return sc;
+}
+
+// O0 replaced by one strip over n vertices (n - 2 triangles), textured (tex 1) or not (0xFFFFFFFF: group 0x04 only)
+static Scene Strip(uint32_t n, bool textured) {
+  Scene sc = AddBase();
+  ObjDef o;
+  DeclDef d;
+  for (uint32_t k = 0; k < n; ++k) {
+    d.verts.push_back(V({0.01 * (k % 256), 0.01 * (k / 256), 0.001 * (k % 3)}));
+    d.idx.push_back(static_cast<uint16_t>(k));
+  }
+  o.decls = {d};
+  o.meshes = {MS{.decl = 0, .istart = 0, .icount = n, .tex = textured ? 1u : 0xFFFFFFFFu}};
+  sc.objs[0] = o;
+  return sc;
+}
+
+// the suit as its own reference: the scan base's suit plus stand-in copies at ids 6..17 (reference ids 20..28 -> 6..14,
+// 30..32 -> 15..17; 29 left out), copy object k with 6 + k vertices (one triangle), the first (id 6) of the 2-stage
+// shape; map main, 0x02, state, 0x04 over those ids
+static Scene SelfRef() {
+  const Scene b = scan::Base();
+  Scene sc = b;
+  const std::map<int64_t, int64_t> to = {{20, 6},  {21, 7},  {22, 8},  {23, 9},  {24, 10}, {25, 11},
+                                         {26, 12}, {27, 13}, {28, 14}, {30, 15}, {31, 16}, {32, 17}};
+  for (const NodeDef& n : b.ref_nodes) {
+    const auto it = to.find(n.id);
+    if (it == to.end()) continue;
+    NodeDef m = n;
+    m.id = it->second;
+    m.parent_id = n.parent_id < 0 ? -1 : to.at(n.parent_id);
+    sc.suit_nodes.push_back(m);
+  }
+  sc.g2.clear();
+  sc.g4.clear();
+  for (const auto& [c, i] : b.g2) sc.g2.push_back({c, static_cast<uint8_t>(to.at(i))});
+  for (const auto& [c, i] : b.g4) sc.g4.push_back({c, static_cast<uint8_t>(to.at(i))});
+  for (int k = 0; k < 12; ++k) {
+    ObjDef o;
+    DeclDef d;
+    for (int v = 0; v < 6 + k; ++v) d.verts.push_back(V({0.1 * v, 0.05 * k, 0.0}));
+    d.idx = {0, 1, 2};
+    o.decls = {d};
+    MS ms{.decl = 0, .istart = 0, .icount = 3, .tex = 0x50u + static_cast<uint32_t>(k)};
+    if (k == 0) ms.size = 0x140, ms.nstages = 2;
+    o.meshes = {ms};
+    sc.objs.push_back(o);
+  }
+  return sc;
+}
+
+static std::vector<AddCase> AddCases() {
+  std::vector<AddCase> v;
+  v.push_back({"base", AddBase()});
+  v.push_back({"keys60", Keys60(), 80});
+  {  // O5 replaced by a dense lattice (21 x 21 vertices 0.01 apart, 400 triangles): slim mode bisects for both groups
+     // (targets 351 and 156 against about 470 vertices) and merges cells without losing a node
+    Scene sc = AddBase();
+    ObjDef o;
+    DeclDef d;
+    for (int j = 0; j <= 20; ++j)
+      for (int i = 0; i <= 20; ++i) d.verts.push_back(V({3.0 + 0.01 * i, 0.01 * j, 0.002 * ((i + j) % 3)}));
+    for (uint16_t j = 0; j < 20; ++j)
+      for (uint16_t i = 0; i < 20; ++i) {
+        if (!d.idx.empty()) d.idx.push_back(0xFFFF);
+        const uint16_t a = static_cast<uint16_t>(21 * j + i);
+        d.idx.insert(d.idx.end(), {a, static_cast<uint16_t>(a + 1), static_cast<uint16_t>(a + 21)});
+      }
+    o.decls = {d};
+    o.meshes = {MS{.decl = 0, .istart = 0, .icount = static_cast<uint32_t>(d.idx.size()), .tex = 7}};
+    sc.objs[5] = o;
+    v.push_back({"dense", sc});
+  }
+  v.push_back({"vorder", VOrder()});
+  v.push_back({"frames", Frames(0.9e-6, 1.1e-6)});
+  v.push_back({"frames0", Frames(0.0, 0.0)});
+  {  // O0's normal element is F2 (two values): pack('>3f3f2f') gets 7 values
+    Scene sc = AddBase();
+    sc.objs[0].decls[0].elems = {tp::DeclElem{0, 0, 0x2A23B9, 0, 0, 0, 0}, tp::DeclElem{0, 12, 0x2C23A5, 0, 3, 0, 0},
+                                 tp::DeclElem{0, 24, 0x2C23A5, 0, 5, 0, 0}, tp::DeclElem{0, 32, 0x1A23A6, 0, 1, 0, 0}};
+    v.push_back({"nrm_short", sc});
+  }
+  {  // O4 (the neck, copy node 13) shrunk to a triangle of 1e-5: every grid cell holds it whole, so slim collapses it
+    Scene sc = AddBase();
+    sc.objs[4].decls[0].verts = {V({0.0004, 1.0004, 0.0004}, {0.625, 0.375, 0, 0}),
+                                 V({0.00041, 1.0004, 0.0004}, {0.625, 0.375, 0, 0}),
+                                 V({0.0004, 1.00041, 0.0004}, {0.625, 0.375, 0, 0})};
+    v.push_back({"collapse", sc});
+  }
+  v.push_back({"map_i1", MapI1()});
+  v.push_back({"g4_first", AddBase(), 40, true});
+  v.push_back({"lim2_65534", Strip(65534, true)});
+  v.push_back({"lim2_65535", Strip(65535, true)});
+  v.push_back({"lim4_65535", Strip(65535, false)});
+  v.push_back({"self", SelfRef(), 6, false, true});
+  v.push_back({"ids_step", AddBase(), 40, false, false, true});
+  // the refusal branches: a negative slim target (count 0: 0 - 9), no textured mesh (group 0x02 gets no triangle:
+  // origin's SlimError in slim mode, every node a placeholder of texture 0 in full mode), an empty group 0x02 (the
+  // report's min() raises), the template mesh of the wrong shape, a suit mesh record shorter than 0xC0 (lod_chain
+  // _record's assert), a node without an object
+  v.push_back({"neg_target", AddBase(), 0});
+  {  // target exactly 0 (count 1: 9 - 9) with only O0 textured: its two triangles lie in one cell at H_HI, so the count
+     // there is 0 <= 0 and choose_h runs on; the node is then lost (the lost-node refusal, not choose_h's)
+    Scene sc = AddBase();
+    for (size_t k = 1; k < sc.objs.size(); ++k)
+      for (auto& ms : sc.objs[k].meshes) ms.tex = 0xFFFFFFFF;
+    v.push_back({"zero_target", sc, 1});
+  }
+  {
+    Scene sc = AddBase();
+    for (auto& o : sc.objs)
+      for (auto& ms : o.meshes) ms.tex = 0xFFFFFFFF;
+    v.push_back({"no_tex", sc});
+  }
+  v.push_back({"empty_g2", AddBase([](Scene& s) { s.g2.clear(); })});
+  v.push_back({"tmpl_bad", AddBase(), 40, false, false, false, true});
+  {
+    Scene sc = AddBase();
+    sc.objs[0].meshes[0].size = 0x80;
+    v.push_back({"short_mesh", sc});
+  }
+  {
+    Scene sc = AddBase();
+    sc.suit_nodes.push_back({6, 0, 0.3, 0.0, 0.0});
+    v.push_back({"obj_count", sc});
+  }
+  return v;
+}
+static const AddCase* FindAdd(const std::string& name) {
+  static const std::vector<AddCase> cases = AddCases();
+  for (const auto& c : cases)
+    if (c.name == name) return &c;
+  return nullptr;
+}
+
+// ---- the output, parsed back (tpr::Xpr::Parse and the chunk parsers)
+struct Out {
+  tp::Xpr x;
+  std::vector<tp::ObjGeo> geo;
+  std::vector<tp::ObjInfo> info;
+  std::vector<tp::Node> hie;
+  std::vector<sl::MapGroup> map;
+};
+static std::optional<Out> Parse(const sl::Result& r) {
+  try {
+    Out o;
+    o.x = tp::Xpr::Parse(r.tpr);
+    o.geo = tp::ParseMdlGeo(o.x.res.at(1).blob);
+    o.info = tp::ParseMdlInfo(o.x.res.at(2).blob);
+    o.hie = tp::ParseHie(o.x.res.at(3).blob);
+    std::optional<uint32_t> t2;
+    for (const auto& [t, val] : tp::CatDir(r.cat))
+      if (t == 2) t2 = val;
+    if (t2) o.map = sl::ParseMap(r.cat, *t2).first;
+    return o;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+// object k's vertex buffer bytes (decl 0: head word 5 vertices of its stride) and index list; empty when absent
+static Bytes VbOf(const Out& o, size_t k) {
+  if (k >= o.geo.size() || o.geo[k].decls.empty()) return {};
+  const tp::Decl& d = o.geo[k].decls[0];
+  const auto vb = o.x.OfType(tp::MakeFourcc("VBUF"));
+  if (d.Vb() >= vb.size()) return {};
+  const auto [base, size] = tp::BufSpan(o.x.res[vb[d.Vb()]].blob);
+  (void)size;
+  const uint64_t n = uint64_t(d.head[5]) * d.Stride();
+  if (base + n > o.x.data.size()) return {};
+  return Bytes(o.x.data.begin() + base, o.x.data.begin() + base + n);
+}
+static std::vector<uint16_t> IbOf(const Out& o, size_t k) {
+  if (k >= o.geo.size() || o.geo[k].decls.empty()) return {};
+  const tp::Decl& d = o.geo[k].decls[0];
+  const auto ib = o.x.OfType(tp::MakeFourcc("IBUF"));
+  if (d.head[2] >= ib.size()) return {};
+  const auto [base, size] = tp::BufSpan(o.x.res[ib[d.head[2]]].blob);
+  (void)size;
+  std::vector<uint16_t> out;
+  for (uint32_t i = 0; i < d.head[3]; ++i) {
+    const uint64_t at = base + 2ull * i;
+    if (at + 2 > o.x.data.size()) return {};
+    out.push_back(static_cast<uint16_t>((o.x.data[at] << 8) | o.x.data[at + 1]));
+  }
+  return out;
+}
+static std::vector<float> F32s(const Bytes& b) {
+  std::vector<float> out;
+  for (size_t i = 0; i + 4 <= b.size(); i += 4)
+    out.push_back(std::bit_cast<float>((uint32_t(b[i]) << 24) | (uint32_t(b[i + 1]) << 16) | (uint32_t(b[i + 2]) << 8) |
+                                       uint32_t(b[i + 3])));
+  return out;
+}
+static uint32_t U32At(const Bytes& b, size_t o) {
+  if (o + 4 > b.size()) return 0xDEADBEEF;
+  return (uint32_t(b[o]) << 24) | (uint32_t(b[o + 1]) << 16) | (uint32_t(b[o + 2]) << 8) | uint32_t(b[o + 3]);
+}
+// the stage-0 texture of each mesh of object k (word at 0xC0 + 8 of the 0x140-byte record)
+static std::vector<uint32_t> MeshTexOf(const Out& o, size_t k) {
+  std::vector<uint32_t> out;
+  if (k >= o.geo.size()) return out;
+  for (const Bytes& m : o.geo[k].meshes) out.push_back(U32At(m, 0xC8));
+  return out;
+}
+// a built case's parsed output (nullopt when refused or unparsable)
+static std::optional<Out> OutOf(const std::string& name, sl::CopyMode mode) {
+  const AddCase* c = FindAdd(name);
+  if (!c) return std::nullopt;
+  std::optional<sl::Result> r;
+  Run(*c, mode, &r);
+  if (!r) return std::nullopt;
+  return Parse(*r);
+}
+
+// ---- _node_verts on hand-built merged lists (the 0.0 / -0.0 tie no add_copies input reaches: a cell mean is a sum
+// from +0.0, never -0.0, and identity mode gives one vid one position)
+struct NvVert {
+  uint32_t vid;
+  double x, y, z;
+  uint32_t tri;
+  uint8_t corner;
+};
+struct NvCase {
+  const char* name;
+  std::vector<std::vector<NvVert>> keys;
+};
+static std::vector<NvCase> NvCases() {
+  return {
+      // v5 in both keys at x 0.0 (key 0, t3 c0) and -0.0 (key 1, t1 c2): one vertex, kept from key 1 (x -0.0, lower
+      // appearance); by bits: two vertices
+      {"signed_zero",
+       {{{5, 0.0, 1, 2, 3, 0}, {6, 1, 1, 1, 3, 1}, {7, 2, 2, 2, 3, 2}},
+        {{8, 3, 3, 3, 1, 0}, {9, 4, 4, 4, 1, 1}, {5, -0.0, 1, 2, 1, 2}}}},
+      // v2 in key 0 at t5 c1 and key 1 at t2 c1: order by the lowest appearance v4 v2 v5 v1 v3 (insertion: v1 v2 v3 v4
+      // v5; first-met appearance: v4 v5 v1 v2 v3)
+      {"lowest_later_key",
+       {{{1, 0, 0, 0, 5, 0}, {2, 1, 0, 0, 5, 1}, {3, 0, 1, 0, 5, 2}},
+        {{4, 0, 0, 1, 2, 0}, {2, 1, 0, 0, 2, 1}, {5, 1, 1, 1, 2, 2}}}},
+      // one vid at two positions: two vertices
+      {"vid_two_positions", {{{1, 0, 0, 0, 0, 0}, {2, 1, 0, 0, 0, 1}}, {{1, 0, 0, 0.5, 1, 0}, {3, 1, 1, 0, 1, 1}}}},
+  };
+}
+struct NvBuilt {
+  sl::Merged merged;
+  std::vector<sl::ScanPayload> payload;
+  std::vector<uint32_t> keys;
+};
+static NvBuilt NvBuild(const NvCase& c) {
+  NvBuilt b;
+  for (size_t k = 0; k < c.keys.size(); ++k) {
+    sl::MergedKey mk;
+    mk.key = static_cast<uint32_t>(k);
+    for (const NvVert& v : c.keys[k]) {
+      mk.pos.push_back({v.x, v.y, v.z});
+      mk.payload.push_back(static_cast<uint32_t>(b.payload.size()));
+      sl::ScanPayload p;
+      p.vid = v.vid;
+      p.tri = v.tri;
+      p.corner = v.corner;
+      b.payload.push_back(p);
+    }
+    b.merged.push_back(mk);
+    b.keys.push_back(static_cast<uint32_t>(k));
+  }
+  return b;
+}
+// slim_expect.py nodeverts_line()
+static std::string NvLine(const NvCase& c) {
+  const NvBuilt b = NvBuild(c);
+  sl::NodeVerts nv;
+  try {
+    nv = sl::NodeVertsOf(b.keys, b.merged, b.payload);
+  } catch (const std::exception&) {
+    return "RAISED";
+  }
+  std::string s = "V";
+  for (size_t i = 0; i < nv.verts.size(); ++i) {
+    const auto& [p, pl] = nv.verts[i];
+    const sl::ScanPayload& py = b.payload[pl];
+    s += (i ? ";" : "") + std::to_string(py.vid) + "," + scan::Hex16(scan::Bits(p[0])) + "," + scan::Hex16(scan::Bits(p[1])) +
+         "," + scan::Hex16(scan::Bits(p[2])) + "," + std::to_string(py.tri) + "." + std::to_string(py.corner);
+  }
+  s += " R";
+  for (size_t k = 0; k < nv.remap.size(); ++k) {
+    if (k) s += "|";
+    for (size_t i = 0; i < nv.remap[k].size(); ++i) s += (i ? "," : "") + std::to_string(nv.remap[k][i]);
+  }
+  return s;
+}
+
+// ---- bounds (core::Bounds, the writer's): test_slim_addon.py check_bounds_local's five points, both orders; and two
+// points whose radius is sqrt(m^2 + a^2 + a^2) with m = 1.5 + 2^-24 (an f32 midpoint, lower neighbour 1.5 even; m^2
+// exact, ulp 2^-51) and a = 1.2e-8 (a^2 = 1.44e-16, under half that ulp, the two together over it): a plain sum loses
+// both, sqrt gives m and packs to 1.5 (tie to even); the builtin sum keeps them (m^2 + 1 ulp), sqrt rounds above m and
+// packs 1.5 + 2^-23
+struct BoundsCase {
+  const char* name;
+  std::vector<std::array<double, 3>> pts;
+};
+static std::vector<BoundsCase> BoundsCases() {
+  const std::vector<std::array<double, 3>> five = {{-0.0, 0.225, 0.04999999999999999},
+                                                   {0.0, 1.755713, 0.9032285497482799},
+                                                   {-0.0, -0.07500000000000001, -0.65},
+                                                   {0.0, -1.505713, -1.40322854974828},
+                                                   {0.0, 0.125, -0.2}};
+  const double m = 1.5 + std::ldexp(1.0, -24), a = 1.2e-8;
+  return {{"signed_zero_fwd", five},
+          {"signed_zero_rev", {five.rbegin(), five.rend()}},
+          {"radius_compensated", {{m, a, a}, {-m, -a, -a}}}};
+}
+static std::string BoundsLine(const BoundsCase& c) {
+  try {
+    return scan::HexBytes(doa4::suitconv::core::Bounds(c.pts));
+  } catch (const std::exception&) {
+    return "RAISED";
+  }
+}
+// the bounds rule with a PLAIN left-to-right radius sum (the wrong version of bounds_radius_compensated)
+static Bytes BoundsPlainSum(const std::vector<std::array<double, 3>>& pts) {
+  Bytes b = doa4::suitconv::core::Bounds(pts);
+  std::array<double, 3> lo = pts[0], hi = pts[0], ctr{};
+  for (const auto& p : pts)
+    for (int c = 0; c < 3; ++c) lo[c] = p[c] < lo[c] ? p[c] : lo[c], hi[c] = p[c] > hi[c] ? p[c] : hi[c];
+  for (int c = 0; c < 3; ++c) ctr[c] = (lo[c] + hi[c]) / 2;
+  double r = 0;
+  for (size_t i = 0; i < pts.size(); ++i) {
+    double s = 0;
+    for (int c = 0; c < 3; ++c) s = s + (pts[i][c] - ctr[c]) * (pts[i][c] - ctr[c]);
+    const double v = std::sqrt(s);
+    if (i == 0 || v > r) r = v;
+  }
+  const uint32_t rb = std::bit_cast<uint32_t>(static_cast<float>(r));
+  for (int k = 0; k < 4; ++k) b[12 + k] = static_cast<uint8_t>(rb >> (24 - 8 * k));
+  return b;
+}
+
+}  // namespace add
+
+static uint32_t U32Bits(const Bytes& b, size_t o) { return add::U32At(b, o); }
+
+// Pasted verbatim from (2026-11-23):
+//   tests/host/run_suitconv_slim_test.bat --dump DIR
+//   py -3 -I tests/host/slim_expect.py --add <doax2_work>/physics_spike/scripts DIR/add
+static const Expected kAddExpected[] = {
+    {"base/full", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"base/slim", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"collapse/full", "tpr=4661aef1bc4b50be756dc5a149cc15bfe4f90e27:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"collapse/slim", "REFUSED collapse: copy 0x02: node 13 had 1 triangles before the merge and none after (nodes [13])"},
+    {"dense/full", "tpr=3e9eccf869a1e2f7f48515ad74c145110457a07c:176128 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"dense/slim", "tpr=a31f233617f30aff90303e4942f0710d007a886b:163840 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"empty_g2/full", "RAISED"},
+    {"empty_g2/slim", "RAISED"},
+    {"frames/full", "tpr=3bcc7f2d50f1bfe6c3f76967ea3ec726c898dfb9:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"frames/slim", "tpr=3bcc7f2d50f1bfe6c3f76967ea3ec726c898dfb9:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"frames0/full", "tpr=6698c6887607a3fccd52307d4218ab96ff39fa97:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"frames0/slim", "tpr=6698c6887607a3fccd52307d4218ab96ff39fa97:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"g4_first/full", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=68fbba35913ea2dcf6fc2a84bc150190075def70:224"},
+    {"g4_first/slim", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=68fbba35913ea2dcf6fc2a84bc150190075def70:224"},
+    {"ids_step/full", "REFUSED ids_step: copy ids out of step with the objects"},
+    {"ids_step/slim", "REFUSED ids_step: copy ids out of step with the objects"},
+    {"keys60/full", "tpr=c044984972c4fe88e3f2de2203280ecb10311f6a:192512 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"keys60/slim", "tpr=c044984972c4fe88e3f2de2203280ecb10311f6a:192512 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"lim2_65534/full", "tpr=7439497e619147e5c713e3096849d2924f56e98e:7327744 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"lim2_65534/slim", "REFUSED lim2_65534: copy 0x04: node 15 had 65532 triangles before the merge and none after (nodes [15])"},
+    {"lim2_65535/full", "REFUSED lim2_65535: copy node 6 over 65534 vertices"},
+    {"lim2_65535/slim", "REFUSED lim2_65535: copy 0x04: node 15 had 65533 triangles before the merge and none after (nodes [15])"},
+    {"lim4_65535/full", "REFUSED lim4_65535: shadow node 15 over 65534 vertices"},
+    {"lim4_65535/slim", "REFUSED lim4_65535: copy 0x04: node 15 had 65533 triangles before the merge and none after (nodes [15])"},
+    {"map_i1/full", "tpr=e67ad05eb498bcea71b06b049f62449e52316c31:139264 cat=e752900cadca5dc3ceffaeadb35476b8c41890c1:224"},
+    {"map_i1/slim", "tpr=e67ad05eb498bcea71b06b049f62449e52316c31:139264 cat=e752900cadca5dc3ceffaeadb35476b8c41890c1:224"},
+    {"neg_target/full", "tpr=27d7cc610f3827665431ad60246cd506ab694c71:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"neg_target/slim", "REFUSED neg_target: copy 0x02: count 0 at H_HI = 1.0 exceeds target -9"},
+    {"no_tex/full", "tpr=e584c194325ef11efd8791b01877b7b5eb3f226c:131072 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"no_tex/slim", "REFUSED no_tex: copy 0x02: origin: no triangles"},
+    {"nrm_short/full", "RAISED"},
+    {"nrm_short/slim", "RAISED"},
+    {"obj_count/full", "REFUSED obj_count: 6 objects for 7 nodes"},
+    {"obj_count/slim", "REFUSED obj_count: 6 objects for 7 nodes"},
+    {"self/full", "tpr=827d0705f45a2d189b8f882384a91a4e78739236:135168 cat=9ebc22d3e9be63981f5bbbfea39ef001a51cd270:224"},
+    {"self/slim", "tpr=827d0705f45a2d189b8f882384a91a4e78739236:135168 cat=9ebc22d3e9be63981f5bbbfea39ef001a51cd270:224"},
+    {"short_mesh/full", "RAISED"},
+    {"short_mesh/slim", "RAISED"},
+    {"tmpl_bad/full", "REFUSED tmpl_bad: reference group-0x02 mesh not of the native 2-stage shape"},
+    {"tmpl_bad/slim", "REFUSED tmpl_bad: reference group-0x02 mesh not of the native 2-stage shape"},
+    {"vorder/full", "tpr=a4ea7f06c99d7ae71316140a48bb5b83fcacb292:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"vorder/slim", "tpr=c76e6a81339b2d04f1ba4b9f5d9d304943927d86:135168 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"zero_target/full", "tpr=103dd487cd6e4bb9f3476be6d881bd0525ec5033:131072 cat=1fb52a9c36a8408cdca422967b4d4c87492d416a:224"},
+    {"zero_target/slim", "REFUSED zero_target: copy 0x02: node 6 had 2 triangles before the merge and none after (nodes [6])"},
+};
+static const Expected kNodeVertsExpected[] = {
+    {"signed_zero", "V8,4008000000000000,4008000000000000,4008000000000000,1.0;9,4010000000000000,4010000000000000,4010000000000000,1.1;5,8000000000000000,3ff0000000000000,4000000000000000,1.2;6,3ff0000000000000,3ff0000000000000,3ff0000000000000,3.1;7,4000000000000000,4000000000000000,4000000000000000,3.2 R2,3,4|0,1,2"},
+    {"lowest_later_key", "V4,0000000000000000,0000000000000000,3ff0000000000000,2.0;2,3ff0000000000000,0000000000000000,0000000000000000,2.1;5,3ff0000000000000,3ff0000000000000,3ff0000000000000,2.2;1,0000000000000000,0000000000000000,0000000000000000,5.0;3,0000000000000000,3ff0000000000000,0000000000000000,5.2 R3,1,4|0,1,2"},
+    {"vid_two_positions", "V1,0000000000000000,0000000000000000,0000000000000000,0.0;2,3ff0000000000000,0000000000000000,0000000000000000,0.1;1,0000000000000000,0000000000000000,3fe0000000000000,1.0;3,3ff0000000000000,3ff0000000000000,0000000000000000,1.1 R0,1|2,3"},
+};
+static const Expected kBoundsExpected[] = {
+    {"signed_zero_fwd", "800000003e000000be8000003fffa725800000003e000000be8000003f800000000000003fd0bb343f939cfe00000000"},
+    {"signed_zero_rev", "000000003e000000be8000003fffa725000000003e000000be8000003f800000000000003fd0bb343f939cfe00000000"},
+    {"radius_compensated", "0000000000000000000000003fc000010000000000000000000000003f8000003fc00000324e288f324e288f00000000"},
+};
+
+static const char* AddExpectedFor(const std::string& name, const Expected* rows, size_t n) {
+  for (size_t i = 0; i < n; ++i)
+    if (name == rows[i].name) return rows[i].summary;
+  return nullptr;
+}
+template <size_t N>
+static const char* RowFor(const Expected (&rows)[N], const std::string& name) {
+  return AddExpectedFor(name, rows, N);
+}
+// one case and mode against its Python row
+static void CheckAdd(const std::string& name, sl::CopyMode mode) {
+  const std::string key = name + (mode == sl::CopyMode::kFull ? "/full" : "/slim");
+  const add::AddCase* c = add::FindAdd(name);
+  const char* want = RowFor(kAddExpected, key);
+  const std::string got = c ? add::Run(*c, mode) : std::string("(no case)");
+  CHECKF(want != nullptr && got == want, "%s: got \"%s\" want \"%s\"", key.c_str(), got.c_str(), want ? want : "(none)");
+}
+static void CheckAddBoth(const std::string& name) {
+  CheckAdd(name, sl::CopyMode::kFull);
+  CheckAdd(name, sl::CopyMode::kSlim);
+}
+// a Python row's text (for a refusal check that names its text)
+static std::string AddRow(const std::string& key) {
+  const char* r = RowFor(kAddExpected, key);
+  return r ? r : "(none)";
+}
+
+using sl::CopyMode;
+
+static void TestSamePassKeysKeepOrder() {
+  // contract (a): node 6 holds 60 keys (40 of pass 2, 10 of 4, 10 of 8, interleaved); mesh order = pass, then merged
+  // order. Wrong version: std::sort (not stable past its insertion-sort cut), which may reorder equal passes.
+  CheckAddBoth("keys60");
+  for (CopyMode m : {CopyMode::kFull, CopyMode::kSlim}) {
+    const auto o = add::OutOf("keys60", m);
+    const auto tex = o ? add::MeshTexOf(*o, 6) : std::vector<uint32_t>{};
+    CHECKF(tex == add::Keys60Order(), "mode %d: %zu meshes", int(m), tex.size());
+  }
+}
+
+static void TestFusionByVidAndPosition() {
+  // contract (c) identity: base O3 draws decl 0 with two keys (tex 4, tex 5) over the same three vertices; in full mode
+  // node 9's object has 3 (decl 0, fused) + 3 (decl 1) = 6 vertices, not 9. Wrong version (no fusion across keys): 9.
+  CheckAddBoth("base");
+  const auto o = add::OutOf("base", CopyMode::kFull);
+  CHECKF(o && o->geo.size() > 9 && o->geo[9].decls.size() == 1 && o->geo[9].decls[0].head[5] == 6, "node 9 vertices %u",
+         o && o->geo.size() > 9 && !o->geo[9].decls.empty() ? o->geo[9].decls[0].head[5] : 0u);
+  // 0.0 and -0.0 at one vid: one vertex, kept from the lower appearance (x -0.0). By bits: two.
+  for (const auto& c : add::NvCases()) {
+    const char* want = RowFor(kNodeVertsExpected, c.name);
+    const std::string got = add::NvLine(c);
+    CHECKF(want && got == want, "%s: got \"%s\" want \"%s\"", c.name, got.c_str(), want ? want : "(none)");
+  }
+  sl::NodeVerts nv;  // stays empty when NodeVertsOf raises (one failed check, not the end of the group)
+  try {
+    const add::NvBuilt b0 = add::NvBuild(add::NvCases()[0]);
+    nv = sl::NodeVertsOf(b0.keys, b0.merged, b0.payload);
+  } catch (const std::exception&) {
+  }
+  CHECKF(nv.verts.size() == 5 && std::signbit(nv.verts[2].first[0]) && nv.remap.size() == 2 && nv.remap[0][0] == 2 &&
+             nv.remap[1][2] == 2,
+         "%zu vertices", nv.verts.size());
+  // a NaN position is refused (Python's answer there depends on object identity)
+  add::NvCase nan_case{"nan", {{{1, std::numeric_limits<double>::quiet_NaN(), 0, 0, 0, 0}, {2, 1, 0, 0, 0, 1}}}};
+  const add::NvBuilt nb = add::NvBuild(nan_case);
+  std::string what;
+  try {
+    sl::NodeVertsOf(nb.keys, nb.merged, nb.payload);
+  } catch (const std::exception& e) {
+    what = e.what();
+  }
+  CHECKF(what.rfind("ValueError: a NaN position", 0) == 0, "%s", what.c_str());
+}
+
+static void TestVertexOrderByFirstAppearance() {
+  // contract (c) order: vorder's node 6 writes [M2 (v3 v1 v4), M1 (v0 v1 v2)]; v1's lowest appearance is in M1, the
+  // later key. Output vertex order v0 v1 v2 v3 v4 (local (x, y): (0.25, 0), (-0.0, 0.25), (0.25, 0.25), (0, 0.5),
+  // (0, 0.5): node 0's world y 1.0 minus the frame's 1.0); first met gives v3 v1 v4 v0 v2, the first-met appearance
+  // v0 v2 v3 v1 v4. Indices: M2 3 1 4, then M1 0 1 2 (no restart between meshes).
+  CheckAddBoth("vorder");
+  const auto o = add::OutOf("vorder", CopyMode::kFull);
+  const auto vb = o ? add::F32s(add::VbOf(*o, 6)) : std::vector<float>{};
+  std::vector<float> xy;
+  for (size_t i = 0; i + 1 < vb.size(); i += 8) xy.push_back(vb[i]), xy.push_back(vb[i + 1]);
+  CHECKF(xy == (std::vector<float>{0.25f, 0, -0.0f, 0.25f, 0.25f, 0.25f, 0, 0.5f, 0, 0.5f}), "%zu floats", xy.size());
+  const auto ib = o ? add::IbOf(*o, 6) : std::vector<uint16_t>{};
+  CHECKF(ib == (std::vector<uint16_t>{3, 1, 4, 0, 1, 2}), "%zu indices", ib.size());
+}
+
+static void TestReflectionFrameRotatesOnlyPast1e6() {
+  // contract (d): copy node 7 at dev 0.9e-6 writes the bytes of the dev-0 twin (unrotated), node 9 at 1.1e-6 does not
+  // (rotated). Wrong versions: always rotate (node 7 differs), never rotate (node 9 equal). Rows from Python as well.
+  CheckAddBoth("frames");
+  CheckAddBoth("frames0");
+  const auto a = add::OutOf("frames", CopyMode::kFull), b = add::OutOf("frames0", CopyMode::kFull);
+  CHECK(a && b && !add::VbOf(*a, 7).empty() && add::VbOf(*a, 7) == add::VbOf(*b, 7));
+  CHECK(a && b && !add::VbOf(*a, 9).empty() && add::VbOf(*a, 9) != add::VbOf(*b, 9));
+}
+
+static void TestShadowMinusJoint() {
+  // shadow positions = merged position minus the node's frame translation, no rotation. Base: shadow node 15 (reference
+  // 30 at (0.5, 1, 0.25)), its first vertex O0's v0 at world (0.5, 1, 0.25): (0, 0, 0). Not subtracted: (0.5, 1, 0.25).
+  CheckAddBoth("base");
+  const auto o = add::OutOf("base", CopyMode::kFull);
+  const auto vb = o ? add::F32s(add::VbOf(*o, 15)) : std::vector<float>{};
+  CHECKF(vb.size() >= 3 && vb[0] == 0.0f && vb[1] == 0.0f && vb[2] == 0.0f, "%zu floats", vb.size());
+  // a rotated shadow node is translated only: frames' node 16 (reference 31, 90 degrees about z, world t (0.625, 1.2,
+  // 0.55) = suit node 1's) holds O1's v0 (0, 0, 0.5) then v1 (0.5, 0, 0.5) as they are; rotated, v1 would be (0, -0.5)
+  const auto a = add::OutOf("frames", CopyMode::kFull);
+  CheckAddBoth("frames");
+  const auto f16 = a ? add::F32s(add::VbOf(*a, 16)) : std::vector<float>{};
+  CHECKF(f16.size() >= 6 && f16[0] == 0.0f && f16[2] == 0.5f && f16[3] == 0.5f && f16[4] == 0.0f, "%zu floats",
+         f16.size());
+}
+
+static void TestBoundsSignedZeroTie() {
+  // contract (f): first of equal values (test_slim_addon.py check_bounds_local's points, both orders): centre x -0.0
+  // forward, 0.0 reversed; Python's bytes
+  for (const auto& c : add::BoundsCases()) {
+    const char* want = RowFor(kBoundsExpected, c.name);
+    const std::string got = add::BoundsLine(c);
+    CHECKF(want && got == want, "%s: got %s want %s", c.name, got.c_str(), want ? want : "(none)");
+  }
+  // per mesh in ascending vertex index: vorder's M2 (mesh 0 of node 6) has vertices 1 (x -0.0), 3, 4 (x 0.0): centre x
+  // -0.0 (first-use order 3 1 4 gives 0.0); its infos record's bounds start at 0x20
+  const auto o = add::OutOf("vorder", CopyMode::kFull);
+  const bool ok = o && o->info.size() > 6 && !o->info[6].infos.empty() && o->info[6].infos[0].size() >= 0x24;
+  CHECK(ok && U32Bits(o->info[6].infos[0], 0x20) == 0x80000000u);
+}
+
+static void TestBoundsRadiusCompensated() {
+  const auto cases = add::BoundsCases();
+  const auto& rc = cases[2];
+  // precondition: a plain radius sum packs other bytes
+  CHECK(add::BoundsPlainSum(rc.pts) != doa4::suitconv::core::Bounds(rc.pts));
+  const char* want = RowFor(kBoundsExpected, rc.name);
+  CHECK(want && add::BoundsLine(rc) == want);
+}
+
+static void TestPlaceholderBytes() {
+  // contract (h): base's copy node 10 (0x9006: no suit node's channel) and shadow node 18 (0x9008) are never fed.
+  // 0x02: one vertex (0, 0, 0), normal (0, 1, 0), uv (0, 0); indices 0 0 0; one mesh of pass 2; 0x04: one vertex
+  // (0, 0, 0), indices 0 0 0
+  const auto o = add::OutOf("base", CopyMode::kFull);
+  CHECK(o && add::F32s(add::VbOf(*o, 10)) == (std::vector<float>{0, 0, 0, 0, 1, 0, 0, 0}));
+  CHECK(o && add::IbOf(*o, 10) == (std::vector<uint16_t>{0, 0, 0}));
+  CHECK(o && o->info.size() > 10 && o->info[10].infos.size() == 1 && U32Bits(o->info[10].infos[0], 8) == 2);
+  CHECK(o && add::F32s(add::VbOf(*o, 18)) == (std::vector<float>{0, 0, 0}));
+  CHECK(o && add::IbOf(*o, 18) == (std::vector<uint16_t>{0, 0, 0}));
+}
+
+static void TestPlaceholderTextureFromMergedOrder() {
+  // contract (g)/(h): vorder's first fed node (6) has keys M1 (tex 0x21, merged first) and M2 (tex 0x22, pass first):
+  // node 10's placeholder mesh carries 0x21. From pass order: 0x22.
+  for (CopyMode m : {CopyMode::kFull, CopyMode::kSlim}) {
+    const auto o = add::OutOf("vorder", m);
+    CHECKF(o && add::MeshTexOf(*o, 10) == std::vector<uint32_t>{0x21}, "mode %d", int(m));
+  }
+}
+
+static void TestCollapseRefused() {
+  // contract (h): collapse's node 13 (the neck, one triangle of 1e-5) is fed 1 triangle and merges to none at every
+  // grid cell size. Wrong version (no check): a placeholder ships.
+  CheckAdd("collapse", CopyMode::kSlim);
+  CHECK(AddRow("collapse/slim") ==
+        "REFUSED collapse: copy 0x02: node 13 had 1 triangles before the merge and none after (nodes [13])");
+}
+
+static void TestFullModeNeverRefuses() {
+  CheckAdd("collapse", CopyMode::kFull);
+  CHECK(AddRow("collapse/full").rfind("tpr=", 0) == 0);
+  const auto o = add::OutOf("collapse", CopyMode::kFull);
+  CHECK(o && o->geo.size() > 13 && !o->geo[13].decls.empty() && o->geo[13].decls[0].head[5] == 3);
+}
+
+static void TestMapRuleI1() {
+  // rule I1: map_i1's output map = main, state 0x10 [0], state 0x13 [8], 0x02, 0x04 (0x11 orphan, 0x12 at first, the
+  // marker 0x08 dropped). Wrong versions: `<=` keeps 0x12; orphans not removed keeps 0x11; any group kept keeps 0x08.
+  CheckAddBoth("map_i1");
+  const auto o = add::OutOf("map_i1", CopyMode::kFull);
+  std::string kinds;
+  if (o)
+    for (const auto& g : o->map)
+      kinds += (kinds.empty() ? "" : ",") + std::string(g.kind == sl::MapGroup::Kind::kMain    ? "main"
+                                                        : g.kind == sl::MapGroup::Kind::kState ? "s"
+                                                                                               : "") +
+               std::to_string(g.value);
+  CHECKF(kinds == "main0,s16,s19,2,4", "%s", kinds.c_str());
+}
+
+static void TestKindOrderFollowsMarkerOrder() {
+  CheckAddBoth("g4_first");
+  const auto o = add::OutOf("g4_first", CopyMode::kFull);
+  std::string kinds;
+  if (o)
+    for (const auto& g : o->map) kinds += (kinds.empty() ? "" : ",") + std::to_string(g.value);
+  CHECKF(kinds == "0,16,4,2", "%s", kinds.c_str());
+}
+
+static void TestBuffersAt4k() {
+  // every new VBUF / IBUF at a 0x1000 boundary, its size a multiple of 16; low bits (3, 2) on a VBUF, (0, 0) on an
+  // IBUF; the data a multiple of 0x1000. New VBUFs right after the old ones, new IBUFs right after the old IBUFs.
+  const auto o = add::OutOf("base", CopyMode::kSlim);
+  bool ok = o.has_value();
+  size_t nv = 0, ni = 0;
+  if (o) {
+    const auto vb = o->x.OfType(tp::MakeFourcc("VBUF")), ib = o->x.OfType(tp::MakeFourcc("IBUF"));
+    nv = vb.size(), ni = ib.size();
+    // the suit's own buffers: 7 objects' decls (base: one VBUF and one IBUF per decl, 7 decls) come first
+    for (size_t k = 7; k < vb.size(); ++k) {
+      const Bytes& d = o->x.res[vb[k]].blob;
+      ok = ok && (U32Bits(d, 12) & 0xFFF) == 3 && (U32Bits(d, 16) & 3) == 2 && (U32Bits(d, 16) & ~3u) % 16 == 0;
+    }
+    for (size_t k = 7; k < ib.size(); ++k) {
+      const Bytes& d = o->x.res[ib[k]].blob;
+      ok = ok && (U32Bits(d, 12) & 0xFFF) == 0 && (U32Bits(d, 16) & 0xF) == 0;
+    }
+    ok = ok && o->x.data.size() % 0x1000 == 0;
+    // resource order: USER x4, VBUF x (7 + 13), IBUF x (7 + 13)
+    for (size_t k = 0; k < vb.size(); ++k) ok = ok && vb[k] == 4 + k;
+    for (size_t k = 0; k < ib.size(); ++k) ok = ok && ib[k] == 4 + vb.size() + k;
+  }
+  CHECKF(ok && nv == 20 && ni == 20, "vbufs %zu ibufs %zu", nv, ni);
+}
+
+static void TestUser0Recomputed() {
+  // USER0 describes the grown resource list: [7, 4, 0, 4, 20, 4, 20, 24, 1, 2, 3, 16]
+  const auto o = add::OutOf("base", CopyMode::kSlim);
+  std::vector<uint32_t> w;
+  if (o && o->x.res.size() > 0)
+    for (int i = 0; i < 12; ++i) w.push_back(U32Bits(o->x.res[0].blob, 4 * i));
+  CHECK(w == (std::vector<uint32_t>{7, 4, 0, 4, 20, 4, 20, 24, 1, 2, 3, 16}));
+}
+
+static void TestIdsOutOfStepRefused() {
+  // test hook: the last two copy nodes swapped after MakeLayout (no input reaches this state)
+  CheckAddBoth("ids_step");
+  CHECK(AddRow("ids_step/full") == "REFUSED ids_step: copy ids out of step with the objects");
+}
+
+static void TestTwiceEqual() {
+  for (const char* n : {"base", "dense", "keys60", "vorder"})
+    for (CopyMode m : {CopyMode::kFull, CopyMode::kSlim}) {
+      const add::AddCase* c = add::FindAdd(n);
+      std::optional<sl::Result> a, b;
+      if (c) add::Run(*c, m, &a), add::Run(*c, m, &b);
+      CHECKF(a && b && a->tpr == b->tpr && a->cat == b->cat, "%s mode %d", n, int(m));
+    }
+}
+
+static void TestSelfReference() {
+  // the suit with stand-in copies at ids 6..17 is its own reference: the copies are stripped, new ids start at 6 (where
+  // the old copies started), the targets are the stand-ins' own counts minus the node count (0x02: 6+..+14 - 9 = 81,
+  // 0x04: 15+16+17 - 3 = 45), and objects 0..5 are written as they were read
+  CheckAddBoth("self");
+  const add::AddCase* c = add::FindAdd("self");
+  const auto f = c ? add::FilesOf(*c) : add::Files{};
+  std::optional<sl::Result> r;
+  if (c) add::Run(*c, CopyMode::kSlim, &r);
+  const auto o = r ? add::Parse(*r) : std::nullopt;
+  bool same = o && o->geo.size() == 18 && o->info.size() == 18;
+  if (same) {
+    const tp::Xpr in = tp::Xpr::Parse(f.tpr);
+    const auto g = tp::ParseMdlGeo(in.res[1].blob);
+    const auto i = tp::ParseMdlInfo(in.res[2].blob);
+    for (size_t k = 0; k < 6; ++k) same = same && o->geo[k].Build() == g[k].Build() && o->info[k].Build() == i[k].Build();
+    for (size_t k = 6; k < 18; ++k) same = same && o->geo[k].NodeIndex() == k && o->hie[k].id == static_cast<int64_t>(k);
+  }
+  CHECK(same);
+}
+
+static void TestNrmUvShortRefused() {
+  // a packed normal of two values: refused (struct.error), never a crash; Python raises too
+  CheckAddBoth("nrm_short");
+  const add::AddCase* c = add::FindAdd("nrm_short");
+  std::string what;
+  try {
+    if (c) add::RunOrThrow(*c, CopyMode::kFull);
+  } catch (const std::exception& e) {
+    what = e.what();
+  }
+  CHECKF(what == "struct.error: pack expected 8 items for packing (got 7)", "%s", what.c_str());
+}
+
+static void TestVertexLimitEdges() {
+  // 65534 vertices on one copy node: built (both writers); 65535: refused (0x02 with a textured strip; 0x04 with an
+  // untextured one, which group 0x02 skips)
+  CheckAdd("lim2_65534", CopyMode::kFull);
+  CheckAdd("lim2_65535", CopyMode::kFull);
+  CheckAdd("lim4_65535", CopyMode::kFull);
+  const auto o = add::OutOf("lim2_65534", CopyMode::kFull);
+  CHECK(o && o->geo.size() > 15 && o->geo[6].decls[0].head[5] == 65534 && o->geo[15].decls[0].head[5] == 65534);
+  CHECK(AddRow("lim2_65535/full") == "REFUSED lim2_65535: copy node 6 over 65534 vertices");
+  CHECK(AddRow("lim4_65535/full") == "REFUSED lim4_65535: shadow node 15 over 65534 vertices");
+}
+
+static void TestSlimCopiesRefusalContract() {
+  const add::AddCase* c = add::FindAdd("collapse");
+  const auto f = c ? add::FilesOf(*c) : add::Files{};
+  sl::Result out{{1, 2, 3}, {4, 5}};
+  std::string err;
+  const bool ok = sl::SlimCopies("collapse", f.tpr, f.cat, f.ref_tpr, f.ref_cat, CopyMode::kSlim, &out, &err);
+  CHECK(!ok);
+  CHECKF(err == "collapse: copy 0x02: node 13 had 1 triangles before the merge and none after (nodes [13])", "%s",
+         err.c_str());
+  CHECK(out.tpr == (Bytes{1, 2, 3}) && out.cat == (Bytes{4, 5}));
+  // and a build: true, the AddCopies bytes, the error untouched
+  std::string err2 = "untouched";
+  sl::Result built;
+  const bool ok2 = sl::SlimCopies("collapse", f.tpr, f.cat, f.ref_tpr, f.ref_cat, CopyMode::kFull, &built, &err2);
+  std::optional<sl::Result> direct;
+  if (c) add::Run(*c, CopyMode::kFull, &direct);
+  CHECK(ok2 && err2 == "untouched" && direct && built.tpr == direct->tpr && built.cat == direct->cat);
+}
+
+// every refusal branch of the writers and the assembly, each by its text (Python's REFUSED rows; for a Python raise
+// the C++ text that names the exception type, Python's type and text in expect4.log's comment lines)
+static void TestAddRefusals() {
+  const auto what_of = [](const char* name, CopyMode m) {
+    const add::AddCase* c = add::FindAdd(name);
+    try {
+      if (c) add::RunOrThrow(*c, m);
+    } catch (const std::exception& e) {
+      return std::string(e.what());
+    }
+    return std::string("(built)");
+  };
+  for (const char* n : {"neg_target", "zero_target", "no_tex", "obj_count", "tmpl_bad", "empty_g2", "short_mesh"})
+    CheckAddBoth(n);
+  CHECK(AddRow("zero_target/slim") ==
+        "REFUSED zero_target: copy 0x02: node 6 had 2 triangles before the merge and none after (nodes [6])");
+  CHECK(AddRow("neg_target/slim") == "REFUSED neg_target: copy 0x02: count 0 at H_HI = 1.0 exceeds target -9");
+  CHECK(AddRow("neg_target/full").rfind("tpr=", 0) == 0);
+  CHECK(AddRow("no_tex/slim") == "REFUSED no_tex: copy 0x02: origin: no triangles");
+  CHECK(AddRow("no_tex/full").rfind("tpr=", 0) == 0);
+  CHECK(AddRow("obj_count/full") == "REFUSED obj_count: 6 objects for 7 nodes");
+  CHECK(AddRow("tmpl_bad/full") == "REFUSED tmpl_bad: reference group-0x02 mesh not of the native 2-stage shape");
+  // Python: ValueError: min() iterable argument is empty / AssertionError: ('mesh header shorter than 0xC0', 64)
+  CHECKF(what_of("empty_g2", CopyMode::kFull) == "ValueError: min() iterable argument is empty", "%s",
+         what_of("empty_g2", CopyMode::kFull).c_str());
+  CHECKF(what_of("short_mesh", CopyMode::kFull) == "AssertionError: ('mesh header shorter than 0xC0', 64)", "%s",
+         what_of("short_mesh", CopyMode::kFull).c_str());
+  // no textured mesh, full mode: every group-0x02 node a placeholder of texture 0 (any_tex's default)
+  const auto o = add::OutOf("no_tex", CopyMode::kFull);
+  bool all0 = o && o->geo.size() == 19;
+  for (size_t k = 6; all0 && k < 15; ++k) all0 = add::MeshTexOf(*o, k) == std::vector<uint32_t>{0};
+  CHECK(all0);
+}
+
+static void TestAddRows() {
+  // every case and mode has its Python row and every row its case
+  size_t rows = 0, found = 0;
+  for (const auto& e : kAddExpected) {
+    ++rows;
+    std::string n = e.name;
+    const size_t sl_at = n.rfind('/');
+    found += sl_at != std::string::npos && add::FindAdd(n.substr(0, sl_at)) != nullptr;
+  }
+  CHECKF(rows == found && rows == 2 * add::AddCases().size(), "rows %zu found %zu cases %zu", rows, found,
+         add::AddCases().size());
+  for (const auto& c : add::AddCases()) CheckAddBoth(c.name);
+}
+
 // --bench: the scan's time on a synthetic suit of about 25000 triangles (not a check)
 static int Bench() {
   scan::Scene sc = scan::Base();
@@ -2203,6 +3226,41 @@ static int Bench() {
     n = a.tris.size() + b.tris.size();
   }
   std::printf("bench: scan kinds 2 + 4 of %zu + %zu triangles: best of 5 %.2f ms\n", n / 2, n - n / 2, best);
+  // AddCopies, slim mode, on the same suit with a reference whose copy objects hold 120 vertices each (targets 0x02:
+  // 9 * 120 - 9 = 1071, 0x04: 4 * 120 - 4 = 476, near the real costumes' 916 / 707), so choose_h bisects in full
+  // The ribbons are 0.2 wide here (the scan's are 0.01), so the merge at the cell size the targets need keeps every
+  // node fed (a 0.01 ribbon collapses whole and is refused as a lost node).
+  add::AddCase ac{"bench", add::AddBase(), 120};
+  for (size_t o = 0; o < ac.sc.objs.size(); ++o) {
+    scan::DeclDef d;
+    for (uint16_t k = 0; k < 4200; ++k) {
+      const double x = static_cast<double>(o) + 0.001 * (k / 2), y = 0.2 * (k % 2);
+      d.verts.push_back(scan::V({x, y, 0.001 * (k % 7)}, {0.5, 0.25, 0.25, 0}));
+      d.idx.push_back(k);
+    }
+    ac.sc.objs[o].decls = {d};
+    ac.sc.objs[o].meshes = {synth::MeshSpec{.decl = 0, .istart = 0, .icount = 4200, .tex = static_cast<uint32_t>(o + 1)}};
+    ac.sc.objs[o].infos_short = 0;
+  }
+  const add::Files f = add::FilesOf(ac);
+  double best_add = 1e9;
+  size_t out_bytes = 0;
+  for (int rep = 0; rep < 5; ++rep) {
+    const auto t0 = std::chrono::steady_clock::now();
+    sl::Result r;
+    try {
+      r = sl::AddCopies("bench", f.tpr, f.cat, f.ref_tpr, f.ref_cat, sl::CopyMode::kSlim);
+    } catch (const std::exception& e) {
+      std::printf("bench: AddCopies refused: %s\n", e.what());
+      return 1;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    best_add = std::min(best_add, ms);
+    out_bytes = r.tpr.size();
+  }
+  std::printf("bench: AddCopies slim mode (read, scan, choose_h, write, assemble), suit of %zu + %zu triangles: best of 5 "
+              "%.2f ms (tpr %zu bytes)\n",
+              n / 2, n - n / 2, best_add, out_bytes);
   return 0;
 }
 
@@ -2249,6 +3307,45 @@ static int Dump(const fs::path& dir) {
       ++n;
     }
     put(dir / "scan" / "tolocal.txt", Bytes(t.begin(), t.end()));
+  }
+  fs::create_directories(dir / "add");
+  for (const add::AddCase& c : add::AddCases()) {
+    const add::Files f = add::FilesOf(c);
+    put(dir / "add" / (c.name + ".tpr"), f.tpr);
+    put(dir / "add" / (c.name + ".cat"), f.cat);
+    put(dir / "add" / (c.name + ".ref.tpr"), f.ref_tpr);
+    put(dir / "add" / (c.name + ".ref.cat"), f.ref_cat);
+    if (c.hook_swap) {
+      const std::string h = "swap_last_two\n";
+      put(dir / "add" / (c.name + ".hook"), Bytes(h.begin(), h.end()));
+    }
+    ++n;
+  }
+  {  // one case per line: NAME, then per key 'K' and per vertex 'v VID XBITS YBITS ZBITS TRI CORNER'
+    std::string t;
+    for (const auto& c : add::NvCases()) {
+      t += c.name;
+      for (const auto& k : c.keys) {
+        t += " K";
+        for (const auto& v : k)
+          t += " v " + std::to_string(v.vid) + " " + scan::Hex16(scan::Bits(v.x)) + " " + scan::Hex16(scan::Bits(v.y)) +
+               " " + scan::Hex16(scan::Bits(v.z)) + " " + std::to_string(v.tri) + " " + std::to_string(v.corner);
+      }
+      t += "\n";
+      ++n;
+    }
+    put(dir / "add" / "nodeverts.txt", Bytes(t.begin(), t.end()));
+  }
+  {  // one case per line: NAME, then per point 'p XBITS YBITS ZBITS'
+    std::string t;
+    for (const auto& c : add::BoundsCases()) {
+      t += c.name;
+      for (const auto& p : c.pts)
+        t += " p " + scan::Hex16(scan::Bits(p[0])) + " " + scan::Hex16(scan::Bits(p[1])) + " " + scan::Hex16(scan::Bits(p[2]));
+      t += "\n";
+      ++n;
+    }
+    put(dir / "add" / "bounds.txt", Bytes(t.begin(), t.end()));
   }
   std::printf("dumped %d cases to %s\n", n, dir.string().c_str());
   return 0;
@@ -2302,6 +3399,29 @@ int main(int argc, char** argv) {
   RunGroup(TestOutOfRangeRefuses, "out_of_range_refuses");
   RunGroup(TestKind4PayloadHasNoAttributes, "kind4_payload_has_no_attributes");
   RunGroup(TestScanRefusals, "scan_refusals");
+  RunGroup(TestSamePassKeysKeepOrder, "same_pass_keys_keep_order");
+  RunGroup(TestFusionByVidAndPosition, "fusion_by_vid_and_position");
+  RunGroup(TestVertexOrderByFirstAppearance, "vertex_order_by_first_appearance");
+  RunGroup(TestReflectionFrameRotatesOnlyPast1e6, "reflection_frame_rotates_only_past_1e-6");
+  RunGroup(TestShadowMinusJoint, "shadow_minus_joint");
+  RunGroup(TestBoundsSignedZeroTie, "bounds_signed_zero_tie");
+  RunGroup(TestBoundsRadiusCompensated, "bounds_radius_compensated");
+  RunGroup(TestPlaceholderBytes, "placeholder_bytes");
+  RunGroup(TestPlaceholderTextureFromMergedOrder, "placeholder_texture_from_merged_order");
+  RunGroup(TestCollapseRefused, "collapse_refused");
+  RunGroup(TestFullModeNeverRefuses, "full_mode_never_refuses");
+  RunGroup(TestMapRuleI1, "map_rule_i1");
+  RunGroup(TestKindOrderFollowsMarkerOrder, "kind_order_follows_marker_order");
+  RunGroup(TestBuffersAt4k, "buffers_at_4k");
+  RunGroup(TestUser0Recomputed, "user0_recomputed");
+  RunGroup(TestIdsOutOfStepRefused, "ids_out_of_step_refused");
+  RunGroup(TestTwiceEqual, "twice_equal");
+  RunGroup(TestSelfReference, "self_reference");
+  RunGroup(TestNrmUvShortRefused, "nrm_uv_short_refused");
+  RunGroup(TestVertexLimitEdges, "vertex_limit_edges");
+  RunGroup(TestSlimCopiesRefusalContract, "slim_copies_refusal_contract");
+  RunGroup(TestAddRefusals, "add_refusals");
+  RunGroup(TestAddRows, "add_rows");
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
     return 1;

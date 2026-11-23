@@ -1,7 +1,8 @@
 @echo off
 rem Builds and runs the slim-copies host test (tests/host/suitconv_slim_host_test.cpp: the container layer of the slim
 rem core, src/doa4_suitconv_slimread.cpp, its grid merge, src/doa4_suitconv_slimgrid.cpp, and its layout and triangle
-rem scan, src/doa4_suitconv_slimscan.cpp (with src/doa4_suitconv_core.cpp for LoadModel and StripTris), on synthetic
+rem scan, src/doa4_suitconv_slimscan.cpp, and its copy writers and assembly, src/doa4_suitconv_slimwrite.cpp (with
+rem src/doa4_suitconv_core.cpp for LoadModel, StripTris and Bounds), on synthetic
 rem models whose expected values come from the Python tool through
 rem tests/host/slim_expect.py; needs no disc, no game file and no environment variable) with clang-cl (no CMake), under
 rem the converter's floating-point flags for every translation unit (x86-64-v2 with FMA switched off, no contraction,
@@ -23,16 +24,16 @@ set "SRC=%~dp0..\..\src"
 set FPFLAGS=/clang:-march=x86-64-v2 /clang:-mno-fma /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-fno-math-errno
 set CXXFLAGS=/nologo /std:c++latest /EHsc /O2 %FPFLAGS%
 set "LOG=%OUT%\slim_build.log"
-for %%f in (num tpr core slimread slimgrid slimscan) do if exist "%OUT%\obj\doa4_suitconv_%%f.obj" del /q "%OUT%\obj\doa4_suitconv_%%f.obj"
+for %%f in (num tpr core slimread slimgrid slimscan slimwrite) do if exist "%OUT%\obj\doa4_suitconv_%%f.obj" del /q "%OUT%\obj\doa4_suitconv_%%f.obj"
 if exist "%OUT%\testobj\suitconv_slim_host_test.obj" del /q "%OUT%\testobj\suitconv_slim_host_test.obj"
 if exist "%OUT%\suitconv_slim_host_test.exe" del /q "%OUT%\suitconv_slim_host_test.exe"
 type nul > "%LOG%"
-for %%f in (num tpr core slimread slimgrid slimscan) do (
+for %%f in (num tpr core slimread slimgrid slimscan slimwrite) do (
   clang-cl %CXXFLAGS% /c "%SRC%\doa4_suitconv_%%f.cpp" /Fo"%OUT%\obj\doa4_suitconv_%%f.obj" >> "%LOG%" 2>&1 || goto failed
 )
 clang-cl %CXXFLAGS% /c "%~dp0suitconv_slim_host_test.cpp" /Fo"%OUT%\testobj\suitconv_slim_host_test.obj" >> "%LOG%" 2>&1
 if errorlevel 1 goto failed
-clang-cl /nologo "%OUT%\testobj\suitconv_slim_host_test.obj" "%OUT%\obj\doa4_suitconv_num.obj" "%OUT%\obj\doa4_suitconv_tpr.obj" "%OUT%\obj\doa4_suitconv_core.obj" "%OUT%\obj\doa4_suitconv_slimread.obj" "%OUT%\obj\doa4_suitconv_slimgrid.obj" "%OUT%\obj\doa4_suitconv_slimscan.obj" /Fe"%OUT%\suitconv_slim_host_test.exe" >> "%LOG%" 2>&1
+clang-cl /nologo "%OUT%\testobj\suitconv_slim_host_test.obj" "%OUT%\obj\doa4_suitconv_num.obj" "%OUT%\obj\doa4_suitconv_tpr.obj" "%OUT%\obj\doa4_suitconv_core.obj" "%OUT%\obj\doa4_suitconv_slimread.obj" "%OUT%\obj\doa4_suitconv_slimgrid.obj" "%OUT%\obj\doa4_suitconv_slimscan.obj" "%OUT%\obj\doa4_suitconv_slimwrite.obj" /Fe"%OUT%\suitconv_slim_host_test.exe" >> "%LOG%" 2>&1
 if errorlevel 1 goto failed
 rem The FP scan of every converter object comes first: any FMA instruction or C runtime math call (or a scan that
 rem cannot run) fails the runner with the default summary shape, as one failed check, and the test does not run.

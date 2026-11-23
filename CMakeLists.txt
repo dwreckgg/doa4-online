@@ -179,6 +179,7 @@ set(DOA4_SUITCONV_SOURCES
     src/doa4_suitconv_slimread.cpp
     src/doa4_suitconv_slimgrid.cpp
     src/doa4_suitconv_slimscan.cpp
+    src/doa4_suitconv_slimwrite.cpp
 )
 target_sources(dead_or_alive_4 PRIVATE ${DOA4_SUITCONV_SOURCES})
 # -mno-fma exists only for x86 targets (clang refuses it for aarch64); arm64 has no implicit FMA once

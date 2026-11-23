@@ -21,6 +21,10 @@ Grid mode (Task 4): py -3 -I tests/host/slim_expect.py --grid TOOL_DIR DUMP_DIR/
 Scan mode (Task 5): py -3 -I tests/host/slim_expect.py --scan TOOL_DIR DUMP_DIR/scan
   runs read_suit, load_ref, bind_guard, Layout and _scan (kinds 2 and 4) on every case and lod_chain._frame /
   _to_local on tolocal.txt; prints the kScanExpected and kToLocalExpected rows (see scan_main).
+
+Add mode (Task 6): py -3 -I tests/host/slim_expect.py --add TOOL_DIR DUMP_DIR/add
+  runs read_suit, load_ref and add_copies ('full' and 'slim') on every case, _node_verts on nodeverts.txt and bounds on
+  bounds.txt; prints the kAddExpected, kNodeVertsExpected and kBoundsExpected rows (see add_main).
 """
 import os
 import struct
@@ -219,7 +223,119 @@ def scan_main(tool, sdir):
     return 1 if bad else 0
 
 
+def sha1_hex(b):
+    import hashlib
+    return hashlib.sha1(b).hexdigest()
+
+
+def describe(tpr_bytes, cat_bytes, tpr, convert, sa):
+    """A built output in words, for checking hand-derived literals before pasting (comment lines only): per object
+    from the first copy id, its id, vertex count, index list length, mesh textures and passes, and the map's kinds."""
+    x = tpr.Xpr.parse(tpr_bytes)
+    geo = tpr.parse_mdlgeo(x.res[1][1])
+    info = tpr.parse_mdlinfo(x.res[2][1])
+    out = []
+    for k, (g, inf) in enumerate(zip(geo, info)):
+        dc = g.decls[0]
+        texs = [tpr.mesh_textures(m)[0][2] for m in g.meshes]
+        passes = [struct.unpack_from('>8I', r)[2] for r in inf.infos]
+        out.append(f'o{k}:v{dc.head[5]}:i{dc.head[3]}:t{",".join(hex(t) for t in texs)}:p{passes}')
+    kinds = [g[0] for g in sa.ref_groups_of(cat_bytes)]
+    return ' '.join(out) + f' map={kinds}'
+
+
+def add_main(tool, adir):
+    """--add mode (Task 6): every <case>.tpr / <case>.cat with <case>.ref.tpr / <case>.ref.cat the test exe's `--dump
+    DIR` wrote under DIR/add, through read_suit, load_ref and add_copies in 'full' and in 'slim' mode; prints the
+    kAddExpected rows
+        {"<case>/<mode>", "tpr=<SHA-1>:<bytes> cat=<SHA-1>:<bytes>"}  or "REFUSED <SlimError text>" or "RAISED"
+    (any other exception: its type and text in a comment line), each built output described in a comment line; a
+    <case>.hook file names a test hook ('swap_last_two': the last two of Layout.allnodes swapped after Layout()). Then
+    the kNodeVertsExpected rows (slim_addon._node_verts on nodeverts.txt) and the kBoundsExpected rows (slim_addon.bounds
+    on bounds.txt)."""
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, tool)
+    import slim_addon as sa                 # noqa: E402
+    import tpr                              # noqa: E402
+    import convert                          # noqa: E402
+    print(f'# tool {os.path.abspath(sa.__file__)}')
+    names = sorted(f[:-4] for f in os.listdir(adir) if f.endswith('.tpr') and not f.endswith('.ref.tpr'))
+    real_layout = sa.Layout
+    bad = 0
+    for name in names:
+        base = os.path.join(adir, name)
+        hook = open(base + '.hook', encoding='ascii').read().strip() if os.path.exists(base + '.hook') else None
+        for mode in ('full', 'slim'):
+            key = f'{name}/{mode}'
+            try:
+                s = sa.read_suit(base + '.tpr', base + '.cat')
+                ref = sa.load_ref(base + '.ref.tpr', base + '.ref.cat')
+            except Exception as e:  # noqa: BLE001
+                print(f'    {{{c_str(key)}, {c_str("ERROR " + type(e).__name__ + ": " + str(e))}}},')
+                bad += 1
+                continue
+            if hook == 'swap_last_two':
+                class Swapped(real_layout):
+                    def __init__(self, suit, r):
+                        super().__init__(suit, r)
+                        self.allnodes[-1], self.allnodes[-2] = self.allnodes[-2], self.allnodes[-1]
+                sa.Layout = Swapped
+            elif hook is not None:
+                raise SystemExit(f'unknown hook {hook!r}')
+            try:
+                out_tpr, out_cat, _report = sa.add_copies(s, ref, mode)
+                line = f'tpr={sha1_hex(out_tpr)}:{len(out_tpr)} cat={sha1_hex(out_cat)}:{len(out_cat)}'
+                print(f'# {key}: {describe(out_tpr, out_cat, tpr, convert, sa)}')
+            except sa.SlimError as e:
+                line = f'REFUSED {e}'
+            except Exception as e:  # noqa: BLE001
+                print(f'# {key}: RAISED {type(e).__name__}: {e}')
+                line = 'RAISED'
+            finally:
+                sa.Layout = real_layout
+            print(f'    {{{c_str(key)}, {c_str(line)}}},')
+    print('# node_verts (kNodeVertsExpected)')
+    for ln in open(os.path.join(adir, 'nodeverts.txt'), encoding='ascii').read().split('\n'):
+        if not ln:
+            continue
+        w = ln.split(' ')
+        name, merged, k, i = w[0], {}, -1, 1
+        while i < len(w):
+            if w[i] == 'K':
+                k += 1
+                merged[k] = ([], [])
+                i += 1
+            else:
+                assert w[i] == 'v', ln
+                vid, x, y, z, t, c = int(w[i + 1]), bits_d(w[i + 2]), bits_d(w[i + 3]), bits_d(w[i + 4]), int(w[i + 5]), \
+                    int(w[i + 6])
+                merged[k][0].append(((x, y, z), (vid, t, c)))
+                i += 7
+        keys = list(merged)
+        try:
+            verts, remap = sa._node_verts(keys, merged)
+            line = 'V' + ';'.join(f'{pl[0]},{dbits(p[0])},{dbits(p[1])},{dbits(p[2])},{pl[1]}.{pl[2]}' for p, pl in verts)
+            line += ' R' + '|'.join(','.join(str(remap[(kk, j)]) for j in range(len(merged[kk][0]))) for kk in keys)
+        except Exception as e:  # noqa: BLE001
+            print(f'# {name}: RAISED {type(e).__name__}: {e}')
+            line = 'RAISED'
+        print(f'    {{{c_str(name)}, {c_str(line)}}},')
+    print('# bounds (kBoundsExpected)')
+    for ln in open(os.path.join(adir, 'bounds.txt'), encoding='ascii').read().split('\n'):
+        if not ln:
+            continue
+        w = ln.split(' ')
+        pts = []
+        for i in range(1, len(w), 4):
+            assert w[i] == 'p', ln
+            pts.append((bits_d(w[i + 1]), bits_d(w[i + 2]), bits_d(w[i + 3])))
+        print(f'    {{{c_str(w[0])}, {c_str(sa.bounds(pts).hex())}}},')
+    return 1 if bad else 0
+
+
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == '--add':
+        return add_main(sys.argv[2], sys.argv[3])
     if len(sys.argv) == 4 and sys.argv[1] == '--grid':
         return grid_main(sys.argv[2], sys.argv[3])
     if len(sys.argv) == 4 and sys.argv[1] == '--scan':

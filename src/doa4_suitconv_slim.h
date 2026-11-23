@@ -33,18 +33,26 @@ namespace doa4::suitconv::slim {
 
 using Bytes = tpr::Bytes;
 
-// ---------------------------------------------------------------- the public entry (Tasks 5 to 7)
+// ---------------------------------------------------------------- the public entry (Tasks 6 and 7)
+// Bodies in doa4_suitconv_slimwrite.cpp. `name` is the suit's name as the Python tool takes it from the .tpr path (the
+// file name without its extension): every SlimError text starts with it (it is passed to ReadSuit). The reference is
+// core::LoadModel over ref_tpr / ref_cat (slim_addon.load_ref). (The plan's Interfaces had no name: Task 6 ruling R2.)
+// The Python tool's report lines are not ported.
 enum class CopyMode { kSlim, kFull };
 struct Result {
   Bytes tpr;
   Bytes cat;
 };
-// Throws ConvertError (through Fail) with the Python tool's SlimError text. Pure function of its four inputs.
-Result AddCopies(std::span<const uint8_t> tpr, std::span<const uint8_t> cat, std::span<const uint8_t> ref_tpr,
-                 std::span<const uint8_t> ref_cat, CopyMode mode);
-// The public entry: runs AddCopies under num::RunUnderConvertEnv. False = refused, *error holds the reason.
-bool SlimCopies(std::span<const uint8_t> tpr, std::span<const uint8_t> cat, std::span<const uint8_t> ref_tpr,
-                std::span<const uint8_t> ref_cat, CopyMode mode, Result* out, std::string* error);
+// slim_addon.add_copies(read_suit(...), load_ref(...), mode): throws ConvertError with the Python tool's SlimError text
+// (any other Python raise: a ConvertError naming the exception type). Pure function of its inputs.
+Result AddCopies(std::string_view name, std::span<const uint8_t> tpr, std::span<const uint8_t> cat,
+                 std::span<const uint8_t> ref_tpr, std::span<const uint8_t> ref_cat, CopyMode mode);
+// The public entry: runs AddCopies under num::RunUnderConvertEnv and never throws. True = built, *out holds the files.
+// False = refused: *error holds the reason (a ConvertError's text; "out of memory (std::bad_alloc)"; "unexpected
+// error: <what()>" for any other std::exception; "unexpected non-standard exception"), and *out is left unchanged.
+bool SlimCopies(std::string_view name, std::span<const uint8_t> tpr, std::span<const uint8_t> cat,
+                std::span<const uint8_t> ref_tpr, std::span<const uint8_t> ref_cat, CopyMode mode, Result* out,
+                std::string* error);
 
 // ---------------------------------------------------------------- grid (Task 4, bodies in doa4_suitconv_slimgrid.cpp)
 // slim.py: origin, merge, count, choose_h. A corner carries a source identity (vid), a position and an opaque payload
@@ -212,5 +220,29 @@ struct Scan {
 // Throws the four _scan SlimErrors; every other raise of the Python (a read past the data, an index past a list, a
 // missing key) is a ConvertError naming the Python exception type. Never reads out of bounds.
 Scan ScanKind(const Suit& suit, const core::Model& ref, const Layout& lay, int kind);
+
+// ---------------------------------------------------------------- writers (Task 6, doa4_suitconv_slimwrite.cpp)
+// slim_addon._set_user0(x): USER0's ntex, nvb, first VBUF, nib, first IBUF recomputed from the resource list (body in
+// doa4_suitconv_slimread.cpp).
+void SetUser0(tpr::Xpr& x);
+
+// slim_addon._node_verts(keys, merged): one vertex list for a node over its keys (`keys` = indices into `merged`, in the
+// writer's order). Identity = (payload vid, position) compared BY VALUE (0.0 == -0.0: one vertex); the vertex kept is
+// the occurrence with the lowest (triangle, corner) over all keys; vertices are ordered by that lowest (triangle,
+// corner). A NaN coordinate is refused with a ConvertError (Python's result there depends on object identity).
+struct NodeVerts {
+  std::vector<std::pair<std::array<double, 3>, uint32_t>> verts;  // (position, payload index), output order
+  std::vector<std::vector<uint32_t>> remap;  // per entry of `keys`: merged vertex index -> output vertex index
+};
+NodeVerts NodeVertsOf(std::span<const uint32_t> keys, const Merged& merged, std::span<const ScanPayload> payload);
+
+// TEST HOOKS (the test exe only; the game calls AddCopies / SlimCopies above): `layout` runs on the Layout right after
+// MakeLayout (it lets a test put the copy ids out of step with the objects, a state no input reaches).
+struct TestHooks {
+  void (*layout)(Layout&) = nullptr;
+};
+Result AddCopies(std::string_view name, std::span<const uint8_t> tpr, std::span<const uint8_t> cat,
+                 std::span<const uint8_t> ref_tpr, std::span<const uint8_t> ref_cat, CopyMode mode,
+                 const TestHooks& hooks);
 
 }  // namespace doa4::suitconv::slim

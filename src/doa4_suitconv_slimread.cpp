@@ -122,7 +122,9 @@ void CheckUser0(const tpr::Xpr& x, const std::string& who) {
   }
 }
 
-// _set_user0
+}  // namespace
+
+// _set_user0 (declared in doa4_suitconv_slim.h: the writer of Task 6 calls it too)
 void SetUser0(tpr::Xpr& x) {
   auto w = Unpack12(x.res[0].blob);
   const User0 u = ComputeUser0(x);
@@ -135,6 +137,8 @@ void SetUser0(tpr::Xpr& x) {
   for (uint32_t v : w) wr.U32(v);
   x.res[0].blob = wr.Take();
 }
+
+namespace {
 
 // _res_bases: (resource index, base) of every texture and buffer
 std::vector<std::pair<size_t, uint32_t>> ResBases(const tpr::Xpr& x) {
