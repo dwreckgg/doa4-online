@@ -2441,6 +2441,35 @@ static Files ListFiles(const fs::path& dir, std::string* problem) {
   return m;
 }
 
+// `oracle` (a manifest the Python tool wrote) with line 2, which must be exactly "converter <one word>", replaced by
+// "converter " + kConverterWord; every other byte kept. "" when line 2 is not of that shape.
+static std::string WithImporterWord(const std::string& oracle) {
+  const std::string head = "converter ";
+  const size_t a = oracle.find('\n');
+  if (a == std::string::npos) return {};
+  const size_t b = oracle.find('\n', a + 1);
+  if (b == std::string::npos) return {};
+  const std::string line = oracle.substr(a + 1, b - a - 1);
+  if (line.rfind(head, 0) != 0 || line.size() == head.size() ||
+      line.find_first_of(" \t\r", head.size()) != std::string::npos)
+    return {};
+  return oracle.substr(0, a + 1) + head + std::string(kConverterWord) + oracle.substr(b);
+}
+
+// The oracle-word exception replaces line 2 only, keeps every other byte, and refuses a line 2 of another shape.
+static void TestOracleWordException() {
+  Group("oracle_word_exception");
+  const std::string want = "doax2-suits 1\nconverter " + std::string(kConverterWord) + "\nsuit a\nconverter x\n";
+  CK(WithImporterWord("doax2-suits 1\nconverter proto-1d\nsuit a\nconverter x\n") == want);
+  CK(WithImporterWord(want) == want);
+  CK(WithImporterWord("doax2-suits 1\nconverter proto-1d\n") ==
+     "doax2-suits 1\nconverter " + std::string(kConverterWord) + "\n");
+  for (const char* bad : {"doax2-suits 1\nconverter \nsuit a\n", "doax2-suits 1\nconverter a b\nsuit a\n",
+                          "doax2-suits 1\nconverter proto-1d\r\nsuit a\n", "doax2-suits 1\nsuit a\n",
+                          "doax2-suits 1\nconverter proto-1d", ""})
+    CKF(WithImporterWord(bad).empty(), "accepted '%s'", bad);
+}
+
 static Files LoadOracle(const RealEnv& env) {
   std::string problem;
   Files f = ListFiles(fs::path(env.oracle), &problem);
@@ -2466,7 +2495,15 @@ static Files LoadOracle(const RealEnv& env) {
       }
     const auto m = nf.find("manifest.txt");
     CKF(m != nf.end(), "no manifest.txt in DOA4_SUITCONV_T2FIX_DIR/m1");
-    if (m != nf.end()) f["manifest.txt"] = m->second, ++replaced;
+    if (m != nf.end()) {
+      // Task 6c: the reference manifest is today's, with its converter line given the importer's word. The word is a build
+      // marker, not converter output (kConverterWord proto-1e marks the Helena map fix; the Python tool still writes
+      // proto-1d), so that line is the one exception; every other byte is compared through the SHA-1 below.
+      const std::string want = WithImporterWord(ReadText(fs::path(t2) / "m1" / "manifest.txt"));
+      CKF(!want.empty(), "DOA4_SUITCONV_T2FIX_DIR/m1/manifest.txt: line 2 is not one \"converter <word>\" line");
+      f["manifest.txt"] = FileInfo{uint64_t(want.size()), doa4::gamefiles::Sha1Hex(want.data(), want.size())};
+      ++replaced;
+    }
     CKF(replaced == 9, "%d reference files taken from DOA4_SUITCONV_T2FIX_DIR", replaced);
   }
   return f;
@@ -2905,6 +2942,7 @@ int main() {
     if (run_fake) {
       TestBytesNeeded();
       TestDefaultsAreProduction();
+      TestOracleWordException();
       TestFullImport();
       TestProgressMonotonic();
       TestCancelInEachPhase();

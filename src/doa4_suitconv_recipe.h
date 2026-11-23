@@ -17,8 +17,11 @@
 
 namespace doa4::suitconv {
 
-// The converter's version word as the Python writes it into the manifest ("converter proto-1d").
-inline constexpr std::string_view kConverterWord = "proto-1d";
+// The importer's version word, written into the manifest ("converter proto-1e"). A build marker, not converter output: an
+// installed manifest with another word gets the re-import line (suits_import::ReimportNote). proto-1e (Task 6c) marks the
+// Helena type-2 map fix of Task 6b; the Python tool (pack_import.py CONVERTER) still writes proto-1d, so the gated oracle
+// comparisons treat the converter line as their one exception. The online checksum (suits::ImportChecksum) never reads it.
+inline constexpr std::string_view kConverterWord = "proto-1e";
 
 // A cooperative cancel flag, shared by the caller and the converter's worker threads.
 class CancelToken {
