@@ -1446,6 +1446,23 @@ static std::vector<ScanCase> ScanCases() {
     for (Rows* rows : {&sc.main, &sc.ref_main}) rows->insert(rows->begin() + 3, {0x9005, 4});
     v.push_back({"chan_shallowest", sc});
   }
+  {  // CHANNEL_ALIAS (a wrist-T1 reference): node 2 carries 0x9120 and no node 0x9004, group 0x02 has a 0x9004 row.
+     // channel_map adds 0x9004 -> node 2 by the alias, so node 2's lowest code is 0x9004 -> node 8. Without the alias
+     // node 2's channel is 0x9120 (no row) and its triangles walk up to node 1 (0x9003) -> node 7.
+    Scene sc = Base();
+    for (Rows* rows : {&sc.main, &sc.ref_main})
+      for (auto& r : *rows)
+        if (r.first == 0x9004) r.first = 0x9120;
+    v.push_back({"alias_9004", sc});
+  }
+  {  // _heaviest's per-bone sum on a FIRST vertex: O1 drawn as [1 2 3] only, so t0 starts at v1 (palette [2, 1, 2],
+     // weights 0.3, 0.4, 0.3): bone 2 sums 0.6 > bone 1's 0.4 -> node 8. Last slot wins per bone (0.3 < 0.4) or no
+     // sum -> bone 1 -> node 7.
+    Scene sc = Base();
+    sc.objs[1].decls[0].idx = {1, 2, 3};
+    sc.objs[1].meshes[0].icount = 3;
+    v.push_back({"heaviest_sum", sc});
+  }
   {  // a suit with one node more than the reference's main group: new ids from 7, not 6
     Scene sc = Base();
     sc.suit_nodes.push_back({6, 0, 0.4, 0.4, 0.4});
@@ -1810,6 +1827,8 @@ static std::string ToLocalLine(const ToLocalCase& c) {
 //   py -3 -I tests/host/slim_expect.py --scan <doax2_work>/physics_spike/scripts DIR/scan
 static const Expected kScanExpected[] = {
     {"base", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"alias_9004", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
+    {"heaviest_sum", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n14 k7 v28 fnv=e9be1f64dddcfedc nodes2=[6,6,8,8,8,9,9,9,13,8,8,8,8,8] S4=n15 k3 v28 fnv=22854a0abbf78b81 nodes4=[15,15,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"chan_shallowest", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v29 fnv=4d90e93afc0e29b7 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v29 fnv=f23ee729c8c107c4 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
     {"ids_own_count", "L=92866ca5f3475738 noc2=[9002>7,9003>8,9004>9,9005>10,9006>11,9008>12,9101>14] noc4=[9002>16,9003>17,9005>18] S2=n16 k8 v32 fnv=09018aea29f3f060 nodes2=[7,7,8,8,9,9,10,10,10,14,9,9,9,9,9,7] S4=n17 k3 v32 fnv=f6ffccd18cea5b55 nodes4=[16,16,17,17,17,17,17,18,18,18,18,17,17,17,17,17,16]"},
     {"key_equal", "L=44ef8648abd4133a noc2=[9002>6,9003>7,9004>8,9005>9,9006>10,9008>11,9101>13] noc4=[9002>15,9003>16,9005>17] S2=n15 k7 v31 fnv=c6ca70044c9dced9 nodes2=[6,6,7,7,8,8,9,9,9,13,8,8,8,8,8] S4=n16 k3 v31 fnv=c9f5bee3d36dc796 nodes4=[15,15,16,16,16,16,16,17,17,17,17,16,16,16,16,16]"},
@@ -1892,6 +1911,12 @@ static void TestChannelLowestCode() {
   const auto c4 = c2 ? scan::NodesOfObject(*c2, 4) : std::vector<int64_t>{};
   CHECKF(!c3.empty() && c3 == std::vector<int64_t>(c3.size(), 9) && c4 == std::vector<int64_t>{13}, "objects 3: %s, 4: %s",
          Join(c3).c_str(), Join(c4).c_str());
+  // CHANNEL_ALIAS: 0x9120 on node 2, no 0x9004 in the main group -> the alias gives node 2 the code 0x9004 -> node 8.
+  // Wrong (no alias): 0x9120 has no row, the walk reaches node 1 -> node 7.
+  CheckScanCase("alias_9004");
+  const auto a2 = scan::ScanOf("alias_9004", 2);
+  const auto an = a2 ? scan::NodesOfObject(*a2, 2) : std::vector<int64_t>{};
+  CHECKF(!an.empty() && an == std::vector<int64_t>(an.size(), 8), "alias_9004 object 2 nodes %s (not 7)", Join(an).c_str());
 }
 
 static void TestShallowestThenLowestId() {
@@ -1927,6 +1952,11 @@ static void TestHeaviestTieLowestBone() {
   const auto s2 = scan::ScanOf("base", 2);
   const auto n1 = s2 ? scan::NodesOfObject(*s2, 1) : std::vector<int64_t>{};
   CHECKF(n1.size() == 2 && n1[0] == 7, "object 1 nodes %s", Join(n1).c_str());
+  // the per-bone sum on a first vertex (heaviest_sum: v1 = 0.3 + 0.3 on bone 2 against 0.4 on bone 1) -> node 8, not 7
+  CheckScanCase("heaviest_sum");
+  const auto h2 = scan::ScanOf("heaviest_sum", 2);
+  const auto hs = h2 ? scan::NodesOfObject(*h2, 1) : std::vector<int64_t>{};
+  CHECKF(hs == (std::vector<int64_t>{8}), "heaviest_sum object 1 nodes %s (not 7)", Join(hs).c_str());
   // the same rule over UB4N integer weights (128 / 128 tie), HEND3N normals and H2 uvs (Python's row)
   CheckScanCase("packed_elems");
   const auto p2 = scan::ScanOf("packed_elems", 2);
