@@ -60,7 +60,8 @@ DEFAULT_TIMEOUT = 600  # seconds for each test program
 DEFAULT_COMPILE_TIMEOUT = 1800  # seconds for each compile
 
 # The Windows-only headers (#include <...>), lower case. Built from the sources: every angle include in the closures
-# of the 71 host tests was placed once (C or C++ standard, POSIX, Linux or compiler, Windows-only, SDK or third party).
+# of the 75 host tests was placed once (C or C++ standard, POSIX, Linux or compiler, Windows-only, SDK or third party;
+# 71 at first, the four 0.3.8 runners' includes checked at the 0.3.8 merge: all standard or already listed).
 # The first three rows are the Windows-only ones found there (tests/tools/test_release_tools.py checks that every
 # header found inside a Windows-only block is one of them); the last row is others of the kind, which no test names yet.
 WINDOWS_HEADERS = frozenset((
