@@ -25,6 +25,7 @@ M_EMPTYSTATE = '900102' '6033' '6034' '903407' '00'   # main, an EMPTY state 0x3
 M_AX ='a00503' '920704' '00'                  # main: (0xa005,3) (0x9207,4)
 M_EMPTY = '900102' '04' '02' '900207' '00'     # main, an empty marker group 0x04, marker 0x02: (0x9002,7)
 M_DXMAIN = '900102' 'd2000303' '900204' '00'   # main: (0x9001,2) (0xd20003,3) (0x9002,4)
+M_DX0 = '900100' 'd2010300' '900204' '00'      # main: (0x9001,0) (0xd20103,0) (0x9002,4): object 0 in a 3-byte and a 4-byte entry
 REFUSE = {'state00': '901001' '6000' '00', 'state80': '901001' '6080' '00', 'unknown_b0': '901001' 'b00102' '00',
           'unknown_80': '80' '00'}
 
@@ -58,7 +59,7 @@ def main():
     sys.dont_write_bytecode = True
     import convert
     for name, m in (('hel', M_HEL), ('ax', M_AX), ('empty', M_EMPTY), ('dxmain', M_DXMAIN),
-                    ('emptystate', M_EMPTYSTATE)):
+                    ('emptystate', M_EMPTYSTATE), ('dx0', M_DX0)):
         b = bytes(4) + bytes.fromhex(m) + b'\xaa'
         groups, end = convert.parse_t2(b, 4)
         print(f'parse_t2 {name} @4: end={end} groups={groups_repr(groups)}')
@@ -72,6 +73,7 @@ def main():
              ('hel_keep123458', M_HEL, [2], [1, 2, 3, 4, 5, 8]), ('hel2_keep123458', M_HEL2, [2], [1, 2, 3, 4, 5, 8]),
              ('empty_keep2', M_EMPTY, [2], [2]), ('emptystate_keep2', M_EMPTYSTATE, [2], [2]),
              ('dxmain_keep234', M_DXMAIN, [2], [2, 3, 4]), ('dxmain_keep24', M_DXMAIN, [2], [2, 4]),
+             ('dx0_keep04', M_DX0, [2], [0, 4]),
 ('hel_t5_keep2345', M_HEL, [2, 5], [2, 3, 4, 5]))
     for name, m, sections, kept in cases:
         ref = types.SimpleNamespace(cat=cat_of(bytes.fromhex(m)))

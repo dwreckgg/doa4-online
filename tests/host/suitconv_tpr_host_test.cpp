@@ -837,6 +837,10 @@ static void TestCatHelpers() {
     // a 0xDX entry in the main group (old grammar: d2 a marker, the 00 inside the entry the end: "end=9 groups=main:9001/2 d2:")
     const std::string dxm = parse_repr("900102d2000303900204" "00");
     CKF(dxm == "end=15 groups=main:9001/2,d20003/3,9002/4", "%s", dxm.c_str());
+    // object 0 in a 3-byte entry and in a 0xDX entry, both followed by more entries: neither 00 id byte ends the map
+    // (old grammar: d2, 01, 03 markers and the 0xDX entry's 00 id the end: "end=10 groups=main:9001/0 d2: 01: 03:")
+    const std::string dx0 = parse_repr("900100d2010300900204" "00");
+    CKF(dx0 == "end=15 groups=main:9001/0,d20103/0,9002/4", "%s", dx0.c_str());
     // an EMPTY state group is a group (old grammar: "end=15 groups=main:9001/2 60: 33: 60: 34:9034/7")
     const std::string est = parse_repr("900102" "6033" "6034903407" "00");
     CKF(est == "end=15 groups=main:9001/2 s33: s34:9034/7", "%s", est.c_str());
