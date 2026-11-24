@@ -1259,6 +1259,73 @@ static void RunRealArchive() {
               flip ? " (entry 46 flipped)" : "");
 }
 
+// ---------------------------------------------------------------- install_order (Task 9, plan Amendment 2): the order of
+// the overlay attempts and the colour outcome, through the REAL colour_costumes::Decide. Every expected row is written
+// out here by hand from the rule (and, for "no extras", from dead_or_alive_4_app.h's block of before Task 9:
+// first build+install with the colours when usable; on its failure with colours, a retry without them when suits are
+// present, else "nothing else to install" = retry ok), never from InstallOrder's or Decide's output.
+using Outcome = doa4::colour_costumes::InstallOutcome;
+static const char* OutcomeName(Outcome o) {
+  switch (o) {
+    case Outcome::kInstalled: return "kInstalled";
+    case Outcome::kDropped: return "kDropped";
+    case Outcome::kNotUsable: return "kNotUsable";
+    case Outcome::kFailed: return "kFailed";
+  }
+  return "?";
+}
+static std::string AttemptsText(const std::vector<xc::Attempt>& a) {
+  std::string s;
+  for (const xc::Attempt& x : a) s += std::string(s.empty() ? "" : " ") + "{" + (x.extras ? "X" : "") + (x.colours ? "C" : "") + "}";
+  return s.empty() ? "(none)" : s;
+}
+static void Order(int line, bool extras, bool colours, bool suits, const std::vector<bool>& results,
+                  const std::vector<xc::Attempt>& want_attempts, Outcome want) {
+  const xc::InstallPlan p = xc::InstallOrder(extras, colours, suits, results);
+  const bool ok = p.attempts == want_attempts && p.outcome == want;
+  Check(ok, __FILE__, line, "InstallOrder", "x%d c%d s%d: got %s %s, want %s %s", extras, colours, suits,
+        AttemptsText(p.attempts).c_str(), OutcomeName(p.outcome), AttemptsText(want_attempts).c_str(), OutcomeName(want));
+}
+
+static void TestInstallOrder() {
+  const xc::Attempt XC{true, true}, X{true, false}, C{false, true}, S{false, false};
+  // (a) the extras fail, then success without them: with colours (kInstalled), without colours (kNotUsable).
+  Order(__LINE__, true, true, true, {false, true}, {XC, C}, Outcome::kInstalled);
+  Order(__LINE__, true, false, true, {false, true}, {X, S}, Outcome::kNotUsable);
+  // (b) extras and colours both dropped: the suits alone install (kDropped), or fail too (kFailed: the suits' own
+  // failure, as before Task 9; the extras took no part in it).
+  Order(__LINE__, true, true, true, {false, false, true}, {XC, C, S}, Outcome::kDropped);
+  Order(__LINE__, true, true, true, {false, false, false}, {XC, C, S}, Outcome::kFailed);
+  // (c) extras only (no suits, colours not usable), X fails: kNotUsable, NOT kFailed (folding X into the block's first
+  // attempt would give Decide(false, false, ...) = kFailed: suits_status_.Fail, and MustRefuse in a match). The
+  // block does not run, so nothing else is tried.
+  Order(__LINE__, true, false, false, {false}, {X}, Outcome::kNotUsable);
+  // ... and with colours usable, no suits: X fails, {C} fails, the retry has nothing to install: kDropped, as before.
+  Order(__LINE__, true, true, false, {false, false}, {XC, C}, Outcome::kDropped);
+  Order(__LINE__, true, true, false, {false, true}, {XC, C}, Outcome::kInstalled);
+  // (d) X succeeds: colours not usable gives kNotUsable, usable gives kInstalled; one attempt, whatever comes after.
+  Order(__LINE__, true, false, false, {true, false, false}, {X}, Outcome::kNotUsable);
+  Order(__LINE__, true, false, true, {true, false, false}, {X}, Outcome::kNotUsable);
+  Order(__LINE__, true, true, true, {true, false, false}, {XC}, Outcome::kInstalled);
+  Order(__LINE__, true, true, false, {true}, {XC}, Outcome::kInstalled);
+  // (e) no extras: exactly the sequence of before Task 9, all 8 of (colours usable, first ok, retry ok), suits present.
+  // results = {first, retry}; a retry result is read only when a retry is made.
+  Order(__LINE__, false, false, true, {false, false}, {S}, Outcome::kFailed);
+  Order(__LINE__, false, false, true, {false, true}, {S}, Outcome::kFailed);
+  Order(__LINE__, false, false, true, {true, false}, {S}, Outcome::kNotUsable);
+  Order(__LINE__, false, false, true, {true, true}, {S}, Outcome::kNotUsable);
+  Order(__LINE__, false, true, true, {false, false}, {C, S}, Outcome::kFailed);
+  Order(__LINE__, false, true, true, {false, true}, {C, S}, Outcome::kDropped);
+  Order(__LINE__, false, true, true, {true, false}, {C}, Outcome::kInstalled);
+  Order(__LINE__, false, true, true, {true, true}, {C}, Outcome::kInstalled);
+  // no extras, no suits: colours alone (retry = nothing else to install), or nothing at all (the block's gate is shut).
+  Order(__LINE__, false, true, false, {false}, {C}, Outcome::kDropped);
+  Order(__LINE__, false, true, false, {true}, {C}, Outcome::kInstalled);
+  Order(__LINE__, false, false, false, {true}, {}, Outcome::kNotUsable);
+  // An attempt past the end of `results` counts as failed (not as a success).
+  Order(__LINE__, true, false, true, {}, {X, S}, Outcome::kFailed);
+}
+
 int main(int argc, char** argv) {  // no arguments are read
   (void)argc;
   (void)argv;
@@ -1284,6 +1351,7 @@ int main(int argc, char** argv) {  // no arguments are read
   RunGroup(TestAllocationFailuresSticky, "allocation_failures_sticky");
   RunGroup(TestDefaultOpener, "default_opener");
   RunGroup(TestHashFailureInstallsNothing, "hash_failure_installs_nothing");
+  RunGroup(TestInstallOrder, "install_order");
   RunRealArchive();
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);

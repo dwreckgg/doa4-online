@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "doa4_afs_overlay.h"
+#include "doa4_colour_costumes.h"
 
 namespace doa4::extras_copies {
 
@@ -73,5 +74,26 @@ ReadEntry ReadEntryFromSource(std::shared_ptr<const afs::Source> archive);
 // `open` is the opener (a test seam); empty = afs::FileSource::Open (read-only).
 using Opener = std::function<std::shared_ptr<const afs::Source>(const std::filesystem::path&)>;
 ReadEntry ReadEntryFrom(const std::filesystem::path& archive, Opener open = {});
+
+// ---- The archive overlay's install order (Task 9; plan Amendment 2, "Retry order as a pure function") ----
+// One overlay attempt: which optional entries were in its build (the swimsuits are in every attempt).
+struct Attempt {
+  bool extras = false;   // the copies' chrtwo.afs entries
+  bool colours = false;  // the colour costumes' avt.afs entries
+  bool operator==(const Attempt&) const = default;
+};
+struct InstallPlan {
+  std::vector<Attempt> attempts;  // in the order made
+  colour_costumes::InstallOutcome outcome = colour_costumes::InstallOutcome::kNotUsable;  // what the app acts on
+};
+// The order SetUpSuits' InstallSuitsAndColours follows (dead_or_alive_4_app.h; the app's wiring is checked by runs only):
+// attempt X = {extras, colours} first, only when extras are present. If X builds and installs, that is the outcome
+// colour_costumes::Decide(colours_usable, true, true, _) gives, and nothing else is tried. Otherwise the extras are
+// dropped and the block of before Task 9 runs unchanged: only when suits are present or colours are usable, {colours}
+// (or {} when colours are not usable); after a failure with colours, {} again when suits are present (with no suits
+// that retry counts as done, "nothing else to install"); its outcome is Decide's. Neither block runs: kNotUsable. So an
+// extras failure never yields kFailed on its own (Decide never sees it). results[i] is whether attempt i built and
+// installed; an attempt past the end of `results` counts as failed.
+InstallPlan InstallOrder(bool extras_present, bool colours_usable, bool suits_present, const std::vector<bool>& results);
 
 }  // namespace doa4::extras_copies

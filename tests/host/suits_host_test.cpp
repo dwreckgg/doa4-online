@@ -922,8 +922,9 @@ static void TestBuildOverlaysExtraAndSuits() {
   CHECK(changed.empty() && error == "chrone.afs changed since the import was checked (entry 71)");
 }
 
-// An entry named by both a suit and an extra: no overlays, and the error names both (cannot happen with the compiled
-// colour table, whose entries are in avt.afs, where no suit may be).
+// An entry named by both a suit and an extra: no overlays, and the error names the suit and says "another start-up
+// replacement" (the extras are the colour costumes' avt.afs entries and the extras copies' chrtwo.afs entries; cannot
+// happen with the compiled tables: no suit may be in avt.afs, and the copies replace retail costumes, never a slot).
 static void TestBuildOverlaysExtraCollides() {
   World w;
   FakeGuest g;
@@ -935,11 +936,11 @@ static void TestBuildOverlaysExtraCollides() {
   std::string error;
   auto overlays = BuildOverlays(s, w.game, g.guest, &error, {{"avt.afs", {{373, x}}}, {"chrone.afs", {{65, x}}}});
   CHECK(overlays.empty());
-  CHECK(error == "chrone.afs entry 65 is both the swimsuit vks_ch_d c0 (tpr) and a colour costume's file");
+  CHECK(error == "chrone.afs entry 65 is both the swimsuit vks_ch_d c0 (tpr) and another start-up replacement");
   error.clear();
   overlays = BuildOverlays(s, w.game, g.guest, &error, {{"chrone.afs", {{72, x}}}});
   CHECK(overlays.empty());
-  CHECK(error == "chrone.afs entry 72 is both the swimsuit vay_cs_b c0 (cat) and a colour costume's file");
+  CHECK(error == "chrone.afs entry 72 is both the swimsuit vay_cs_b c0 (cat) and another start-up replacement");
   // Control: the entry between the two suits' pairs collides with nothing, and builds.
   error.clear();
   overlays = BuildOverlays(s, w.game, g.guest, &error, {{"chrone.afs", {{70, x}}}});

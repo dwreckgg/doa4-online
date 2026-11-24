@@ -8,7 +8,8 @@ rem no fast-math, no errno), as run_suitconv_slim_test.bat builds the slim core.
 rem %TEMP%\doa4_suitconv_test\obj\ (named after their source), where suitconv_fp_scan.py scans them before the test
 rem runs; the test's own object, doa4_extras_copies.obj (not a converter file: the core runs under its own FP
 rem environment inside SlimCopies) and the archive, game-file and disc readers it links (doa4_afs_overlay,
-rem doa4_gamefiles, doa4_xdvdfs) go to ...\testobj\.
+rem doa4_gamefiles, doa4_xdvdfs) go to ...\testobj\, with doa4_colour_costumes and what it needs (doa4_suits_manifest,
+rem doa4_tweaks, doa4_costumes): the install_order group runs InstallOrder over the real colour_costumes::Decide.
 rem DOA4_SUITCONV_OUT, if set, replaces that output folder (the mutation probes build their copies elsewhere).
 rem DOA4_EXTRAS_GAME_DIR, if set, is a game folder holding chrtwo.afs (opened for reading only): the "extras real
 rem archive" group then runs Build on it and expects all three costumes built with G0's SHA-1s. Unset, it prints
@@ -33,18 +34,18 @@ rem mutation probe of its count guard survived without it). It adds checks only;
 set CXXFLAGS=/nologo /std:c++latest /EHsc /O2 /D_MSVC_STL_HARDENING=1 %FPFLAGS%
 set "LOG=%OUT%\extras_build.log"
 for %%f in (suitconv_num suitconv_tpr suitconv_core suitconv_slimread suitconv_slimgrid suitconv_slimscan suitconv_slimwrite) do if exist "%OUT%\obj\doa4_%%f.obj" del /q "%OUT%\obj\doa4_%%f.obj"
-for %%f in (extras_copies_host_test doa4_extras_copies doa4_afs_overlay doa4_gamefiles doa4_xdvdfs) do if exist "%OUT%\testobj\%%f.obj" del /q "%OUT%\testobj\%%f.obj"
+for %%f in (extras_copies_host_test doa4_extras_copies doa4_afs_overlay doa4_gamefiles doa4_xdvdfs doa4_colour_costumes doa4_suits_manifest doa4_tweaks doa4_costumes) do if exist "%OUT%\testobj\%%f.obj" del /q "%OUT%\testobj\%%f.obj"
 if exist "%OUT%\extras_copies_host_test.exe" del /q "%OUT%\extras_copies_host_test.exe"
 type nul > "%LOG%"
 for %%f in (suitconv_num suitconv_tpr suitconv_core suitconv_slimread suitconv_slimgrid suitconv_slimscan suitconv_slimwrite) do (
   clang-cl %CXXFLAGS% /c "%SRC%\doa4_%%f.cpp" /Fo"%OUT%\obj\doa4_%%f.obj" >> "%LOG%" 2>&1 || goto failed
 )
-for %%f in (doa4_extras_copies doa4_afs_overlay doa4_gamefiles doa4_xdvdfs) do (
+for %%f in (doa4_extras_copies doa4_afs_overlay doa4_gamefiles doa4_xdvdfs doa4_colour_costumes doa4_suits_manifest doa4_tweaks doa4_costumes) do (
   clang-cl %CXXFLAGS% /c "%SRC%\%%f.cpp" /Fo"%OUT%\testobj\%%f.obj" >> "%LOG%" 2>&1 || goto failed
 )
 clang-cl %CXXFLAGS% /c "%~dp0extras_copies_host_test.cpp" /Fo"%OUT%\testobj\extras_copies_host_test.obj" >> "%LOG%" 2>&1
 if errorlevel 1 goto failed
-clang-cl /nologo "%OUT%\testobj\extras_copies_host_test.obj" "%OUT%\obj\doa4_suitconv_num.obj" "%OUT%\obj\doa4_suitconv_tpr.obj" "%OUT%\obj\doa4_suitconv_core.obj" "%OUT%\obj\doa4_suitconv_slimread.obj" "%OUT%\obj\doa4_suitconv_slimgrid.obj" "%OUT%\obj\doa4_suitconv_slimscan.obj" "%OUT%\obj\doa4_suitconv_slimwrite.obj" "%OUT%\testobj\doa4_extras_copies.obj" "%OUT%\testobj\doa4_afs_overlay.obj" "%OUT%\testobj\doa4_gamefiles.obj" "%OUT%\testobj\doa4_xdvdfs.obj" bcrypt.lib /Fe"%OUT%\extras_copies_host_test.exe" >> "%LOG%" 2>&1
+clang-cl /nologo "%OUT%\testobj\extras_copies_host_test.obj" "%OUT%\obj\doa4_suitconv_num.obj" "%OUT%\obj\doa4_suitconv_tpr.obj" "%OUT%\obj\doa4_suitconv_core.obj" "%OUT%\obj\doa4_suitconv_slimread.obj" "%OUT%\obj\doa4_suitconv_slimgrid.obj" "%OUT%\obj\doa4_suitconv_slimscan.obj" "%OUT%\obj\doa4_suitconv_slimwrite.obj" "%OUT%\testobj\doa4_extras_copies.obj" "%OUT%\testobj\doa4_afs_overlay.obj" "%OUT%\testobj\doa4_gamefiles.obj" "%OUT%\testobj\doa4_xdvdfs.obj" "%OUT%\testobj\doa4_colour_costumes.obj" "%OUT%\testobj\doa4_suits_manifest.obj" "%OUT%\testobj\doa4_tweaks.obj" "%OUT%\testobj\doa4_costumes.obj" bcrypt.lib /Fe"%OUT%\extras_copies_host_test.exe" >> "%LOG%" 2>&1
 if errorlevel 1 goto failed
 rem The FP scan of every converter object comes first: any FMA instruction or C runtime math call (or a scan that
 rem cannot run) fails the runner with the default summary shape, as one failed check, and the test does not run.

@@ -201,6 +201,28 @@ Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::sp
   return result;
 }
 
+InstallPlan InstallOrder(bool extras_present, bool colours_usable, bool suits_present, const std::vector<bool>& results) {
+  InstallPlan plan;
+  // The result of the next attempt, recorded as made; one past the end of `results` failed.
+  const auto attempt = [&](bool extras, bool colours) {
+    const size_t i = plan.attempts.size();
+    plan.attempts.push_back({extras, colours});
+    return i < results.size() && results[i];
+  };
+  // Attempt X: the extras with whatever else goes in. On success nothing else is tried.
+  if (extras_present && attempt(true, colours_usable)) {
+    plan.outcome = colour_costumes::Decide(colours_usable, true, true, false);
+    return plan;
+  }
+  // The block of before Task 9, with no extras in it (dead_or_alive_4_app.h InstallSuitsAndColours).
+  if (!suits_present && !colours_usable) return plan;  // its gate is shut: kNotUsable
+  const bool first_ok = attempt(false, colours_usable);
+  bool retry_ok = false;
+  if (colours_usable && !first_ok) retry_ok = suits_present ? attempt(false, false) : true;  // true: nothing else
+  plan.outcome = colour_costumes::Decide(colours_usable, first_ok, first_ok, retry_ok);
+  return plan;
+}
+
 ReadEntry ReadEntryFromSource(std::shared_ptr<const afs::Source> archive) {
   struct State {
     std::shared_ptr<const afs::Source> source;

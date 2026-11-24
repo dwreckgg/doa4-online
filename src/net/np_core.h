@@ -136,7 +136,7 @@ struct Recording {
 // dropped (reported in *note).
 bool DecodeRecording(std::string_view bytes, Recording* out, std::string* error,
                      std::string* note = nullptr);
-// "" when the nine keys build, data, fixes, serial, sweep, tweaks, guest, unlock and suits of two
+// "" when the ten keys build, data, fixes, serial, sweep, tweaks, guest, unlock, suits and extras_copies of two
 // meta texts agree (a key missing from one text, as in a version-1 recording or a phase-0 one, reads "(none)", so two
 // metas that both lack guest and unlock agree on them); else "<key> <recorded> vs <current>; ..." in that key order. Other keys
 // are ignored: a "colours" line too (the colour costumes are in every process of the build, so no recording says
@@ -147,6 +147,10 @@ std::string MetaMismatch(std::string_view recorded, std::string_view current);
 // version-1 recording). A key is a whole name at the start of a line ("unlockx=1" is not "unlock"), the first
 // such line counts, and an empty value is a value ("unlock=" gives ""). MetaMismatch reads every key through it.
 std::string MetaValue(std::string_view meta, std::string_view key);
+// The extras_copies meta line (extras-copies plan Task 9): "" when `sha1` is empty (no copies installed: no key, the
+// same as both extra-costume boxes off), else "extras_copies=<sha1>\n". The online, record and replay starts add it
+// to their meta (np_session.cpp), so two PCs or a replay with different copies are refused by MetaMismatch.
+std::string ExtrasCopiesMetaLine(std::string_view sha1);
 
 // ---- Fix sets (DOA4_NP_FIX; the recording's meta key "fixes") ----
 // The determinism layer's fixes in bit order: fix i is bit 1u << i (np_det_internal.h Fix, pinned there).

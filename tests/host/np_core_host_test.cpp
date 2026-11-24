@@ -289,6 +289,54 @@ static void TestMetaMismatch() {
   CHECK(MetaMismatch(meta("aa", "unreadable"), meta("aa", "unreadable")).find("build") == std::string::npos);
 }
 
+// Extras-copies plan Task 9: the extras_copies key (the SHA-1 of the reflection/shadow copies this PC built at start-up,
+// written by the online, record and replay starts only when copies were installed) is the tenth key MetaMismatch
+// compares. Expected strings are written out from the rule ("<key> <recorded> vs <current>", in the list's order,
+// extras_copies last), never taken from MetaMismatch's own output.
+static void TestExtrasCopiesKey() {
+  std::printf("-- TestExtrasCopiesKey\n");
+  const std::string cur = "build=aa\ndata=dd\nfixes=all\nserial=default\nsweep=4\ntweaks=x=0\n";
+  const std::string a = "1111111111111111111111111111111111111111", b = "2222222222222222222222222222222222222222";
+  // The meta line: "" for no copies (sha1 ""), else the key and the value on one line. Excludes: a line written for
+  // an empty sha1 ("extras_copies=\n" would read as the value "" and disagree with "(none)"); the condition inverted.
+  CHECK(ExtrasCopiesMetaLine("").empty());
+  { const std::string got = ExtrasCopiesMetaLine(a); CHECK(got == "extras_copies=1111111111111111111111111111111111111111\n"); }
+  CHECK(MetaValue(cur + ExtrasCopiesMetaLine(a), "extras_copies") == a);
+  CHECK(MetaValue(cur + ExtrasCopiesMetaLine(""), "extras_copies") == "(none)");
+  // Equal on both sides: agrees. Excludes: a comparison that refuses whenever the key is present.
+  { const std::string got = MetaMismatch(cur + "extras_copies=" + a + "\n", cur + "extras_copies=" + a + "\n"); CHECK(got.empty()); }
+  // Different: refused, naming the key and both values. Excludes: the key left out of the list (the pair agrees).
+  {
+    const std::string got = MetaMismatch(cur + "extras_copies=" + a + "\n", cur + "extras_copies=" + b + "\n");
+    CHECK(got == "extras_copies " + a + " vs " + b);
+  }
+  // Present on one side only, both directions: "(none)" on the side without it.
+  { const std::string got = MetaMismatch(cur + "extras_copies=" + a + "\n", cur); CHECK(got == "extras_copies " + a + " vs (none)"); }
+  { const std::string got = MetaMismatch(cur, cur + "extras_copies=" + a + "\n"); CHECK(got == "extras_copies (none) vs " + a); }
+  // Absent on both: no line, and the pinned version-1 string (TestMetaMismatch) has no extras_copies part.
+  { const std::string got = MetaMismatch(cur, cur); CHECK(got.empty()); }
+  {
+    const std::string got = MetaMismatch("", cur);
+    CHECK(got == "build (none) vs aa; data (none) vs dd; fixes (none) vs all; serial (none) vs default; sweep (none) vs 4; "
+                 "tweaks (none) vs x=0");
+  }
+  // The key's place in the order: after suits. Excludes: the key inserted ahead of an older one.
+  {
+    const std::string got = MetaMismatch(cur + "suits=same\nextras_copies=" + a + "\n", cur);
+    CHECK(got == "suits same vs (none); extras_copies " + a + " vs (none)");
+  }
+  // A whole key name: "extras_copies2" and "xextras_copies" are other keys.
+  { const std::string got = MetaMismatch(cur + "extras_copies2=" + a + "\nxextras_copies=" + a + "\n", cur); CHECK(got.empty()); }
+  // All ten keys differ (written in reverse), and a colours line: ten parts in the list's order, no colours part.
+  {
+    const std::string got = MetaMismatch(
+        "colours=1\nextras_copies=q\nsuits=o\nunlock=0\nguest=m\ntweaks=k\nsweep=i\nserial=g\nfixes=e\ndata=c\nbuild=a\n",
+        "colours=2\nextras_copies=r\nsuits=p\nunlock=1\nguest=n\ntweaks=l\nsweep=j\nserial=h\nfixes=f\ndata=d\nbuild=b\n");
+    CHECK(got == "build a vs b; data c vs d; fixes e vs f; serial g vs h; sweep i vs j; tweaks k vs l; guest m vs n; "
+                 "unlock 0 vs 1; suits o vs p; extras_copies q vs r");
+  }
+}
+
 // Colour generator plan Task 6: the colour slots are in every process of the build, so a recording no longer says
 // whether it was made with them. No "colours" key is written, and MetaMismatch reads none: a recording of another build
 // is refused by its build key. Each call of MetaMismatch is a statement of its own; each row names what it excludes.
@@ -303,8 +351,9 @@ static void TestColoursKeyIgnored() {
   { const std::string got = MetaMismatch(cur + "colours=1\n", cur + "colours=0\n"); CHECK(got.empty()); }
   // Control: the same pair with a key that is compared. Excludes: a comparison that sees no added line at all.
   { const std::string got = MetaMismatch(cur + "suits=same\n", cur); CHECK(got == "suits same vs (none)"); }
-  // The key list: nine keys, named in this order, and no tenth. Every one of the nine differs here, and so does a
-  // colours line on each side. Excludes: a key dropped with colours, and colours left in the list.
+  // The key list's first nine keys, named in this order (the tenth, extras_copies, is TestExtrasCopiesKey's, which
+  // repeats this row with all ten). Every one of the nine differs here, and so does a colours line on each side.
+  // Excludes: a key dropped with colours, and colours left in the list.
   {
     const std::string got =
         MetaMismatch("colours=1\nsuits=o\nunlock=0\nguest=m\ntweaks=k\nsweep=i\nserial=g\nfixes=e\ndata=c\nbuild=a\n",
@@ -1322,6 +1371,7 @@ int main() {
   TestRecording();
   TestMetaMismatch();
   TestColoursKeyIgnored();
+  TestExtrasCopiesKey();
   TestMetaGuestUnlock();
   TestMaskedCopy();
   TestBlockMasks();

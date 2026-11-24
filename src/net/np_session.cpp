@@ -411,7 +411,8 @@ std::string GuestMeta(const std::string& text) {
 
 // The recording's meta text (np_core.h): what a replay must match to run at all. The tweaks patch the
 // game's tables at boot (SetUpExtras, before this runs), so their state is part of the build. `extra` = the
-// mode's guest / unlock keys (and the online session's informational key).
+// mode's guest / unlock keys (and the online session's informational key), and in every mode the extras_copies key
+// when copies were installed (ExtrasCopiesMetaLine).
 std::string CurrentMeta(const std::filesystem::path& game_data_root, uint32_t sweep_per_frame, const std::string& extra) {
   std::string tweaks;
   for (const auto& t : doa4::tweaks::AllTweaks()) {
@@ -1736,6 +1737,7 @@ void StartOnline(Host host) {
   const std::string extra = "guest=" + s.guest_meta + "\nunlock=1\nguest_skipped=" +
                             (g_skipped.empty() ? std::string("none") : g_skipped) + "\nsession=online role=" +
                             std::string(s.slot == 0 ? "host" : "joiner") + " delay=" + std::to_string(s.ho.delay) + "\n" + suits_meta +
+                            ExtrasCopiesMetaLine(s.host.extras_copies_sha1) +  // extras-copies Task 9: "" when none
                             start_rules::MetaLine(start_rules::MemoryWriteArmed());  // fix round 1: a replay arms from it
   // The worker order's inputs, before CurrentMeta (its workers= line is the decision). Lockstep port B3: the order is the host's, from
   // the hand-off's worker_order byte (0 lanes, 1 serial; range-checked by handoff::Unpack), the same byte in both session processes;
@@ -2060,6 +2062,10 @@ void Start(Host host) {
     if (s.guest_meta != "(none)") extra += "guest=" + s.guest_meta + "\n";
     if (s.unlock_meta != "(none)") extra += "unlock=" + s.unlock_meta + "\n";
   }
+  // Extras-copies Task 9 (plan Amendment 2): the copies' key in both modes, when copies were installed. A replay applies
+  // the recording's guest settings (the two extra-costume boxes among them) before Build runs, so a retail PC builds
+  // the same SHA-1 and agrees; a recording that carries the key would otherwise be refused "<sha1> vs (none)".
+  extra += ExtrasCopiesMetaLine(s.host.extras_copies_sha1);
 
   std::string error;
   std::string note;                                      // a replay's decode note

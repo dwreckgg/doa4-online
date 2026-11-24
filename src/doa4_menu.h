@@ -89,6 +89,10 @@ struct MenuHost {
   // stay wrong. The saved setting is the cvar doa4_alpha152, which her box changes; while the two differ the tab says
   // "Applies after a restart" (tweaks::RestartNoteFor). Unset reads as "not loaded yet".
   std::function<std::optional<bool>()> running_alpha152;
+  // The extras copies (doa4_extras_copies.h): the two extra-costume boxes as the start-up build read them (bit 0 Helena's
+  // opera dress, bit 1 Kokoro's kimonos: Built::boxes_at_start), or -1 until the build has run. A getter for the same
+  // reason as running_alpha152. Unset reads as -1. (Task 10 draws the restart note from it.)
+  std::function<int()> extras_copies_at_start;
   tweaks::ProtectFn protect;
   // DOAX2 swimsuits: the import's one-line status, and each suit not loaded with why.
   std::string suits_summary;
