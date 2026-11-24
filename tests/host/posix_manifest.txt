@@ -84,7 +84,7 @@ vanilla | tests/host/vanilla_host_test.cpp | -D_GLIBCXX_ASSERTIONS
 !dpps | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include, %REXSDK_DIR%\thirdparty\simde
 !early_swap | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include
 !exclusive_mode | needs the SDK: %REXSDK_DIR%, %REXSDK_DIR%\include
-!extras_copies | windows header: tests/host/extras_copies_host_test.cpp:57 windows.h
+!extras_copies | windows header: tests/host/extras_copies_host_test.cpp:58 windows.h
 !gamefiles | windows header: tests/host/gamefiles_host_test.cpp:7 windows.h
 !language | needs the SDK: ../rexglue-sdk/thirdparty/tomlplusplus/include
 !np_exec | windows header: tests/host/np_exec_host_test.cpp:22 windows.h
