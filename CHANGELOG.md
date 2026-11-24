@@ -72,9 +72,10 @@
 - Both players need 0.3.8: it does not connect to 0.3.7.
 - Linux: players report that the Windows build works under Proton, offline and online, including online with players
   on Windows. Linux is still not officially supported.
-- The source now also builds as a native Linux program, for people who build it themselves; there is no Linux
-  download. Online, a self-built game only joins the same self-built game, so Proton stays the way to play with
-  everyone else.
+- The source now also builds as a native Linux program, for people who build it themselves (steps:
+  [docs/BUILDING.md, section 12](https://github.com/dwreckgg/doa4-online/blob/main/docs/BUILDING.md#12-native-linux-build));
+  there is no Linux download. Online, a self-built game only joins the same self-built game, so Proton stays the way
+  to play with everyone else.
 
 ## 0.3.7 (2026-11-19)
 

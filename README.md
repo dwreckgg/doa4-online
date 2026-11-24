@@ -332,8 +332,8 @@ restored when it ends.
 Linux is not officially supported yet, and there is no Linux download. **Use the Windows build under Proton**: players
 report that it works offline and online, including online sessions with players on Windows.
 
-Since 0.3.8 the source also builds as a native Linux program (thanks to rynoster; the steps are the ones the
-`.github/workflows/linux-build.yml` job runs). That is for people who build it themselves: online, a self-built game can only
+Since 0.3.8 the source also builds as a native Linux program (thanks to rynoster): the steps are in
+[docs/BUILDING.md, section 12](docs/BUILDING.md#12-native-linux-build). That is for people who build it themselves: online, a self-built game can only
 join the same self-built game, never the release, so for playing online with everyone else, Proton is the way.
 
 - **0.3.8 fixes the black screen at start-up under Proton**

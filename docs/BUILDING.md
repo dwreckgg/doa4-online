@@ -2,7 +2,8 @@
 
 This is for contributors. Players do not need it: they download a release (see the
 [README](../README.md)). The repository holds **no game data**: you build the game, then run it against
-files extracted from your own copy of *Dead or Alive 4*.
+files extracted from your own copy of *Dead or Alive 4*. Sections 1 to 11 are the Windows build; the native
+Linux build is [section 12](#12-native-linux-build).
 
 The game is a static recompilation: the Xbox 360 code is translated ahead of time into C++
 (`generated/`, checked in), and the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) supplies the
@@ -278,3 +279,85 @@ published.
 | `clang` not found / CMake picks the wrong compiler | LLVM's `bin` folder is not first on `PATH` in that window. |
 | CMake warning `no v* tag reachable from HEAD` | Harmless; the build is not affected. |
 | `no XDVDFS volume found` from the extractor | The file is not an Xbox / Xbox 360 game image (or is damaged). |
+
+## 12. Native Linux build
+
+Since 0.3.8 the source also builds as a native Linux program (x86-64), thanks to rynoster. There is no Linux
+download: this is for people who build it themselves. **Players who want to play online with everyone else should
+use the Windows release under Proton** (see the README's Linux section). A self-built game reports the release
+tag `dev`, and online it can only join the same self-built game (section 6, "Release identity").
+
+The steps below are the ones the CI job `.github/workflows/linux-build.yml` runs on every push to `main`, on
+Ubuntu 24.04. That job builds the game and runs its host tests, but it does not start the game, so the
+"Run" part is less tested than the build. Other distributions need the same packages under their own names.
+
+**Packages (Ubuntu 24.04).** clang 23 from [apt.llvm.org](https://apt.llvm.org), by its own script, then the build
+tools and the libraries the SDK and SDL3 need:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y wget gnupg lsb-release
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 23
+sudo apt-get install -y clang-23
+sudo apt-get install -y cmake ninja-build build-essential git curl unzip autoconf python3 libstdc++-14-dev
+sudo apt-get install -y pkg-config libx11-xcb-dev libwayland-dev libgtk-3-dev
+sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+  libxss-dev libxtst-dev libxkbcommon-dev libdecor-0-dev libdbus-1-dev libibus-1.0-dev libudev-dev \
+  libdrm-dev libgbm-dev libegl1-mesa-dev
+sudo apt-get install -y libasound2-dev libpulse-dev libpipewire-0.3-dev
+sudo apt-get install -y libvulkan-dev glslc glslang-tools
+```
+
+The game draws with Vulkan, so the PC also needs a working Vulkan driver (Mesa's `mesa-vulkan-drivers` on AMD
+and Intel, NVIDIA's own driver on NVIDIA); `vulkaninfo --summary` (package `vulkan-tools`) shows whether one is
+found.
+
+**Sources.** The same as section 4, without the symlink fix (git on Linux checks symlinks out as symlinks):
+
+```sh
+mkdir -p ~/doa4 && cd ~/doa4
+git clone -b main https://github.com/Dwreckgg/doa4-online doa4-online
+cat doa4-online/netplay_sdk.txt
+git clone --filter=blob:none https://github.com/Dwreckgg/rexglue-sdk rexglue-sdk
+git -C rexglue-sdk checkout <the commit from netplay_sdk.txt>
+git -C rexglue-sdk submodule update --init --recursive
+```
+
+**Build.** From the `doa4-online` folder:
+
+```sh
+cd ~/doa4/doa4-online
+cmake --preset linux-amd64-release -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
+  "-DCMAKE_C_FLAGS=-march=x86-64-v2" "-DCMAKE_CXX_FLAGS=-march=x86-64-v2" -DREXSDK_DIR=$HOME/doa4/rexglue-sdk
+cmake --build --preset linux-amd64-release -- -j 2
+```
+
+- The compiler flags name clang 23 because the preset's default (`clang-20`) is not what the CI job uses.
+- `-march=x86-64-v2` is required, as on Windows (section 6).
+- `-j 2`: the largest recompiled files take several GB of memory each to compile. Two at a time is what the CI job
+  runs on a 16 GB machine; raise it only with more memory. The first build takes a long time (the CI job allows up
+  to four hours on two cores).
+- The Linux build does not use the PGO profile in `pgo/` (that is part of the Windows build script only).
+
+The result is `out/build/linux-amd64-release/dead_or_alive_4` with `librexruntime.so` beside it. Keep the two
+together: the program looks for the library in its own folder. `ldd out/build/linux-amd64-release/dead_or_alive_4`
+should show no "not found" line.
+
+**Run.** Start `out/build/linux-amd64-release/dead_or_alive_4`. The first start shows the same setup screen as on
+Windows (section 5); its file dialog is SDL3's, which uses your desktop's file chooser. Without a usable chooser,
+extract the game by hand with `python3 tools/xdvdfs_extract.py "<image>.iso" ~/doa4/xex/DOA4` (section 5) and start
+the game with `--game_data_root=$HOME/doa4/xex/DOA4`.
+
+- Settings: `dead_or_alive_4.toml` beside the program.
+- Logs: the `logs` folder beside the program.
+- Saves and the shader cache: `$XDG_DATA_HOME/dead_or_alive_4`, or `~/.local/share/dead_or_alive_4` when
+  `XDG_DATA_HOME` is not set; `--user_data_root=<folder>` overrides it.
+
+**Host tests.** The host tests listed in `tests/host/posix_manifest.txt` run on Linux too:
+
+```sh
+cd ~/doa4/doa4-online
+DOA4_CI=1 REXSDK_DIR=$HOME/doa4/rexglue-sdk python3 -I tools/run_host_tests_posix.py --cxx clang++-23
+```
