@@ -235,7 +235,7 @@ bool MustRefuseNotBuilt(bool match_process, unsigned selected, unsigned built) {
 }
 
 std::string ExtrasNotBuiltMessage(unsigned selected, unsigned built) {
-  return "extras copies: " + std::to_string(built) + " of " + std::to_string(selected) +
+  return "extras copies: " + std::to_string(selected - built) + " of " + std::to_string(selected) +
          " selected costumes not built (see the [doa4][EXTRAS] lines); untick the extra-costume boxes (online: on the "
          "host) or check the game files, then restart";
 }

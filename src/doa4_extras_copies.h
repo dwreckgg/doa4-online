@@ -113,7 +113,7 @@ InstallPlan InstallOrder(bool extras_present, bool colours_usable, bool suits_pr
 bool MustRefuseExtras(bool match_process, bool built, bool installed);
 // (2) = match && built < selected.
 bool MustRefuseNotBuilt(bool match_process, unsigned selected, unsigned built);
-// Its one line: "extras copies: <built> of <selected> selected costumes not built (see the [doa4][EXTRAS] lines);
+// Its one line: "extras copies: <selected - built> of <selected> selected costumes not built (see the [doa4][EXTRAS] lines);
 // untick the extra-costume boxes (online: on the host) or check the game files, then restart" (decimal numbers).
 std::string ExtrasNotBuiltMessage(unsigned selected, unsigned built);
 // The refusal's one line: "extras copies: built but not installed (<error>); check the game files and the swimsuit

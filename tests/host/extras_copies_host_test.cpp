@@ -1401,16 +1401,17 @@ static void TestNotBuiltRefusal() {
     CHECKF(got == r.refuse, "match %d selected %u built %u: want %d, got %d", r.match, r.selected, r.built, r.refuse, got);
   }
   CHECKF(refused == 3, "%d rows refused", refused);
-  // The message in full (the brief's text, numbers in decimal: <built> of <selected>), one line.
+  // The message in full (numbers in decimal: <selected - built> of <selected>, the ruling X100), one line.
   const std::string tail = " selected costumes not built (see the [doa4][EXTRAS] lines); untick the extra-costume boxes "
                            "(online: on the host) or check the game files, then restart";
   const std::string m21 = xc::ExtrasNotBuiltMessage(2, 1);
   CHECKF(m21 == "extras copies: 1 of 2" + tail, "%s", m21.c_str());
   const std::string m10 = xc::ExtrasNotBuiltMessage(1, 0);
-  CHECKF(m10 == "extras copies: 0 of 1" + tail, "%s", m10.c_str());
-  // two digits and the argument order (selected first): (12, 3) reads "3 of 12"
+  CHECKF(m10 == "extras copies: 1 of 1" + tail, "%s", m10.c_str());
+  // two digits, the argument order and the count of missing costumes: (12, 3) reads "9 of 12"; (1, 0) also separates
+  // missing from built ((2, 1) cannot)
   const std::string m = xc::ExtrasNotBuiltMessage(12, 3);
-  CHECKF(m == "extras copies: 3 of 12" + tail, "%s", m.c_str());
+  CHECKF(m == "extras copies: 9 of 12" + tail, "%s", m.c_str());
   CHECKF(m21.find('\n') == std::string::npos && m21.find('\r') == std::string::npos, "%s", m21.c_str());
 }
 
