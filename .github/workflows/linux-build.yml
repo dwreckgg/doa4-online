@@ -105,6 +105,23 @@ jobs:
           n=$(find out/build/linux-amd64-release -name '*.o' | wc -l)
           echo "objects built: $n"
           if [ "$n" -eq 0 ]; then exit 1; fi
+      - name: Runtime libraries
+        working-directory: doa4-recomp
+        # the game binary finds every shared library it loads: ldd lists them and a "not found" line fails the step, and
+        # librexruntime.so must be in the binary's own folder (its RUNPATH is $ORIGIN; a build that leaves the library
+        # elsewhere stops at start-up with "librexruntime.so: cannot open shared object file")
+        run: |
+          set -o pipefail
+          mapfile -t bins < <(find out/build/linux-amd64-release -type f -name dead_or_alive_4)
+          n=${#bins[@]}
+          echo "game binaries found: $n"
+          printf '%s\n' "${bins[@]}"
+          if [ "$n" -ne 1 ]; then echo "want exactly one game binary"; exit 1; fi
+          bin=${bins[0]}
+          libs=$(ldd "$bin" 2>&1) || { echo "$libs"; echo "ldd failed on $bin"; exit 1; }
+          echo "$libs"
+          if grep -q 'not found' <<< "$libs"; then echo "a shared library of $bin is not found"; exit 1; fi
+          if [ ! -e "$(dirname "$bin")/librexruntime.so" ]; then echo "librexruntime.so is not in $(dirname "$bin")"; exit 1; fi
       - name: Host tests
         working-directory: doa4-recomp
         run: |
