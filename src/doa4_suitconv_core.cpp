@@ -277,13 +277,35 @@ Model LoadModel(std::string name, std::span<const uint8_t> tpr_bytes, std::share
   return m;
 }
 
+// ------------------------------------------------------------------ the type-2 map (parse_t2, t2_bytes)
+// tpr::ParseT2 is the census grammar's one implementation; its two refusals are Python ValueErrors, named here as this
+// file names every Python exception ("ValueError: type-2 map: ..."). A read past the buffer keeps its own text.
+static std::pair<std::vector<tpr::T2Group>, uint64_t> ParseMapPy(std::span<const uint8_t> c, uint64_t off) {
+  try {
+    return tpr::ParseT2(c, off);
+  } catch (const ConvertError& e) {
+    const std::string what = e.what();
+    if (what.rfind("type-2 map: ", 0) == 0) Fail("ValueError: " + what);
+    throw;
+  }
+}
+// t2_bytes' asserts as AssertionErrors. No map ParseT2 returns reaches them (every parsed code and kind is in the
+// accept set; an object id is a byte); they guard the writer's input as the Python's do.
+static Bytes GroupBytesPy(const tpr::T2Group& g) {
+  try {
+    return tpr::T2Bytes(g);
+  } catch (const ConvertError& e) {
+    Fail(std::string("AssertionError: ") + e.what());
+  }
+}
+
 // ------------------------------------------------------------------ main_chain (line 164)
 MainChain MainChainOf(const Model& ref) {
   const Bytes& c = ref.Cat();
   const auto dir = CatDict(c);
   auto it = dir.find(2);
   if (it == dir.end()) Fail("KeyError: 2");
-  const auto groups = tpr::ParseT2(c, it->second).first;
+  const auto groups = ParseMapPy(c, it->second).first;
   std::set<int64_t> main_ids;
   for (const auto& [code, id] : Idx(groups, 0).items) main_ids.insert(id);
   std::map<int64_t, std::set<int64_t>> subtree;
@@ -390,7 +412,7 @@ ChannelMap ChannelMapOf(const Model& ref) {
   const auto dir = CatDict(c);
   auto it = dir.find(2);
   if (it == dir.end()) Fail("KeyError: 2");
-  const auto groups = tpr::ParseT2(c, it->second).first;
+  const auto groups = ParseMapPy(c, it->second).first;
   ChannelMap cm;
   cm.main = Idx(groups, 0).items;
   std::unordered_map<int64_t, int64_t> depth;
@@ -1706,25 +1728,19 @@ Bytes BuildCat(const Model& ref, const Model& body, const std::vector<int>& sect
     out.insert(out.end(), blob.begin(), blob.end());
   };
   if (has(2)) {
-    const auto groups = tpr::ParseT2(rc, RDir(2)).first;
-    Bytes blob;
+    const auto groups = ParseMapPy(rc, RDir(2)).first;
+    tpr::T2Group main;  // kind 'main'
     for (const auto& [c, i] : Idx(groups, 0).items)
-      if (kept.count(i)) {
-        blob.push_back(uint8_t(c >> 8));
-        blob.push_back(uint8_t(c));
-        blob.push_back(i);
-      }
+      if (kept.count(i)) main.items.emplace_back(c, i);
+    Bytes blob = GroupBytesPy(main);
+    // state, LOD and shadow groups, kept only when all their nodes are kept (Python's all(): an empty group is kept)
     for (size_t gi = 1; gi < groups.size(); ++gi) {
       bool all = true;
       for (const auto& [c, i] : groups[gi].items)
         if (!kept.count(i)) all = false;
       if (!all) continue;
-      blob.push_back(groups[gi].kind);
-      for (const auto& [c, i] : groups[gi].items) {
-        blob.push_back(uint8_t(c >> 8));
-        blob.push_back(uint8_t(c));
-        blob.push_back(i);
-      }
+      const Bytes g = GroupBytesPy(groups[gi]);
+      blob.insert(blob.end(), g.begin(), g.end());
     }
     blob.push_back(0);
     if (out.size() > 0x18) Fail("ValueError: negative count");
@@ -1733,7 +1749,7 @@ Bytes BuildCat(const Model& ref, const Model& body, const std::vector<int>& sect
     out.insert(out.end(), blob.begin(), blob.end());
   }
   if (has(5)) {
-    const uint64_t t2_end = tpr::ParseT2(rc, RDir(2)).second;
+    const uint64_t t2_end = ParseMapPy(rc, RDir(2)).second;
     const uint64_t t5 = RDir(5);
     bool found = false;
     uint64_t t5_end = 0;

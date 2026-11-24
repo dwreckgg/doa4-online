@@ -810,7 +810,9 @@ static void TestFinalSnapshotDecidesCount() {
 }
 
 static void TestReimportNote() {
-  CHECK(ReimportNote("proto-1d").empty());
+  CHECK(ReimportNote("proto-1e").empty());
+  // Task 6c: imports made before the Helena map fix carry proto-1d and are told to re-import.
+  CHECK(ReimportNote("proto-1d") == std::string(kReimportLine));
   CHECK(ReimportNote("") .empty());
   CHECK(ReimportNote("proto-1c") ==
         "These swimsuits were built by an older importer. Import them again to match players who have the new ones.");

@@ -164,7 +164,7 @@ std::vector<tpr::Node> BuildSkeleton(const Model& ref, int64_t main_max, const s
 
 struct ChannelMap {
   PyDict<int64_t, int64_t> out;                    // code -> node id
-  std::vector<std::pair<uint16_t, uint8_t>> main;  // the reference's main-group records
+  std::vector<std::pair<uint32_t, uint8_t>> main;  // the reference's main-group records (a 0xDX code is 24 bits)
 };
 ChannelMap ChannelMapOf(const Model& ref);
 

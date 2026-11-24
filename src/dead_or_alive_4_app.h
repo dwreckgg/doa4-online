@@ -86,6 +86,7 @@
 #include "doa4_colour_make.h"
 #include "doa4_colourgen.h"
 #include "doa4_display.h"
+#include "doa4_extras_copies.h"
 #include "doa4_suitconv_job.h"
 #include "doa4_suits.h"
 #include "doa4_suits_hooks.h"
@@ -752,6 +753,7 @@ class DeadOrAlive4App : public rex::ReXApp {
     } else {
       REXLOG_WARN("[doa4][GPU] failed to set async_shader_compilation cvar");
     }
+    BuildExtrasCopies();     // before StartNetplaySession: its meta carries the copies' SHA-1
     StartNetplaySession();   // DOA4_NP only: record / replay / hash from the first frame
     // Skip the boot intro (doa4_intro_skip.h): the start-up value, before any guest code runs; a later change in the menu applies
     // at the next start. In a session the session's movie gate decides alone.
@@ -797,10 +799,41 @@ class DeadOrAlive4App : public rex::ReXApp {
                 doa4::title_word::kSprLogoN, doa4::title_word::kSprLogoW, title_word_line_.substr(0, title_word_line_.size() - 1));
   }
 
+  // Extras copies (doa4_extras_copies.h; extras-copies plan D1, Task 9): with Helena's opera dress or Kokoro's kimonos
+  // switched on, the three retail costumes are read from this PC's chrtwo.afs and given their reflection and shadow
+  // copies, once, here: in every process kind (lobby, online match, record, replay; there is no hash mode), and in
+  // vanilla mode too (the copies come from retail files). A replay has applied the recording's guest settings, the two
+  // boxes among them, before this hook (PrepareReplayRules, from NetplayAtStart). SetUpSuits (OnPostSetup) installs the
+  // result as its own first overlay attempt; StartNetplaySession puts its SHA-1 in the session's meta.
+  void BuildExtrasCopies() {
+    const bool opera_on = rex::cvar::Query<bool>("doa4_helena_opera");
+    const bool kimonos_on = rex::cvar::Query<bool>("doa4_kokoro_kimonos");
+    std::filesystem::path archive;
+    if (rex::Runtime* rt = runtime()) {
+      std::error_code ec;
+      const std::filesystem::path root = std::filesystem::absolute(rt->game_data_root(), ec);
+      archive = (ec ? rt->game_data_root() : root) / "chrtwo.afs";
+    }
+    {
+      // The reader keeps chrtwo.afs open while it lives and is for this thread only: made, used and destroyed here
+      // (never stored). With both boxes off Build never calls it, so the file is not even opened.
+      const doa4::extras_copies::ReadEntry read_entry = doa4::extras_copies::ReadEntryFrom(archive);
+      extras_built_ = doa4::extras_copies::Build(opera_on, kimonos_on, read_entry);
+    }
+    for (const std::string& line : extras_built_.log) REXLOG_INFO("[doa4][EXTRAS] {}", line);
+    extras_copies_at_start_.store(static_cast<int>(extras_built_.boxes_at_start), std::memory_order_release);
+  }
+
   // Netplay phase 0 (src/net/np_session.h): inert unless DOA4_NP is set; phase 1 (Task 12): the online session of a
   // process started from a hand-off.
   void StartNetplaySession() {
     doa4::np::Host host;
+    // The extras copies' key (np::ExtrasCopiesMetaLine): their SHA-1 when copies were built, else none (the same as both
+    // boxes off). Built::sha1 is "" exactly when chrtwo is empty; the decision reads chrtwo all the same (ledger X80).
+    host.extras_copies_sha1 = extras_built_.chrtwo.empty() ? std::string() : extras_built_.sha1;
+    REXLOG_INFO("[doa4][EXTRAS] extras copies: sha1={} built={}",
+                host.extras_copies_sha1.empty() ? std::string("none") : host.extras_copies_sha1,
+                extras_built_.chrtwo.size() / 2);
     host.capture = [this](doa4::photo::Image* image) { return CaptureFrame(image); };
     host.quit = [this] {
       app_context().CallInUIThreadDeferred([this] { app_context().QuitFromUIThread(); });
@@ -1913,6 +1946,9 @@ class DeadOrAlive4App : public rex::ReXApp {
       const int running = running_alpha152_.load(std::memory_order_acquire);
       return running < 0 ? std::nullopt : std::optional<bool>(running != 0);
     };
+    host.extras_copies_at_start = [this]() -> int {  // read when drawn, as running_alpha152: -1 until the build has run
+      return extras_copies_at_start_.load(std::memory_order_acquire);
+    };
     host.patcher = &patcher_;
     host.protect = protect_;
     host.suits_summary = suits_status_.Summary();
@@ -2164,6 +2200,15 @@ class DeadOrAlive4App : public rex::ReXApp {
   // Alpha-152's bytes are in guest memory since the load: 1 or 0, and -1 until the load is over (not known yet). The saved
   // setting is the cvar. Written once by the load, read by the menu's draw (another thread).
   std::atomic<int> running_alpha152_{-1};
+  // The extras copies (BuildExtrasCopies): written once in OnPostLoadXexImage before StartNetplaySession, and read later
+  // by StartNetplaySession (the meta key) and SetUpSuits (OnPostSetup: the overlay attempt and the refusals), in the
+  // hooks' order: the same hand-off kind_ and guest_ rely on (which thread runs each hook is the SDK's). Copies are
+  // installed only when chrtwo is not empty (its "built" log lines can stay when the hash failed and nothing is: ledger
+  // X80).
+  doa4::extras_copies::Built extras_built_;
+  // Built::boxes_at_start, or -1 until the build has run. Written once by the load, read by the menu's draw (another
+  // thread), like running_alpha152_.
+  std::atomic<int> extras_copies_at_start_{-1};
   doa4::tweaks::TweakPatcher patcher_;
   doa4::suits::ImportStatus suits_status_;  // DOAX2 swimsuits (SetUpSuits)
   // What this process is for the colour costumes (colour_costumes::KindOf): set once in OnPostLoadXexImage, before
@@ -2217,6 +2262,10 @@ class DeadOrAlive4App : public rex::ReXApp {
     std::string error, retry_error;       // the overlay install's, and the retry's without the colour entries
     bool test_unusable = false;           // DOA4_COLOURS_TEST_UNUSABLE
     bool test_unequal = false;            // DOA4_COLOURS_TEST_UNEQUAL
+    // The extras copies' attempt X (InstallSuitsAndColours): installed, or dropped with X's error (extras_error set).
+    // extras_installed stays false when X never ran (no copies built, or the install's early return).
+    bool extras_installed = false;
+    std::string extras_error;
   };
   void SetUpSuits() {
     ColourSetup colour;  // kNotUsable until InstallSuitsAndColours installs: also on its early return
@@ -2224,10 +2273,24 @@ class DeadOrAlive4App : public rex::ReXApp {
     // The one exit. Every way out of the install passes here, so a match process that did not install the colour
     // entries never runs its match: an online session ends through np::Abort, a record or replay run quits with a
     // "refused: " line (np::RefuseRun). The test switch DOA4_COLOURS_TEST_UNEQUAL skips it on purpose.
+    // The extras copies: a match process (online, record, replay) is refused in two more cases. (1) Its copies were
+    // built but not installed (fix wave 1, the user's decision, ledger X84): its meta already carries their
+    // extras_copies key (written at session start, before the install). (2) A selected costume's copies were not built
+    // on this PC (Task 11 fix wave, the user's decision, ledger X99: a read error, a retail SHA-1 mismatch, a size
+    // limit, the hash failing twice): it would draw the stand-in where a PC that built draws the copy, and two live PCs
+    // compare no meta. A lobby process is never refused (it keeps the stand-in). One else-if chain, so RefuseRun is
+    // called at most once: the colour message wins, then (1), then (2); all after the test_unequal return, so that
+    // test switch skips the extras refusals too, as it skips the colour one.
     if (colour.test_unequal) return;
+    const bool match_process = kind_ == doa4::colour_costumes::ProcessKind::kMatch;
     if (doa4::colour_costumes::MustRefuse(kind_, colour.outcome)) {
       doa4::np::RefuseRun(doa4::colour_costumes::RefusalMessage(colour.outcome, colour.usable, colour.load_notes,
                                                                 colour.error, colour.retry_error, colour.test_unusable));
+    } else if (doa4::extras_copies::MustRefuseExtras(match_process, !extras_built_.chrtwo.empty(),
+                                                     colour.extras_installed)) {
+      doa4::np::RefuseRun(doa4::extras_copies::ExtrasRefusalMessage(colour.extras_error));
+    } else if (doa4::extras_copies::MustRefuseNotBuilt(match_process, extras_built_.selected, extras_built_.built)) {
+      doa4::np::RefuseRun(doa4::extras_copies::ExtrasNotBuiltMessage(extras_built_.selected, extras_built_.built));
     }
   }
 
@@ -2364,6 +2427,58 @@ class DeadOrAlive4App : public rex::ReXApp {
     // installing them failed): the empty-slot marks are read through exactly these.
     std::map<std::string, std::shared_ptr<const doa4::afs::Overlay>> installed;
     bool any_applied = false;  // at least one suit or colour costume is in the costume tables: the labels are needed
+    // The extras copies (BuildExtrasCopies; plan Amendment 2, extras_copies::InstallOrder is this order as a pure
+    // function): ATTEMPT X, ahead of the block below and never folded into it. It builds and installs the suits, the
+    // colour entries when usable, and the copies' chrtwo.afs entries. On success its outcome is what Decide gives a first
+    // attempt that worked (kInstalled with colours, else kNotUsable) and the block is skipped. On failure the copies are
+    // dropped (one line) and the block runs as it did before Task 9, with no extras in it: its colour retry, its Decide
+    // and its Fail never see an extras failure (Decide(false, false, ...) is kFailed: an extras-only PC would be failed).
+    // A match process whose X failed is refused on SetUpSuits' exit (MustRefuseExtras: its meta claims the copies).
+    bool extras_installed = false;
+    if (!extras_built_.chrtwo.empty()) {
+      std::map<std::string, std::vector<doa4::afs::Replacement>> x_entries =
+          doa4::colour_costumes::Replacements(colours, guest_);  // empty unless colours.usable
+      size_t x_colour_count = 0;
+      for (const auto& [archive, list] : x_entries) x_colour_count += list.size();
+      x_entries["chrtwo.afs"] = extras_built_.chrtwo;  // the colours' key is avt.afs only (doa4_colour_costumes.h)
+      // First-read labels: the suits', the colours' when their entries are in, and one per built copy's two entries.
+      auto x_labels = doa4::suits::EntryLabels(suits_status_, guest_);
+      if (colours.usable) {
+        for (const auto& [archive, entries] : doa4::colour_costumes::EntryLabels(colours, guest_)) {
+          x_labels[archive].insert(entries.begin(), entries.end());
+        }
+      }
+      for (const doa4::extras_copies::Costume& c : doa4::extras_copies::Costumes()) {
+        for (const doa4::afs::Replacement& r : extras_built_.chrtwo) {
+          if (r.entry == c.tpr_entry || r.entry == c.cat_entry) x_labels["chrtwo.afs"][r.entry] = c.label;
+        }
+      }
+      std::string x_error;
+      auto x_overlays = doa4::suits::BuildOverlays(suits_status_, game_root, guest_, &x_error, x_entries);
+      if (!x_overlays.empty()) x_error = doa4::afs::InstallOverlays(*rt->file_system(), x_overlays, x_labels);
+      if (!x_overlays.empty() && x_error.empty()) {
+        extras_installed = true;
+        colour->extras_installed = true;
+        const doa4::colour_costumes::InstallOutcome outcome =
+            doa4::colour_costumes::Decide(colours.usable, true, true, false);
+        colour->outcome = outcome;  // kInstalled or kNotUsable: what the refusal on SetUpSuits' exit reads
+        installed = std::move(x_overlays);
+        REXLOG_INFO("[doa4][EXTRAS] installed: {} copies ({} chrtwo.afs entries overlaid)", extras_built_.chrtwo.size() / 2,
+                    extras_built_.chrtwo.size());
+        if (outcome == doa4::colour_costumes::InstallOutcome::kInstalled) {
+          REXLOG_INFO("[doa4][COLOURS] installed: {} colour entries overlaid, beside {} swimsuits", x_colour_count,
+                      suits_status_.suits.size());
+        } else {
+          REXLOG_INFO("[doa4][COLOURS] none installed (not usable); the swimsuits as without them");
+        }
+      } else {
+        colour->extras_error = x_error;  // a match process is refused on SetUpSuits' exit (MustRefuseExtras)
+        REXLOG_WARN("[doa4][EXTRAS] the attempt with the extras copies failed: {}; installing without them", x_error);
+      }
+    }
+    if (extras_installed) {
+      // attempt X installed everything: the block below (the attempts without the copies) is not run
+    } else  // the block as it was before Task 9, unchanged: no extras in it
     if (!suits_status_.suits.empty() || colours.usable) {
       // First-read labels: the suits' and, when their entries are in the build, the colours' (avt.afs).
       const auto labels_with = [&](bool with_colours) {

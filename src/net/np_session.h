@@ -71,6 +71,12 @@ struct Host {
   // The folder the game runs from (the one holding default.xex): the recording's meta holds a hash of
   // its default.xex, so a replay on another dump of the game is refused.
   std::filesystem::path game_data_root;
+  // The SHA-1 of the extras copies this process built at start-up (doa4_extras_copies.h Built::sha1), "" when none: the
+  // online, record and replay starts put it in their meta as extras_copies=<sha1> (np::ExtrasCopiesMetaLine). A replay
+  // whose copies differ from the recording's is refused (MetaMismatch); a match process refuses itself at start (on
+  // SetUpSuits' exit) when a selected costume's copies were not built (MustRefuseNotBuilt) or built copies were not
+  // installed (MustRefuseExtras); two live PCs compare no meta.
+  std::string extras_copies_sha1;
 
   // ---- online (Task 12) ----
   std::optional<handoff::Handoff> online;            // set when this process was started for a session

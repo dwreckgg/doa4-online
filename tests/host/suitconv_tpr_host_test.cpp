@@ -755,7 +755,8 @@ static void TestCatHelpers() {
     far.u32(0).u32(0x1000);
     CK(tp::CatDir(Sp(far.b)).empty());
   }
-  // parse_t2: 3-byte entries (0x90/0x91 first), anything else starts a group (0 ends)
+  // parse_t2 on a 0x90/0x91-only map: 3-byte entries, any other byte starts a group (0 ends); reads the same in the
+  // older grammar and the census grammar (the block after this one is where they differ)
   {
     TB c;
     c.zeros(4);                       // offset 4: the groups
@@ -768,10 +769,11 @@ static void TestCatHelpers() {
     c.u8(0xAA);
     const auto [groups, next] = tp::ParseT2(Sp(c.b), 4);
     CK(groups.size() == 3 && next == 16);
-    CK(groups.size() == 3 && groups[0].is_main && groups[0].items.size() == 2 && groups[0].items[0] == std::make_pair(uint16_t(0x9001), uint8_t(5)) &&
-       groups[0].items[1] == std::make_pair(uint16_t(0x9102), uint8_t(6)));
-    CK(groups.size() == 3 && !groups[1].is_main && groups[1].kind == 3 && groups[1].items.size() == 1 && groups[1].items[0].first == 0x9000);
-    CK(groups.size() == 3 && !groups[2].is_main && groups[2].kind == 7 && groups[2].items.empty());
+    using K = tp::T2Group::Kind;
+    CK(groups.size() == 3 && groups[0].kind == K::kMain && groups[0].items.size() == 2 && groups[0].items[0] == std::make_pair(uint32_t(0x9001), uint8_t(5)) &&
+       groups[0].items[1] == std::make_pair(uint32_t(0x9102), uint8_t(6)));
+    CK(groups.size() == 3 && groups[1].kind == K::kMarker && groups[1].value == 3 && groups[1].items.size() == 1 && groups[1].items[0].first == 0x9000);
+    CK(groups.size() == 3 && groups[2].kind == K::kMarker && groups[2].value == 7 && groups[2].items.empty());
     // never terminated: the read leaves the buffer
     Bytes open(c.b.begin(), c.b.begin() + 4 + 9);
     CK(Throws([&] { tp::ParseT2(Sp(open), 4); }));
@@ -779,6 +781,86 @@ static void TestCatHelpers() {
     Bytes cut2 = {0x90, 0x01};
     CK(Throws([&] { tp::ParseT2(Sp(cut2), 0); }));
     CK(Throws([&] { tp::ParseT2(Sp(cut2), 9); }));
+  }
+  // parse_t2 in the census grammar (Task 6b). Expected lines are convert.parse_t2's own, printed by
+  //   py -3 -I tests/host/suitconv_t2_expect.py <doax2_work>/physics_spike/scripts
+  // (each map is 4 zero bytes, the map, then 0xAA; read at offset 4). The maps are the ones in that script.
+  {
+    auto bytes_of = [](const char* hex) {
+      Bytes b(4, 0);
+      for (size_t i = 0; hex[i] && hex[i + 1]; i += 2) b.push_back(uint8_t(std::stoul(std::string(hex + i, 2), nullptr, 16)));
+      b.push_back(0xAA);
+      return b;
+    };
+    // groups_repr of the Python script: kind ('main', sNN for a state, NN for a marker) ':' code/id,...
+    auto repr = [](const std::pair<std::vector<tp::T2Group>, uint64_t>& r) {
+      std::string s = "end=" + std::to_string(r.second) + " groups=";
+      for (size_t gi = 0; gi < r.first.size(); ++gi) {
+        const auto& g = r.first[gi];
+        char k[8];
+        if (g.kind == tp::T2Group::Kind::kMain) std::snprintf(k, sizeof k, "main");
+        else std::snprintf(k, sizeof k, g.kind == tp::T2Group::Kind::kState ? "s%02x" : "%02x", g.value);
+        s += (gi ? " " : "") + std::string(k) + ":";
+        for (size_t i = 0; i < g.items.size(); ++i) {
+          char e[24];
+          std::snprintf(e, sizeof e, "%s%x/%u", i ? "," : "", g.items[i].first, unsigned(g.items[i].second));
+          s += e;
+        }
+      }
+      return s;
+    };
+    auto parse_repr = [&](const char* hex) {
+      try {
+        return repr(tp::ParseT2(Sp(bytes_of(hex)), 4));
+      } catch (const std::exception& e) {
+        return std::string("THREW ") + e.what();
+      }
+    };
+    auto refusal = [&](const char* hex) {
+      try {
+        tp::ParseT2(Sp(bytes_of(hex)), 4);
+      } catch (const std::exception& e) {
+        return std::string(e.what());
+      }
+      return std::string("NOT REFUSED");
+    };
+    // The shape of a reference with a 0xDX entry inside a state group (every code, id and state number made up). Old
+    // grammar (0x90/0x91 entries, every other byte a marker): '60', '31', '60', '32', 'd2' become markers, the 00 byte
+    // inside the 0xDX entry ends the map at 25 and the 0x04 / 0x02 groups are never seen
+    // (observed on the old grammar: "end=25 groups=main:9001/2,9002/3,9103/4,9004/5 60: 31:9031/1 60: 32: d2:").
+    const char* kHel = "900102900203910304900405" "6031903101" "6032d2000308" "04900106" "02900207" "00";
+    const std::string hel = parse_repr(kHel);
+    CKF(hel == "end=36 groups=main:9001/2,9002/3,9103/4,9004/5 s31:9031/1 s32:d20003/8 04:9001/6 02:9002/7", "%s", hel.c_str());
+    // 0xAX and 0x92 entries are entries (old grammar, observed: "end=11 groups=main: a0: 05: 03: 92: 07: 04:")
+    const std::string ax = parse_repr("a00503920704" "00");
+    CKF(ax == "end=11 groups=main:a005/3,9207/4", "%s", ax.c_str());
+    // a 0xDX entry in the main group (old grammar: d2 a marker, the 00 inside the entry the end: "end=9 groups=main:9001/2 d2:")
+    const std::string dxm = parse_repr("900102d2000303900204" "00");
+    CKF(dxm == "end=15 groups=main:9001/2,d20003/3,9002/4", "%s", dxm.c_str());
+    // object 0 in a 3-byte entry and in a 0xDX entry, both followed by more entries: neither 00 id byte ends the map
+    // (old grammar: d2, 01, 03 markers and the 0xDX entry's 00 id the end: "end=10 groups=main:9001/0 d2: 01: 03:")
+    const std::string dx0 = parse_repr("900100d2010300900204" "00");
+    CKF(dx0 == "end=15 groups=main:9001/0,d20103/0,9002/4", "%s", dx0.c_str());
+    // an EMPTY state group is a group (old grammar: "end=15 groups=main:9001/2 60: 33: 60: 34:9034/7")
+    const std::string est = parse_repr("900102" "6033" "6034903407" "00");
+    CKF(est == "end=15 groups=main:9001/2 s33: s34:9034/7", "%s", est.c_str());
+    // an empty marker group is a group (both grammars agree here; it is the empty group BuildCat must keep)
+    const std::string emp = parse_repr("900102" "04" "02900207" "00");
+    CKF(emp == "end=13 groups=main:9001/2 04: 02:9002/7", "%s", emp.c_str());
+    // the two ValueError texts (old grammar: no refusal at all; '60 00' read as marker 0x60 then the end byte)
+    const std::string r1 = refusal("901001" "6000" "00");
+    CKF(r1 == "type-2 map: state switch 60 00 at 0x7", "%s", r1.c_str());
+    const std::string r2 = refusal("901001" "6080" "00");
+    CKF(r2 == "type-2 map: state switch 60 80 at 0x7", "%s", r2.c_str());
+    const std::string r3 = refusal("901001" "b00102" "00");
+    CKF(r3 == "type-2 map: unknown entry code 0xb0 at 0x7", "%s", r3.c_str());
+    const std::string r4 = refusal("80" "00");
+    CKF(r4 == "type-2 map: unknown entry code 0x80 at 0x4", "%s", r4.c_str());
+    // a 0xDX entry cut short by the end of the buffer: the object id read leaves the buffer
+    {
+      Bytes cut = {0x90, 0x01, 0x02, 0xD2, 0x01, 0x03};
+      CK(Throws([&] { tp::ParseT2(Sp(cut), 0); }));
+    }
   }
   // t4_records: 0x40-byte records until one starts with 0xFFFF
   {

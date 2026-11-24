@@ -209,7 +209,7 @@ std::map<std::string, std::shared_ptr<const afs::Overlay>> BuildOverlays(
       const auto named = suits_here->second.find(r.entry);
       if (named != suits_here->second.end()) {
         *error = name + " entry " + std::to_string(r.entry) + " is both the swimsuit " + named->second +
-                 " and a colour costume's file";
+                 " and another start-up replacement";
         return {};
       }
     }

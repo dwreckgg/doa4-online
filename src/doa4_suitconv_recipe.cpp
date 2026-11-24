@@ -3,6 +3,10 @@
 // dc0d0f8d77d2aad6b9d44372508a7c4ab0a184b8) and from its bust strengths file, and are checked against them again by
 // tests/host/suitconv_inputs_host_test.cpp (DOA4_SUITCONV_ORACLE_DIR) and against the picks table
 // (doa4_suits_picks.h). Python's file names are in comments.
+// Task 6b (2026-11-23): Helena's four own suits (vhe_cm_a, vhe_on_d, vhe_sk_a, vhe_dl_l) take their output .cat SHA-1
+// from today's convert.py instead (its type-2 map grammar reads hel05's state switches and 0xDX entry; the .tpr and
+// every size are unchanged): <doax2_work>/t6b_t2fix/out/m1/manifest.txt, SHA-1
+// 77d9b08b09beabb581ef4bb61effae5bc5701410, which is the shipped manifest with those four lines changed.
 
 #include "doa4_suitconv_fp.h"
 
@@ -209,13 +213,13 @@ constexpr SuitRecipe kSuits[] = {
     {"vco_ch_f", 0, "vco", ArcId::kWerone, 98, 0.606, 0.407, false, false, false, false, 0.0, 0.0, 0.0,
      7901184, "9f17a67ed7c3193c384d8245e6bd78071781a543", 1108160, "168e10f2843006c6b2328786c6d367c49e6fb73f"},
     {"vhe_cm_a", 0, "vhe", ArcId::kWerone, 230, 0.748, 0.474, false, false, false, false, 0.0, 0.0, 0.0,
-     7745536, "f902195193ac702fb7838ce729bf7dda0ae2548d", 787680, "b8354dca4e8098d918863916cbc1f922c7955c96"},
+     7745536, "f902195193ac702fb7838ce729bf7dda0ae2548d", 787680, "35d1b41cd4382aac2195c81b53b5a24224d5ce5d"},
     {"vhe_on_d", 0, "vhe", ArcId::kWerone, 264, 0.749, 0.475, false, false, false, false, 0.0, 0.0, 0.0,
-     8155136, "270d67c4c7231c31c8fb479f06ba4e89ac29bfeb", 779456, "4d857dbffb3a56b1716c2529f731740fa53d53be"},
+     8155136, "270d67c4c7231c31c8fb479f06ba4e89ac29bfeb", 779456, "f4ef89d6a2ead60de35c85cae94fd758f95bba6c"},
     {"vhe_sk_a", 0, "vhe", ArcId::kWerone, 282, 0.75, 0.475, true, false, false, false, 0.0, 0.0, 0.0,
-     7811072, "9eac160ee78eff392fe6be658e1508a5dfe8b3ff", 932480, "aa1b2f2fae339ded95945b42a20f5b58a6a3571b"},
+     7811072, "9eac160ee78eff392fe6be658e1508a5dfe8b3ff", 932480, "b34ea2e2650bc1a912a85d915eb7fdf873a0864e"},
     {"vhe_dl_l", 0, "vhe", ArcId::kWerone, 244, 0.745, 0.469, false, false, false, false, 0.0, 0.0, 0.0,
-     7942144, "cb3320085793c9d2a62c56dbb19eacf8dbf8825a", 918336, "6b8fa8b69f95953581b7caaa4dbacda8baeddc8d"},
+     7942144, "cb3320085793c9d2a62c56dbb19eacf8dbf8825a", 918336, "7d447418d40cf2db8bd90a153636bd6f9d486af7"},
     {"vls_cs_h", 0, "vls", ArcId::kWertwo, 220, 1.0, 0.488, false, false, false, false, 0.0, 0.0, 0.0,
      7462912, "3abd8a7bf57d9c5433bd87553230649524dbbbd2", 980208, "01b322f45429128abe599bb5b6b5e872a96f18f0"},
     {"vls_on_j", 1, "vls", ArcId::kWertwo, 254, 1.0, 0.491, false, false, false, false, 0.0, 0.0, 0.0,

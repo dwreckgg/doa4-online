@@ -7,6 +7,7 @@
 #include "doa4_suitconv_tpr.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace doa4::suitconv::tpr {
@@ -708,26 +709,89 @@ std::vector<std::pair<uint8_t, uint32_t>> CatDir(std::span<const uint8_t> c) {
   return out;
 }
 
-// parse_t2 (convert.py line 138)
+// parse_t2 (convert.py line 139, the census grammar of 2026-11-20; the one implementation, slim::ParseMap calls it)
 std::pair<std::vector<T2Group>, uint64_t> ParseT2(std::span<const uint8_t> c, uint64_t off) {
   const Reader r(c);
   std::vector<T2Group> groups;
-  T2Group cur;
-  uint64_t p = off;
+  T2Group cur;  // its kind is the kind of the group being read ('main' first)
+  int64_t p = static_cast<int64_t>(off);
   for (;;) {
-    const uint8_t b = r.U8(static_cast<int64_t>(p));
-    if (b == 0x90 || b == 0x91) {
-      cur.items.emplace_back(r.U16(static_cast<int64_t>(p)), r.U8(static_cast<int64_t>(p) + 2));
-      p += 3;
+    const uint8_t b = r.U8(p);
+    if (b & 0x80) {
+      if ((b & 0xF0) == 0x90 || (b & 0xF0) == 0xA0) {
+        cur.items.emplace_back(r.U16(p), r.U8(p + 2));
+        p += 3;
+      } else if ((b & 0xF0) == 0xD0) {
+        const auto s = r.Slice(p, p + 3);  // int.from_bytes(c[p:p + 3], 'big'): a clamped slice
+        uint32_t code = 0;
+        for (uint8_t v : s) code = (code << 8) | v;
+        cur.items.emplace_back(code, r.U8(p + 3));
+        p += 4;
+      } else {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "type-2 map: unknown entry code 0x%02x at 0x%llx", b,
+                      static_cast<unsigned long long>(p));
+        Fail(buf);
+      }
     } else {
       groups.push_back(std::move(cur));
       cur = T2Group{};
-      if (b == 0) return {std::move(groups), p + 1};
-      cur.is_main = false;
-      cur.kind = b;
-      p += 1;
+      if (b == 0) return {std::move(groups), static_cast<uint64_t>(p + 1)};
+      if (b == 0x60) {
+        const uint8_t nn = r.U8(p + 1);
+        // a state value is 1..0x7F; a 00 or top-bit byte here would be an end byte or an entry swallowed
+        if (nn == 0 || (nn & 0x80)) {
+          char buf[96];
+          std::snprintf(buf, sizeof buf, "type-2 map: state switch 60 %02x at 0x%llx", nn,
+                        static_cast<unsigned long long>(p));
+          Fail(buf);
+        }
+        cur.kind = T2Group::Kind::kState;
+        cur.value = nn;
+        p += 2;
+      } else {
+        cur.kind = T2Group::Kind::kMarker;
+        cur.value = b;
+        p += 1;
+      }
     }
   }
+}
+
+// t2_bytes (convert.py line 175); the assert texts are str() of the assert's tuple, as AssertionError prints it
+Bytes T2Bytes(const T2Group& g) {
+  char buf[96];
+  if (g.kind == T2Group::Kind::kState && !(g.value > 0 && g.value < 0x80)) {
+    std::snprintf(buf, sizeof buf, "('type-2 group kind out of range', ('state', %u))", unsigned(g.value));
+    Fail(buf);
+  }
+  if (g.kind == T2Group::Kind::kMarker && !(g.value > 0 && g.value < 0x80 && g.value != 0x60)) {
+    std::snprintf(buf, sizeof buf, "('type-2 group kind out of range', %u)", unsigned(g.value));
+    Fail(buf);
+  }
+  for (const auto& [code, id] : g.items)
+    if (!((0x9000 <= code && code <= 0xAFFF) || (0xD00000 <= code && code <= 0xDFFFFF))) {
+      std::snprintf(buf, sizeof buf, "('type-2 entry out of range', '0x%x', %u)", unsigned(code), unsigned(id));
+      Fail(buf);
+    }
+  Writer w;
+  if (g.kind == T2Group::Kind::kState) {
+    w.U8(0x60);
+    w.U8(g.value);
+  } else if (g.kind == T2Group::Kind::kMarker) {
+    w.U8(g.value);
+  }
+  for (const auto& [code, id] : g.items) {
+    if (code > 0xFFFF) {
+      w.U8(uint8_t(code >> 16));
+      w.U8(uint8_t(code >> 8));
+      w.U8(uint8_t(code));
+    } else {
+      w.U16(uint16_t(code));
+    }
+    w.U8(id);
+  }
+  return w.Take();
 }
 
 // t4_records (convert.py line 154)
