@@ -11,7 +11,8 @@
 //
 // Groups: fixture_anchor, costumes_table, boxes_off_reads_nothing, opera_only_reads_two_entries, built_replaces_both_entries,
 // hash_mismatch_keeps_standin, core_refusal_keeps_standin, over_limit_refused, unreadable_archive,
-// read_callback_throws, sha1_of_built_is_stable_and_ordered, boxes_at_start_bits, unknown_cvar_row, read_entry_from;
+// read_callback_throws, sha1_of_built_is_stable_and_ordered, boxes_at_start_bits, unknown_cvar_row, read_entry_from,
+// reader_promises, toc_refusal_reason, allocation_failures (a replaced global operator new, armed only in that group);
 // then the gated real-archive check "extras real archive": DOA4_EXTRAS_GAME_DIR (a game folder holding chrtwo.afs, read
 // only) runs Build on the real archive and expects all three built with G0's SHA-1s (g0_sha1.txt); unset, it prints
 // "extras real archive: SKIPPED (DOA4_EXTRAS_GAME_DIR unset)" and counts nothing. DOA4_EXTRAS_TEST_FLIP=1 (with the
@@ -24,6 +25,8 @@
 #include "slim_synth.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -34,6 +37,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -49,6 +53,34 @@ using tp::Bytes;
 
 static int g_checks = 0;
 static int g_failures = 0;
+
+// ---------------------------------------------------------------- allocation-failure injection (group
+// allocation_failures only; the reviewer's probe P3 as a test): a replaced global operator new that, while armed, throws
+// std::bad_alloc once at the K-th allocation and disarms itself. Unarmed (every other group) it is malloc.
+static std::atomic<long long> g_alloc_count{0};
+static std::atomic<long long> g_alloc_fail_at{-1};
+static std::atomic<bool> g_alloc_armed{false};
+static std::atomic<bool> g_alloc_fired{false};
+
+static void* TestAlloc(size_t n) {
+  if (g_alloc_armed.load(std::memory_order_relaxed)) {
+    const long long c = ++g_alloc_count;
+    if (c == g_alloc_fail_at.load(std::memory_order_relaxed)) {
+      g_alloc_armed = false;
+      g_alloc_fired = true;
+      throw std::bad_alloc();
+    }
+  }
+  void* p = std::malloc(n ? n : 1);
+  if (!p) throw std::bad_alloc();
+  return p;
+}
+void* operator new(size_t n) { return TestAlloc(n); }
+void* operator new[](size_t n) { return TestAlloc(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept { std::free(p); }
+void operator delete[](void* p, size_t) noexcept { std::free(p); }
 
 static void Check(bool ok, const char* file, int line, const char* expr, const char* fmt = nullptr, ...) {
   ++g_checks;
@@ -372,8 +404,10 @@ struct Archive {
   std::map<uint32_t, Bytes> entries;
   std::set<uint32_t> fail, throw_std, throw_other;
   std::vector<uint32_t> reads;
+  std::function<void(uint32_t)> on_read;  // the allocation group records its counter here
   xc::ReadEntry Fn() {
     return [this](uint32_t entry, std::vector<uint8_t>* out) -> bool {
+      if (on_read) on_read(entry);
       reads.push_back(entry);
       if (throw_std.count(entry)) throw std::runtime_error("archive gone");
       if (throw_other.count(entry)) throw 42;
@@ -659,7 +693,8 @@ static void TestReadCallbackThrows() {
   CHECK(Entries(b) == (std::vector<uint32_t>{16, 17}));
   CHECK(a.reads == (std::vector<uint32_t>{16, 17, 46, 56, 57}));
   CHECKF(LogAt(b, 0) == BuiltLine("hel03", Directs()[0].out), "%s", LogAt(b, 0).c_str());
-  CHECKF(LogAt(b, 1) == KeptLine("hak03", "could not read chrtwo.afs entry 46"), "%s", LogAt(b, 1).c_str());
+  // F5: a std::exception's text follows the entry; a non-standard throw adds nothing
+  CHECKF(LogAt(b, 1) == KeptLine("hak03", "could not read chrtwo.afs entry 46: archive gone"), "%s", LogAt(b, 1).c_str());
   CHECKF(LogAt(b, 2) == KeptLine("hak08", "could not read chrtwo.afs entry 57"), "%s", LogAt(b, 2).c_str());
   CHECKF(b.log.size() == 4 && ClosingLine(LogAt(b, 3), 1, 3), "%s", LogAt(b, 3).c_str());
 }
@@ -778,7 +813,13 @@ static void TestReadEntryFrom() {
   Bytes bad = Afs(e);
   bad[0] = 'X';
   xc::ReadEntry rb = xc::ReadEntryFromSource(std::make_shared<afs::MemorySource>(bad));
-  CHECK(!rb(0, &out));
+  std::string toc_what = "<no throw>";
+  try {
+    (void)rb(0, &out);
+  } catch (const std::runtime_error& e) {
+    toc_what = e.what();
+  }
+  CHECKF(toc_what == "not an AFS archive", "%s", toc_what.c_str());
   xc::ReadEntry rn = xc::ReadEntryFromSource(nullptr);
   CHECK(!rn(0, &out));
   // a path that does not exist: false, no throw
@@ -790,6 +831,187 @@ static void TestReadEntryFrom() {
     threw = true;
   }
   CHECK(!threw && !ok);
+}
+
+// a Source that counts its reads (offset 0 is ReadToc's header read: the archive's first entry starts at 0x800)
+struct CountingSource final : afs::Source {
+  std::shared_ptr<const afs::Source> inner;
+  mutable int reads = 0, reads_at_0 = 0;
+  uint64_t size() const override { return inner->size(); }
+  bool Read(uint64_t offset, void* dst, size_t n) const override {
+    ++reads;
+    if (offset == 0) ++reads_at_0;
+    return inner->Read(offset, dst, n);
+  }
+};
+
+static void TestReaderPromises() {
+  // F4: ReadEntryFrom opens on the first call only (wrong version: an open at construction), and the TOC is read once
+  // (wrong version: ReadToc on every call); counted through the opener seam, no file written
+  const std::vector<Bytes> e = {{1, 2, 3}, {4, 5}, {6}};
+  auto counting = std::make_shared<CountingSource>();
+  counting->inner = std::make_shared<afs::MemorySource>(Afs(e));
+  int opens = 0;
+  fs::path seen;
+  const xc::Opener opener = [&](const fs::path& p) -> std::shared_ptr<const afs::Source> {
+    ++opens;
+    seen = p;
+    return counting;
+  };
+  {
+    const auto in = DefaultInputs();
+    Table t = TableOf(in);
+    const xc::ReadEntry r = xc::ReadEntryFrom(fs::path("X:/game/chrtwo.afs"), opener);
+    const xc::Built b = xc::Build(false, false, r, t.span());
+    const xc::Built bg = xc::Build(false, false, r);
+    CHECKF(opens == 0 && b.chrtwo.empty() && bg.chrtwo.empty(), "boxes off: %d opens", opens);
+  }
+  const xc::ReadEntry r = xc::ReadEntryFrom(fs::path("X:/game/chrtwo.afs"), opener);
+  CHECKF(opens == 0, "%d opens before the first read", opens);
+  std::vector<uint8_t> o0, o2, o1;
+  const bool a0 = r(0, &o0), a2 = r(2, &o2), a1 = r(1, &o1);
+  CHECKF(opens == 1 && seen == fs::path("X:/game/chrtwo.afs"), "%d opens", opens);
+  CHECK(a0 && a2 && a1 && o0 == e[0] && o2 == e[2] && o1 == e[1]);
+  // ReadToc reads the header (offset 0) and the table (offset 8): 2 reads, then one per entry
+  CHECKF(counting->reads_at_0 == 1 && counting->reads == 5, "%d reads at 0, %d reads", counting->reads_at_0,
+         counting->reads);
+}
+
+static void TestTocRefusalReason() {
+  // F5: a refused TOC's reason reaches the costume's line; a missing file gives the bare line. Wrong version: the
+  // reason dropped (the bare line for both)
+  const auto in = DefaultInputs();
+  Table t = TableOf(in);
+  Bytes bad = Afs({{1, 2, 3}});
+  bad[0] = 'X';
+  const xc::Built b = xc::Build(true, false, xc::ReadEntryFromSource(std::make_shared<afs::MemorySource>(bad)), t.span());
+  CHECKF(LogAt(b, 0) == KeptLine("hel03", "could not read chrtwo.afs entry 16: not an AFS archive"), "%s",
+         LogAt(b, 0).c_str());
+  CHECK(b.chrtwo.empty() && b.sha1.empty());
+  const xc::Built bm = xc::Build(true, false, xc::ReadEntryFrom(fs::path("Z:/no/such/folder/chrtwo.afs")), t.span());
+  CHECKF(LogAt(bm, 0) == KeptLine("hel03", "could not read chrtwo.afs entry 16"), "%s", LogAt(bm, 0).c_str());
+}
+
+static void TestAllocationFailures() {
+  // F3 (the reviewer's P3): one std::bad_alloc at the K-th allocation of a Build(true, true) on the test table. For
+  // every sampled K: Build does not throw; sha1 is the hash of the installed bytes in order ("" when none); the
+  // "built" lines are chrtwo.size() / 2; the closing line is there with those counts. Wrong versions: the hash taken
+  // before the commit (sha1 holds a kept costume's bytes), a commit that is not rolled back (a pair without its line),
+  // no per-costume catch (Build throws)
+  const auto& d = Directs();
+  if (d.size() != 3) return CHECK(false);
+  const auto in = DefaultInputs();
+  Table t = TableOf(in);
+  Archive a = ArchiveOf(in);
+  a.reads.reserve(64);  // so the fake's own bookkeeping allocates nothing while armed
+  std::vector<long long> at_read;
+  at_read.reserve(64);
+  a.on_read = [&](uint32_t) { at_read.push_back(g_alloc_count.load()); };
+  const xc::ReadEntry fn = a.Fn();
+  // expected sha1 per installed subset (bit i = costume i), the own SHA-1
+  std::map<int, std::string> want;
+  for (int s = 1; s < 8; ++s) {
+    Bytes cat;
+    for (int i = 0; i < 3; ++i)
+      if (s & (1 << i)) cat = Concat({&cat, &d[i].out.tpr, &d[i].out.cat});
+    want[s] = Sha1(cat);
+  }
+  want[0] = "";
+  // the clean run: the count and the costume boundaries
+  g_alloc_count = 0;
+  g_alloc_fail_at = -1;
+  g_alloc_fired = false;
+  g_alloc_armed = true;
+  const auto t0 = std::chrono::steady_clock::now();
+  const xc::Built clean = xc::Build(true, true, fn, t.span());
+  const double clean_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  g_alloc_armed = false;
+  a.on_read = nullptr;
+  const long long total = g_alloc_count;
+  CHECKF(clean.chrtwo.size() == 6 && at_read.size() == 6 && total > 100, "clean: %zu replacements, %zu reads, %lld",
+         clean.chrtwo.size(), at_read.size(), total);
+  if (at_read.size() != 6) return;
+  const long long b2 = at_read[2], b3 = at_read[4];  // the counter when hak03's and hak08's reads begin
+  // Every K would take about 45 s (about 24,000 K at about 2 ms), so: a fixed stride of 7, plus every K in the first
+  // 64, near each costume's end (the 64 before and 8 after the next costume's first read: the reviewer's K = 7970 ..
+  // 7975 were hel03's commit, just before hak03's first read) and in the last 200 (hak08's commit, sha1, closing line)
+  const bool full = false;
+  const long long stride = 7;
+  std::vector<long long> ks;
+  for (long long k = 1; k <= total; ++k)
+    if (k % stride == 0 || k <= 64 || (k > b2 - 64 && k <= b2 + 8) || (k > b3 - 64 && k <= b3 + 8) || k > total - 200)
+      ks.push_back(k);
+  long long escaped = 0, sha_bad = 0, lines_bad = 0, closing_bad = 0, not_fired = 0, kept_runs = 0, bytes_bad = 0;
+  long long first_bad = -1;
+  const auto ts = std::chrono::steady_clock::now();
+  for (size_t n = 0; n < ks.size(); ++n) {
+    const long long k = ks[n];
+    a.reads.clear();
+    xc::Built b;
+    bool threw = false;
+    g_alloc_count = 0;
+    g_alloc_fail_at = k;
+    g_alloc_fired = false;
+    g_alloc_armed = true;
+    try {
+      b = xc::Build(true, true, fn, t.span());
+    } catch (...) {
+      threw = true;
+    }
+    g_alloc_armed = false;
+    bool bad = false;
+    if (!g_alloc_fired) ++not_fired, bad = true;
+    if (threw) {
+      ++escaped;
+      if (first_bad < 0) first_bad = k;
+      continue;
+    }
+    // the installed subset: whole pairs, in table order
+    int subset = 0;
+    bool pairs = b.chrtwo.size() % 2 == 0;
+    const uint32_t te[3] = {16, 46, 56};
+    int last = -1;
+    for (size_t i = 0; pairs && i + 1 < b.chrtwo.size(); i += 2) {
+      int c = -1;
+      for (int j = 0; j < 3; ++j)
+        if (b.chrtwo[i].entry == te[j] && b.chrtwo[i + 1].entry == te[j] + 1) c = j;
+      if (c <= last) pairs = false;
+      else subset |= 1 << c, last = c;
+      if (pairs && (!b.chrtwo[i].data || b.chrtwo[i].data->size() != d[c].out.tpr.size() || !b.chrtwo[i + 1].data ||
+                    b.chrtwo[i + 1].data->size() != d[c].out.cat.size()))
+        pairs = false;
+    }
+    if (!pairs || b.sha1 != want[subset]) ++sha_bad, bad = true;
+    if (n % 50 == 0 && pairs) {  // spot check: the installed bytes themselves
+      Bytes all;
+      for (const auto& r : b.chrtwo) {
+        const Bytes x = ReadBack(r);
+        all.insert(all.end(), x.begin(), x.end());
+      }
+      if ((all.empty() ? std::string() : Sha1(all)) != b.sha1) ++bytes_bad, bad = true;
+    }
+    size_t built_lines = 0;
+    for (const auto& l : b.log)
+      if (l.find(": built (") != std::string::npos) ++built_lines;
+    if (built_lines * 2 != b.chrtwo.size()) ++lines_bad, bad = true;
+    if (b.log.empty() || !ClosingLine(b.log.back(), static_cast<int>(built_lines), 3)) ++closing_bad, bad = true;
+    if (b.chrtwo.size() < 6) ++kept_runs;
+    if (bad && first_bad < 0) first_bad = k;
+  }
+  const double sweep_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count();
+  std::printf("allocation_failures: %lld allocations in a clean Build (%.2f ms; hak03 read at %lld, hak08 at %lld); %s; "
+              "%zu K run in %.1f s; %lld kept a costume; escaped %lld, sha1 %lld, bytes %lld, lines %lld, closing %lld, "
+              "not fired %lld; first bad K %lld\n",
+              total, clean_ms, b2, b3, full ? "every K" : ("stride " + std::to_string(stride) + " plus windows").c_str(),
+              ks.size(), sweep_s, kept_runs, escaped, sha_bad, bytes_bad, lines_bad, closing_bad, not_fired, first_bad);
+  CHECKF(escaped == 0, "%lld runs threw (first bad K %lld)", escaped, first_bad);
+  CHECKF(sha_bad == 0 && bytes_bad == 0, "%lld sha1, %lld bytes (first bad K %lld)", sha_bad, bytes_bad, first_bad);
+  CHECKF(lines_bad == 0, "%lld runs (first bad K %lld)", lines_bad, first_bad);
+  CHECKF(closing_bad == 0, "%lld runs (first bad K %lld)", closing_bad, first_bad);
+  CHECKF(not_fired == 0, "%lld runs never reached K", not_fired);
+  // evidence the injection acted: some K kept a costume, and the windows were sampled
+  CHECKF(kept_runs > 0 && !ks.empty() && ks.size() >= std::min<long long>(total, 200), "%lld kept, %zu K", kept_runs,
+         ks.size());
 }
 
 // ---------------------------------------------------------------- the gated real-archive check (A5 M3)
@@ -842,6 +1064,16 @@ static void RunRealArchive() {
   }
   CHECKF(Entries(b) == (std::vector<uint32_t>{16, 17, 46, 47, 56, 57}), "%zu replacements", b.chrtwo.size());
   CHECKF(b.log.size() == 4 && ClosingLine(LogAt(b, 3), 3, 3), "%s", LogAt(b, 3).c_str());
+  // F7: Built::sha1 against the own FIPS SHA-1 over the installed bytes, tpr_1 cat_1 tpr_2 cat_2 tpr_3 cat_3
+  Bytes all;
+  for (const auto& r : b.chrtwo) {
+    const Bytes x = ReadBack(r);
+    all.insert(all.end(), x.begin(), x.end());
+  }
+  const std::string own = b.chrtwo.empty() ? std::string() : Sha1(all);
+  std::printf("extras real archive: Built::sha1 %s (own SHA-1 over the %zu installed bytes: %s)\n",
+              b.sha1.empty() ? "<empty>" : b.sha1.c_str(), all.size(), own.empty() ? "<empty>" : own.c_str());
+  CHECKF(!b.sha1.empty() && b.sha1 == own, "Built::sha1 %s", b.sha1.c_str());
   std::printf("extras real archive: %d checks, %d failures%s\n", g_checks - before, g_failures - fb,
               flip ? " (entry 46 flipped)" : "");
 }
@@ -862,6 +1094,9 @@ int main() {
   RunGroup(TestBoxesAtStartBits, "boxes_at_start_bits");
   RunGroup(TestUnknownCvarRow, "unknown_cvar_row");
   RunGroup(TestReadEntryFrom, "read_entry_from");
+  RunGroup(TestReaderPromises, "reader_promises");
+  RunGroup(TestTocRefusalReason, "toc_refusal_reason");
+  RunGroup(TestAllocationFailures, "allocation_failures");
   RunRealArchive();
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);

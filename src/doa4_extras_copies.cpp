@@ -2,10 +2,11 @@
 
 #include "doa4_extras_copies.h"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
-#include <iterator>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -29,16 +30,26 @@ constexpr Costume kCostumes[] = {
      "de0335bd97423465f078421bab0f489642e195ed", 0xCB0000, 0x300000},
 };
 
-// The callback's answer, with a throw counted as false.
-bool ReadOne(const ReadEntry& read_entry, uint32_t entry, std::vector<uint8_t>* out) {
+// The callback's answer, with a throw counted as false; a std::exception's text goes to *why.
+bool ReadOne(const ReadEntry& read_entry, uint32_t entry, std::vector<uint8_t>* out, std::string* why) {
   try {
     return read_entry && read_entry(entry, out);
+  } catch (const std::exception& e) {
+    try {
+      *why = e.what();
+    } catch (...) {
+    }
+    return false;
   } catch (...) {
     return false;
   }
 }
 
-std::string CouldNotRead(uint32_t entry) { return "could not read chrtwo.afs entry " + std::to_string(entry); }
+std::string CouldNotRead(uint32_t entry, const std::string& why) {
+  std::string s = "could not read chrtwo.afs entry " + std::to_string(entry);
+  if (!why.empty()) s += ": " + why;
+  return s;
+}
 
 std::string NotRetail(const Costume& c, const char* ext, uint32_t entry) {
   return std::string(c.name) + "." + ext + " (chrtwo.afs entry " + std::to_string(entry) + ") is not the retail file";
@@ -52,8 +63,9 @@ std::string OverLimit(const Costume& c, const char* ext, size_t size, uint32_t l
 // One costume: true with *out filled, or false with *reason. Throws only what the allocator or the string code throws.
 bool BuildOne(const Costume& c, const ReadEntry& read_entry, suitconv::slim::Result* out, std::string* reason) {
   std::vector<uint8_t> tpr, cat;
-  if (!ReadOne(read_entry, c.tpr_entry, &tpr)) return *reason = CouldNotRead(c.tpr_entry), false;
-  if (!ReadOne(read_entry, c.cat_entry, &cat)) return *reason = CouldNotRead(c.cat_entry), false;
+  std::string why;
+  if (!ReadOne(read_entry, c.tpr_entry, &tpr, &why)) return *reason = CouldNotRead(c.tpr_entry, why), false;
+  if (!ReadOne(read_entry, c.cat_entry, &cat, &why)) return *reason = CouldNotRead(c.cat_entry, why), false;
   if (gamefiles::Sha1Hex(tpr.data(), tpr.size()) != c.tpr_sha1) return *reason = NotRetail(c, "tpr", c.tpr_entry), false;
   if (gamefiles::Sha1Hex(cat.data(), cat.size()) != c.cat_sha1) return *reason = NotRetail(c, "cat", c.cat_entry), false;
   suitconv::slim::Result built;
@@ -61,7 +73,10 @@ bool BuildOne(const Costume& c, const ReadEntry& read_entry, suitconv::slim::Res
   bool ok = false;
   try {
     ok = suitconv::slim::SlimCopies(c.name, tpr, cat, tpr, cat, suitconv::slim::CopyMode::kSlim, &built, &error);
-  } catch (...) {  // SlimCopies promises not to throw; this is the game's start-up (Task 6 M7)
+  } catch (const std::exception& e) {  // SlimCopies promises not to throw; this is the game's start-up (Task 6 M7)
+    ok = false;
+    error = std::string("unexpected error: ") + e.what();
+  } catch (...) {
     ok = false;
     error = "unexpected non-standard exception";
   }
@@ -72,6 +87,35 @@ bool BuildOne(const Costume& c, const ReadEntry& read_entry, suitconv::slim::Res
   return true;
 }
 
+// SHA-1 over every installed replacement's bytes, in order, read back from its source in fixed-size pieces.
+std::string HashInstalled(const std::vector<afs::Replacement>& chrtwo) {
+  gamefiles::Sha1 h;
+  uint8_t buf[1 << 14];
+  for (const afs::Replacement& r : chrtwo) {
+    const uint64_t size = r.data ? r.data->size() : 0;
+    for (uint64_t at = 0; at < size;) {
+      const size_t n = static_cast<size_t>(std::min<uint64_t>(sizeof buf, size - at));
+      if (!r.data->Read(at, buf, n)) throw std::runtime_error("an installed replacement could not be read back");
+      h.Update(buf, n);
+      at += n;
+    }
+  }
+  return h.HexDigest();
+}
+
+// Runs f, and once more if it threw (a transient allocation failure); false when both attempts threw.
+template <class F>
+bool TwoTries(F&& f) {
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    try {
+      f();
+      return true;
+    } catch (...) {
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 std::span<const Costume> Costumes() { return kCostumes; }
@@ -80,9 +124,14 @@ Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::sp
   const auto start = std::chrono::steady_clock::now();
   Built result;
   result.boxes_at_start = (opera_on ? 1u : 0u) | (kimonos_on ? 2u : 0u);
+  // Room for every replacement and line up front, so committing a costume below allocates nothing.
+  TwoTries([&] {
+    result.chrtwo.reserve(2 * table.size());
+    result.log.reserve(table.size() + 1);
+  });
   int selected = 0, built_count = 0;
-  std::optional<gamefiles::Sha1> all;  // over the built files, in table order
   for (const Costume& c : table) {
+    const size_t mark = result.chrtwo.size();  // a failure while committing rolls the replacements back to here
     try {
       const std::string_view box = c.tweak_cvar ? c.tweak_cvar : "";
       if (box != kOperaBox && box != kKimonosBox) {
@@ -97,24 +146,24 @@ Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::sp
         result.log.push_back(std::string(c.name) + ": kept the stand-in: " + reason);
         continue;
       }
+      // Everything that allocates first: the line and both sources.
       std::string line = std::string(c.name) + ": built (tpr " + std::to_string(out.tpr.size()) + " bytes, cat " +
                          std::to_string(out.cat.size()) + " bytes)";
-      if (!all) all.emplace();
-      all->Update(out.tpr.data(), out.tpr.size());
-      all->Update(out.cat.data(), out.cat.size());
-      std::vector<afs::Replacement> pair;
-      pair.push_back({c.tpr_entry, std::make_shared<afs::MemorySource>(std::move(out.tpr))});
-      pair.push_back({c.cat_entry, std::make_shared<afs::MemorySource>(std::move(out.cat))});
-      result.chrtwo.insert(result.chrtwo.end(), std::make_move_iterator(pair.begin()),
-                           std::make_move_iterator(pair.end()));
+      std::shared_ptr<const afs::Source> tpr = std::make_shared<afs::MemorySource>(std::move(out.tpr));
+      std::shared_ptr<const afs::Source> cat = std::make_shared<afs::MemorySource>(std::move(out.cat));
+      // Then the commit: within the reserved room these pushes only move.
+      result.chrtwo.push_back({c.tpr_entry, std::move(tpr)});
+      result.chrtwo.push_back({c.cat_entry, std::move(cat)});
       result.log.push_back(std::move(line));
       ++built_count;
     } catch (const std::exception& e) {
+      result.chrtwo.erase(result.chrtwo.begin() + static_cast<ptrdiff_t>(mark), result.chrtwo.end());
       try {
         result.log.push_back(std::string(c.name ? c.name : "?") + ": kept the stand-in: unexpected error: " + e.what());
       } catch (...) {
       }
     } catch (...) {
+      result.chrtwo.erase(result.chrtwo.begin() + static_cast<ptrdiff_t>(mark), result.chrtwo.end());
       try {
         result.log.push_back(std::string(c.name ? c.name : "?") +
                              ": kept the stand-in: unexpected non-standard exception");
@@ -122,13 +171,13 @@ Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::sp
       }
     }
   }
-  try {
-    if (all && built_count > 0) result.sha1 = all->HexDigest();
+  // sha1 from what was installed, in order; "" when nothing was.
+  if (!result.chrtwo.empty() && !TwoTries([&] { result.sha1 = HashInstalled(result.chrtwo); })) result.sha1.clear();
+  TwoTries([&] {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
     result.log.push_back("extras copies: " + std::to_string(built_count) + " built of " + std::to_string(selected) +
                          " selected in " + std::to_string(ms.count()) + " ms");
-  } catch (...) {
-  }
+  });
   return result;
 }
 
@@ -137,32 +186,37 @@ ReadEntry ReadEntryFromSource(std::shared_ptr<const afs::Source> archive) {
     std::shared_ptr<const afs::Source> source;
     bool tried = false;
     std::optional<afs::Toc> toc;
+    std::string toc_error;
   };
   auto state = std::make_shared<State>();
   state->source = std::move(archive);
   return [state](uint32_t entry, std::vector<uint8_t>* out) -> bool {
-    if (!state->tried) {
+    if (!state->tried) {  // once; a throw (allocation) leaves it untried for the next call
+      if (state->source) state->toc = afs::ReadToc(*state->source, &state->toc_error);
       state->tried = true;
-      if (state->source) state->toc = afs::ReadToc(*state->source, nullptr);
     }
-    if (!state->toc || entry >= state->toc->count || !out) return false;
+    if (!state->source || !out) return false;
+    if (!state->toc) throw std::runtime_error(state->toc_error);  // Build puts the TOC's reason in its line
+    if (entry >= state->toc->count) return false;
     out->resize(state->toc->sizes[entry]);
     return state->source->Read(state->toc->offsets[entry], out->data(), out->size());
   };
 }
 
-ReadEntry ReadEntryFrom(const std::filesystem::path& archive) {
+ReadEntry ReadEntryFrom(const std::filesystem::path& archive, Opener open) {
   struct State {
     std::filesystem::path path;
+    Opener open;
     bool opened = false;
     ReadEntry inner;
   };
   auto state = std::make_shared<State>();
   state->path = archive;
+  state->open = std::move(open);
   return [state](uint32_t entry, std::vector<uint8_t>* out) -> bool {
-    if (!state->opened) {
+    if (!state->opened) {  // on the first call, not before: a Build with both boxes off never opens the file
+      state->inner = ReadEntryFromSource(state->open ? state->open(state->path) : afs::FileSource::Open(state->path));
       state->opened = true;
-      state->inner = ReadEntryFromSource(afs::FileSource::Open(state->path));
     }
     return state->inner(entry, out);
   };

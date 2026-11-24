@@ -45,18 +45,23 @@ struct Built {
 };
 
 // Reads chrtwo.afs entry `entry` into *out: exactly the entry's TOC-size bytes. False when the archive or the entry
-// cannot be read. Build also treats a throw as false.
+// cannot be read. Build also treats a throw as false, and puts a std::exception's text in the costume's line
+// ("could not read chrtwo.afs entry N: <text>").
 using ReadEntry = std::function<bool(uint32_t entry, std::vector<uint8_t>* out)>;
 
-// Never throws. With neither box on, read_entry is never called.
+// Never throws. With neither box on, read_entry is never called. sha1 is computed at the end from chrtwo as installed.
 Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::span<const Costume> table = Costumes());
 
 // A ReadEntry over an AFS archive: afs::ReadToc, then a read of exactly sizes[entry] bytes at offsets[entry]. The TOC
-// is read on the first call (and only once); false for every call when the source is null or its TOC is refused, and
-// for an entry past the count.
+// is read on the first call (and only once). False for every call when the source is null, and for an entry past the
+// count; when the TOC is refused, every call throws std::runtime_error with ReadToc's reason.
+//
+// Threads: the returned ReadEntry (from either function) is for ONE thread (its first-call state is not locked), and
+// it keeps the archive open for as long as it lives (or any copy of it). Task 9 destroys it right after Build.
 ReadEntry ReadEntryFromSource(std::shared_ptr<const afs::Source> archive);
-// The same over a file (afs::FileSource, read-only). The file is opened on the first call, not here, so a Build with
-// both boxes off never opens it.
-ReadEntry ReadEntryFrom(const std::filesystem::path& archive);
+// The same over a file. The file is opened on the first call, not here, so a Build with both boxes off never opens it.
+// `open` is the opener (a test seam); empty = afs::FileSource::Open (read-only).
+using Opener = std::function<std::shared_ptr<const afs::Source>(const std::filesystem::path&)>;
+ReadEntry ReadEntryFrom(const std::filesystem::path& archive, Opener open = {});
 
 }  // namespace doa4::extras_copies
