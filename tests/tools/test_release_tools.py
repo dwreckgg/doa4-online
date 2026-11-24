@@ -2377,10 +2377,13 @@ def test_linux_workflow(root):
     check(bool(script) and not any(re.search(r"\|\|\s*true\b|\bexit 0\b|^set \+e", l) for l in script),
           f"linux workflow: the 'Runtime libraries' script swallows no failure (no '|| true', 'exit 0' or 'set +e'): {script}")
     # an allowlist over the whole script, so the checks above pin what the step does, not only that its lines exist:
-    # every line is one of these, each exactly once, or an echo/printf line that runs nothing else
+    # every line is one of these, each exactly once, or an echo line of one shape: echo "<text>", where the text holds
+    # no quote, back quote or backslash and '$' only as $name or ${name} (an allowed shape, not a ban: printf -v,
+    # $[...] and ${a[i=1]} assign without any banned character)
     rt_pinned = (("set -o pipefail", "set -euo pipefail"),
                  ("mapfile -t bins < <(find out/build/linux-amd64-release -type f -name dead_or_alive_4)",),
                  ('n=${#bins[@]}',),
+                 (r'''printf '%s\n' "${bins[@]}"''',),
                  ('if [ "$n" -ne 1 ]; then echo "want exactly one game binary"; exit 1; fi',),
                  ('bin=${bins[0]}',),
                  ('libs=$(ldd "$bin" 2>&1) || { echo "$libs"; echo "ldd failed on $bin"; exit 1; }',),
@@ -2390,14 +2393,17 @@ def test_linux_workflow(root):
                   'exit 1; fi',))
     rt_seen = [sum(1 for l in script if l in alts) for alts in rt_pinned]
     rt_free = [l for l in script if not any(l in alts for alts in rt_pinned)]
-    rt_bad = [l for l in rt_free if re.fullmatch(r"(echo|printf) [^;&|`<>]*", l) is None or "$(" in l]
+    def rt_echo(l):
+        return re.fullmatch(r'echo "(?:[^"`\\$]|\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\})*"', l) is not None
+    rt_bad = [l for l in rt_free if not rt_echo(l)]
     check(bool(script) and rt_seen == [1] * len(rt_pinned) and rt_bad == [],
-          f"linux workflow: the 'Runtime libraries' script is its {len(rt_pinned)} pinned lines, each once, and echo/printf "
-          f"lines that run nothing else: counts {rt_seen}, other lines {rt_bad}")
-    rt_exits = re.findall(r"\bexit\b[^;}\n]*", "\n".join(script))
+          f"linux workflow: the 'Runtime libraries' script is its {len(rt_pinned)} pinned lines, each once, and lines "
+          f'echo "<text>" with $ only as $name or ${{name}}: counts {rt_seen}, other lines {rt_bad}')
+    # the exit form reads commands, not echo text
+    rt_exits = re.findall(r"\bexit\b[^;}\n]*", "\n".join(l for l in script if not rt_echo(l)))
     check(bool(rt_exits) and all(e.strip() == "exit 1" for e in rt_exits),
           f"linux workflow: the only exit in the 'Runtime libraries' script is 'exit 1': {rt_exits}")
-    rt_keys = (["name"] if rts.startswith("name:") else []) + re.findall(r"(?m)^        ([A-Za-z_][\w-]*)\s*:", rts)
+    rt_keys = (["name"] if rts.startswith("name:") else []) + re.findall(r"""(?m)^        ["']?([A-Za-z_][\w-]*)["']?\s*:""", rts)
     check(rt_keys == ["name", "working-directory", "run"],
           f"linux workflow: the 'Runtime libraries' step has the keys name, working-directory and run and no other: {rt_keys}")
     check(bool(t) and "LD_LIBRARY_PATH" not in t and "LD_PRELOAD" not in t,
