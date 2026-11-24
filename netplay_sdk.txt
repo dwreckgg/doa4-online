@@ -1,2 +1,2 @@
 repo=https://github.com/Dwreckgg/rexglue-sdk
-commit=8b88e26569f346fa46e17849cf76a644b224f21a
+commit=2e250238972a6b0191ae38dd11ec71734d97d017
