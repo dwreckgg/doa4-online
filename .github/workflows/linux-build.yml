@@ -107,9 +107,10 @@ jobs:
           if [ "$n" -eq 0 ]; then exit 1; fi
       - name: Runtime libraries
         working-directory: doa4-recomp
-        # the game binary finds every shared library it loads: ldd lists them and a "not found" line fails the step, and
-        # librexruntime.so must be in the binary's own folder (its RUNPATH is $ORIGIN; a build that leaves the library
-        # elsewhere stops at start-up with "librexruntime.so: cannot open shared object file")
+        # the game binary's linked shared libraries (its DT_NEEDED entries and theirs, the ones ldd lists) all resolve: a
+        # "not found" line fails the step, and librexruntime.so must be in the binary's own folder (its RUNPATH is $ORIGIN; a build
+        # that leaves the library elsewhere stops at start-up with "librexruntime.so: cannot open shared object file").
+        # Libraries the game opens later with dlopen (the Vulkan loader, SDL's audio back ends) are not checked here.
         run: |
           set -o pipefail
           mapfile -t bins < <(find out/build/linux-amd64-release -type f -name dead_or_alive_4)
