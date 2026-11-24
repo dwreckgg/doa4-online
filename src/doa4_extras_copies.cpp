@@ -103,6 +103,13 @@ std::string HashInstalled(const std::vector<afs::Replacement>& chrtwo) {
   return h.HexDigest();
 }
 
+// 40 lower-case hex chars: what HexDigest gives on success.
+bool IsSha1Hex(const std::string& s) {
+  return s.size() == 40 && std::all_of(s.begin(), s.end(), [](char c) {
+           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+         });
+}
+
 // Runs f, and once more if it threw (a transient allocation failure); false when both attempts threw.
 template <class F>
 bool TwoTries(F&& f) {
@@ -120,7 +127,8 @@ bool TwoTries(F&& f) {
 
 std::span<const Costume> Costumes() { return kCostumes; }
 
-Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::span<const Costume> table) {
+Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::span<const Costume> table,
+            const Hasher& hash) {
   const auto start = std::chrono::steady_clock::now();
   Built result;
   result.boxes_at_start = (opera_on ? 1u : 0u) | (kimonos_on ? 2u : 0u);
@@ -172,11 +180,22 @@ Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::sp
     }
   }
   // sha1 from what was installed, in order; "" when nothing was.
-  if (!result.chrtwo.empty() && !TwoTries([&] { result.sha1 = HashInstalled(result.chrtwo); })) result.sha1.clear();
+  if (!result.chrtwo.empty() &&
+      !TwoTries([&] { result.sha1 = hash ? hash(result.chrtwo) : HashInstalled(result.chrtwo); }))
+    result.sha1.clear();
+  // Keyed on the value, whatever produced it (two throws, or a hasher that answered "" or junk): copies with no real
+  // digest are not installed, since Task 9 keys the shader-cache meta on sha1. Nothing here throws.
+  const bool unhashed = !result.chrtwo.empty() && !IsSha1Hex(result.sha1);
+  if (unhashed) {
+    result.chrtwo.clear();
+    result.sha1.clear();
+    built_count = 0;
+  }
   TwoTries([&] {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
     result.log.push_back("extras copies: " + std::to_string(built_count) + " built of " + std::to_string(selected) +
-                         " selected in " + std::to_string(ms.count()) + " ms");
+                         " selected" + (unhashed ? " (the copies could not be hashed; none installed)" : "") + " in " +
+                         std::to_string(ms.count()) + " ms");
   });
   return result;
 }

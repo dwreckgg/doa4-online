@@ -37,11 +37,13 @@ std::span<const Costume> Costumes();
 
 struct Built {
   std::vector<afs::Replacement> chrtwo;  // two per built costume (tpr entry, then cat entry), in table order
-  std::string sha1;                      // SHA-1 over tpr_1 cat_1 tpr_2 cat_2 ... of the BUILT costumes; "" if none
+  std::string sha1;                      // SHA-1 over tpr_1 cat_1 tpr_2 cat_2 ... of the INSTALLED costumes (chrtwo,
+                                         // in order), 40 lower-case hex; "" exactly when chrtwo is empty
   unsigned boxes_at_start = 0;           // bit 0 opera_on, bit 1 kimonos_on: the inputs, whatever was built
   std::vector<std::string> log;          // one line per selected costume (built or kept, with the reason), one per
                                          // table row with an unknown box, then "extras copies: <k> built of <n>
-                                         // selected in <ms> ms"
+                                         // selected in <ms> ms" ("... selected (the copies could not be hashed;
+                                         // none installed) in <ms> ms" when the hash failed: then chrtwo is empty)
 };
 
 // Reads chrtwo.afs entry `entry` into *out: exactly the entry's TOC-size bytes. False when the archive or the entry
@@ -49,8 +51,16 @@ struct Built {
 // ("could not read chrtwo.afs entry N: <text>").
 using ReadEntry = std::function<bool(uint32_t entry, std::vector<uint8_t>* out)>;
 
-// Never throws. With neither box on, read_entry is never called. sha1 is computed at the end from chrtwo as installed.
-Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::span<const Costume> table = Costumes());
+// The SHA-1 of the installed replacements (a test seam): 40 lower-case hex chars, or anything else for "could not hash".
+using Hasher = std::function<std::string(const std::vector<afs::Replacement>& chrtwo)>;
+
+// Never throws. With neither box on, read_entry is never called. sha1 is computed at the end from chrtwo as installed
+// (`hash`, empty = gamefiles::Sha1 over each replacement's bytes read back). Whatever the input and whatever fails
+// (an allocation, the hash): sha1.empty() == chrtwo.empty(), sha1 is 40 hex chars when not empty, and the closing
+// line's built count == chrtwo.size() / 2. When copies were built but their hash is not 40 hex chars (after one retry
+// of a throw), nothing is installed: chrtwo is cleared and the closing line says so; the costumes' "built" lines stay.
+Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::span<const Costume> table = Costumes(),
+            const Hasher& hash = {});
 
 // A ReadEntry over an AFS archive: afs::ReadToc, then a read of exactly sizes[entry] bytes at offsets[entry]. The TOC
 // is read on the first call (and only once). False for every call when the source is null, and for an entry past the

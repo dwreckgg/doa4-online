@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <functional>
 #include <list>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <new>
@@ -56,16 +57,24 @@ static int g_failures = 0;
 
 // ---------------------------------------------------------------- allocation-failure injection (group
 // allocation_failures only; the reviewer's probe P3 as a test): a replaced global operator new that, while armed, throws
-// std::bad_alloc once at the K-th allocation and disarms itself. Unarmed (every other group) it is malloc.
+// std::bad_alloc once at the K-th allocation and disarms itself (single-shot), or at the K-th and every one after it
+// while armed (sticky). Unarmed (every other group) it is malloc. Only these forms exist: the code on Build's path has
+// no aligned (align_val_t) and no nothrow new (fix wave 2 M5, grep in the hand-back).
 static std::atomic<long long> g_alloc_count{0};
 static std::atomic<long long> g_alloc_fail_at{-1};
 static std::atomic<bool> g_alloc_armed{false};
 static std::atomic<bool> g_alloc_fired{false};
+static std::atomic<bool> g_alloc_sticky{false};
 
 static void* TestAlloc(size_t n) {
   if (g_alloc_armed.load(std::memory_order_relaxed)) {
     const long long c = ++g_alloc_count;
-    if (c == g_alloc_fail_at.load(std::memory_order_relaxed)) {
+    const long long k = g_alloc_fail_at.load(std::memory_order_relaxed);
+    if (g_alloc_sticky.load(std::memory_order_relaxed) && k > 0 && c >= k) {
+      g_alloc_fired = true;
+      throw std::bad_alloc();
+    }
+    if (c == k) {
       g_alloc_armed = false;
       g_alloc_fired = true;
       throw std::bad_alloc();
@@ -446,9 +455,11 @@ static std::string KeptLine(const char* name, const std::string& reason) {
   return std::string(name) + ": kept the stand-in: " + reason;
 }
 
-// "extras copies: <k> built of <n> selected in <digits> ms"
-static bool ClosingLine(const std::string& s, int k, int n) {
-  const std::string head = "extras copies: " + std::to_string(k) + " built of " + std::to_string(n) + " selected in ";
+// "extras copies: <k> built of <n> selected in <digits> ms"; with `unhashed`, "extras copies: 0 built of <n> selected
+// (the copies could not be hashed; none installed) in <digits> ms" (fix wave 2 I1)
+static bool ClosingLine(const std::string& s, int k, int n, bool unhashed = false) {
+  const std::string head = "extras copies: " + std::to_string(k) + " built of " + std::to_string(n) + " selected" +
+                           (unhashed ? " (the copies could not be hashed; none installed)" : "") + " in ";
   if (s.size() <= head.size() + 3 || s.compare(0, head.size(), head) != 0) return false;
   if (s.compare(s.size() - 3, 3, " ms") != 0) return false;
   const std::string mid = s.substr(head.size(), s.size() - head.size() - 3);
@@ -890,9 +901,125 @@ static void TestTocRefusalReason() {
   CHECK(b.chrtwo.empty() && b.sha1.empty());
   const xc::Built bm = xc::Build(true, false, xc::ReadEntryFrom(fs::path("Z:/no/such/folder/chrtwo.afs")), t.span());
   CHECKF(LogAt(bm, 0) == KeptLine("hel03", "could not read chrtwo.afs entry 16"), "%s", LogAt(bm, 0).c_str());
+  // M2: a REFUSED TOC is read once too (wrong version: tried only when the TOC was accepted, so the header is read
+  // again on every call), and every call gives the same reason
+  auto counting = std::make_shared<CountingSource>();
+  counting->inner = std::make_shared<afs::MemorySource>(bad);
+  const xc::ReadEntry rc = xc::ReadEntryFromSource(counting);
+  std::string what[2] = {"<no throw>", "<no throw>"};
+  for (int i = 0; i < 2; ++i) {
+    std::vector<uint8_t> out;
+    try {
+      (void)rc(0, &out);
+    } catch (const std::runtime_error& e) {
+      what[i] = e.what();
+    }
+  }
+  CHECKF(counting->reads_at_0 == 1, "%d header reads over two calls", counting->reads_at_0);
+  CHECKF(what[0] == "not an AFS archive" && what[1] == what[0], "%s / %s", what[0].c_str(), what[1].c_str());
 }
 
-static void TestAllocationFailures() {
+// The folder the runner writes its output to (the bat's %OUT%, or DOA4_SUITCONV_OUT, or a probe's row folder): the
+// test executable's own folder, from argv[0]. Never %TEMP%.
+static fs::path g_out_dir;
+
+static void TestDefaultOpener() {
+  // M1: ReadEntryFrom with NO opener reads a real file through the production default (afs::FileSource::Open). Wrong
+  // version: the default opener gives no source (every read false). The file is written here and removed after.
+  if (g_out_dir.empty() || !fs::is_directory(g_out_dir)) return CHECKF(false, "no output folder from argv[0]");
+  const fs::path p = g_out_dir / "extras_default_opener.afs";
+  const std::vector<Bytes> e = {{1, 2, 3}, Bytes(0x900, 0x42), {9, 8, 7, 6, 5}};
+  const Bytes file = Afs(e);
+  {
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+    if (!f) return CHECKF(false, "could not write %s", p.string().c_str());
+  }
+  {
+    const xc::ReadEntry r = xc::ReadEntryFrom(p);
+    for (uint32_t i : {2u, 0u, 1u}) {
+      std::vector<uint8_t> out = {0xAA};
+      bool ok = false;
+      try {
+        ok = r(i, &out);
+      } catch (...) {
+      }
+      CHECKF(ok && out == e[i], "entry %u: ok %d, %zu bytes", i, ok, out.size());
+    }
+  }  // the reader (and the file handle) is gone before the remove
+  std::error_code ec;
+  fs::remove(p, ec);
+  CHECKF(!fs::exists(p), "%s left behind", p.string().c_str());
+}
+
+static void TestHashFailureInstallsNothing() {
+  // I1 route (b): the hash is not a 40-hex digest (the CNG provider missing gives ""), with no throw: nothing is
+  // installed, sha1 is "", the closing line says why, the "built" lines stay. Wrong versions: no rollback (copies
+  // installed with sha1 ""), the rollback keyed on a throw (never runs here), the check `sha1.empty()` (a short or
+  // non-hex answer installs). Expected values from the rule and the direct core runs, never from Build's output.
+  const auto& d = Directs();
+  if (d.size() != 3) return CHECK(false);
+  const auto in = DefaultInputs();
+  Table t = TableOf(in);
+  Archive a = ArchiveOf(in);
+  const xc::ReadEntry fn = a.Fn();
+  const char* names[3] = {"hel03", "hak03", "hak08"};
+  const std::string good = "0123456789abcdef0123456789abcdef01234567";
+  for (const std::string& answer : {std::string(), std::string("abc"), std::string(40, 'z'),
+                                    std::string("0123456789ABCDEF0123456789ABCDEF01234567"), good + "0"}) {
+    int calls = 0;
+    const xc::Built b = xc::Build(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>& r) {
+      ++calls;
+      return r.size() == 6 ? answer : std::string("<wrong set>");
+    });
+    bool lines = b.log.size() == 4;
+    for (int i = 0; lines && i < 3; ++i) lines = b.log[i] == BuiltLine(names[i], d[i].out);
+    CHECKF(b.chrtwo.empty() && b.sha1.empty() && calls == 1, "answer '%s': %zu replacements, sha1 '%s', %d calls",
+           answer.c_str(), b.chrtwo.size(), b.sha1.c_str(), calls);
+    CHECKF(lines && ClosingLine(LogAt(b, 3), 0, 3, true), "answer '%s': %s", answer.c_str(), LogAt(b, 3).c_str());
+  }
+  // positive control: a well-formed answer is the sha1 and everything is installed (the seam is the one used)
+  {
+    int calls = 0;
+    const xc::Built b = xc::Build(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>&) {
+      ++calls;
+      return good;
+    });
+    CHECKF(b.chrtwo.size() == 6 && b.sha1 == good && calls == 1 && ClosingLine(LogAt(b, 3), 3, 3), "%zu, %s, %s",
+           b.chrtwo.size(), b.sha1.c_str(), LogAt(b, 3).c_str());
+  }
+  // route (a) without an allocator: the hasher throws twice (nothing installed), or once (the retry's real digest)
+  for (int throws : {2, 1}) {
+    int calls = 0;
+    const xc::Built b = xc::Build(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>&) -> std::string {
+      if (++calls <= throws) throw std::runtime_error("hash failed");
+      return good;
+    });
+    if (throws == 2)
+      CHECKF(b.chrtwo.empty() && b.sha1.empty() && calls == 2 && ClosingLine(LogAt(b, 3), 0, 3, true), "%zu, %d, %s",
+             b.chrtwo.size(), calls, LogAt(b, 3).c_str());
+    else
+      CHECKF(b.chrtwo.size() == 6 && b.sha1 == good && calls == 2 && ClosingLine(LogAt(b, 3), 3, 3), "%zu, %d, %s",
+             b.chrtwo.size(), calls, LogAt(b, 3).c_str());
+  }
+  // nothing built: the hasher is not asked, and the closing line is the plain one
+  {
+    int calls = 0;
+    const xc::Built b = xc::Build(false, false, fn, t.span(), [&](const std::vector<afs::Replacement>&) {
+      ++calls;
+      return std::string();
+    });
+    CHECKF(calls == 0 && b.chrtwo.empty() && b.sha1.empty() && b.log.size() == 1 && ClosingLine(LogAt(b, 0), 0, 0),
+           "%d calls, %s", calls, LogAt(b, 0).c_str());
+  }
+}
+
+static void AllocationSweep(bool sticky) {
+  // Fix wave 2 I1: run in two modes. Single-shot (one failure at K) as below; sticky (every allocation from K on fails:
+  // reserve failing twice, sha1 failing twice, the closing line failing twice). Both modes, every sampled K:
+  // sha1.empty() == chrtwo.empty(), sha1 is the hash of the installed set (40 hex when not empty), and a closing line,
+  // when there is one, counts chrtwo.size() / 2. In sticky mode a missing closing line is allowed (a log line only),
+  // and the "built" lines may outnumber the pairs only when nothing is installed (the copies could not be hashed).
   // F3 (the reviewer's P3): one std::bad_alloc at the K-th allocation of a Build(true, true) on the test table. For
   // every sampled K: Build does not throw; sha1 is the hash of the installed bytes in order ("" when none); the
   // "built" lines are chrtwo.size() / 2; the closing line is there with those counts. Wrong versions: the hash taken
@@ -935,14 +1062,16 @@ static void TestAllocationFailures() {
   // Every K would take about 45 s (about 24,000 K at about 2 ms), so: a fixed stride of 7, plus every K in the first
   // 64, near each costume's end (the 64 before and 8 after the next costume's first read: the reviewer's K = 7970 ..
   // 7975 were hel03's commit, just before hak03's first read) and in the last 200 (hak08's commit, sha1, closing line)
-  const bool full = false;
-  const long long stride = 7;
+  // DOA4_EXTRAS_ALLOC_FULL=1: every K (stride 1; about 45 s a mode)
+  const char* full_env = std::getenv("DOA4_EXTRAS_ALLOC_FULL");
+  const bool full = full_env && std::string(full_env) == "1";
+  const long long stride = full ? 1 : 7;
   std::vector<long long> ks;
   for (long long k = 1; k <= total; ++k)
     if (k % stride == 0 || k <= 64 || (k > b2 - 64 && k <= b2 + 8) || (k > b3 - 64 && k <= b3 + 8) || k > total - 200)
       ks.push_back(k);
   long long escaped = 0, sha_bad = 0, lines_bad = 0, closing_bad = 0, not_fired = 0, kept_runs = 0, bytes_bad = 0;
-  long long first_bad = -1;
+  long long first_bad = -1, inv_bad = 0, unhashed_runs = 0, no_closing = 0;
   const auto ts = std::chrono::steady_clock::now();
   for (size_t n = 0; n < ks.size(); ++n) {
     const long long k = ks[n];
@@ -952,6 +1081,7 @@ static void TestAllocationFailures() {
     g_alloc_count = 0;
     g_alloc_fail_at = k;
     g_alloc_fired = false;
+    g_alloc_sticky = sticky;
     g_alloc_armed = true;
     try {
       b = xc::Build(true, true, fn, t.span());
@@ -959,6 +1089,7 @@ static void TestAllocationFailures() {
       threw = true;
     }
     g_alloc_armed = false;
+    g_alloc_sticky = false;
     bool bad = false;
     if (!g_alloc_fired) ++not_fired, bad = true;
     if (threw) {
@@ -993,17 +1124,36 @@ static void TestAllocationFailures() {
     size_t built_lines = 0;
     for (const auto& l : b.log)
       if (l.find(": built (") != std::string::npos) ++built_lines;
-    if (built_lines * 2 != b.chrtwo.size()) ++lines_bad, bad = true;
-    if (b.log.empty() || !ClosingLine(b.log.back(), static_cast<int>(built_lines), 3)) ++closing_bad, bad = true;
+    const bool hex40 = b.sha1.size() == 40 && std::all_of(b.sha1.begin(), b.sha1.end(), [](char c) {
+                         return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                       });
+    if (b.sha1.empty() != b.chrtwo.empty() || (!b.sha1.empty() && !hex40)) ++inv_bad, bad = true;
+    const int pairs_n = static_cast<int>(b.chrtwo.size() / 2);
+    const bool unhashed_line = !b.log.empty() && ClosingLine(b.log.back(), 0, 3, true);
+    const bool plain_line = !b.log.empty() && ClosingLine(b.log.back(), pairs_n, 3);
+    const bool any_closing = !b.log.empty() && b.log.back().rfind("extras copies: ", 0) == 0;
+    if (unhashed_line || (sticky && b.chrtwo.empty() && built_lines > 0)) ++unhashed_runs;
+    if (sticky ? (built_lines * 2 != b.chrtwo.size() && !b.chrtwo.empty())
+               : (built_lines * 2 != b.chrtwo.size()))
+      ++lines_bad, bad = true;
+    if (!any_closing) ++no_closing;
+    if (sticky ? (any_closing && !plain_line && !(unhashed_line && b.chrtwo.empty())) : !plain_line)
+      ++closing_bad, bad = true;
     if (b.chrtwo.size() < 6) ++kept_runs;
     if (bad && first_bad < 0) first_bad = k;
   }
   const double sweep_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count();
-  std::printf("allocation_failures: %lld allocations in a clean Build (%.2f ms; hak03 read at %lld, hak08 at %lld); %s; "
+  std::printf("allocation_failures (%s): %lld allocations in a clean Build (%.2f ms; hak03 read at %lld, hak08 at %lld); %s; "
               "%zu K run in %.1f s; %lld kept a costume; escaped %lld, sha1 %lld, bytes %lld, lines %lld, closing %lld, "
-              "not fired %lld; first bad K %lld\n",
-              total, clean_ms, b2, b3, full ? "every K" : ("stride " + std::to_string(stride) + " plus windows").c_str(),
-              ks.size(), sweep_s, kept_runs, escaped, sha_bad, bytes_bad, lines_bad, closing_bad, not_fired, first_bad);
+              "not fired %lld; invariant %lld; unhashed %lld, no closing line %lld; first bad K %lld\n",
+              sticky ? "sticky" : "single-shot", total, clean_ms, b2, b3, full ? "every K" : ("stride " + std::to_string(stride) + " plus windows").c_str(),
+              ks.size(), sweep_s, kept_runs, escaped, sha_bad, bytes_bad, lines_bad, closing_bad, not_fired, inv_bad,
+              unhashed_runs, no_closing, first_bad);
+  CHECKF(inv_bad == 0, "%lld runs broke sha1.empty() == chrtwo.empty() or 40 hex (first bad K %lld)", inv_bad, first_bad);
+  // evidence the sticky sweep reached the hash failing twice (copies built, none installed); single-shot never does
+  if (sticky) CHECKF(unhashed_runs > 0 && no_closing > 0, "%lld unhashed, %lld without a closing line", unhashed_runs,
+                     no_closing);
+  else CHECKF(unhashed_runs == 0, "%lld unhashed runs in single-shot mode", unhashed_runs);
   CHECKF(escaped == 0, "%lld runs threw (first bad K %lld)", escaped, first_bad);
   CHECKF(sha_bad == 0 && bytes_bad == 0, "%lld sha1, %lld bytes (first bad K %lld)", sha_bad, bytes_bad, first_bad);
   CHECKF(lines_bad == 0, "%lld runs (first bad K %lld)", lines_bad, first_bad);
@@ -1013,6 +1163,8 @@ static void TestAllocationFailures() {
   CHECKF(kept_runs > 0 && !ks.empty() && ks.size() >= std::min<long long>(total, 200), "%lld kept, %zu K", kept_runs,
          ks.size());
 }
+static void TestAllocationFailures() { AllocationSweep(false); }
+static void TestAllocationFailuresSticky() { AllocationSweep(true); }
 
 // ---------------------------------------------------------------- the gated real-archive check (A5 M3)
 static void RunRealArchive() {
@@ -1078,7 +1230,8 @@ static void RunRealArchive() {
               flip ? " (entry 46 flipped)" : "");
 }
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc > 0 && argv[0]) g_out_dir = fs::absolute(fs::path(argv[0])).parent_path();
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   RunGroup(TestFixtureAnchor, "fixture_anchor");
   RunGroup(TestCostumesTable, "costumes_table");
@@ -1097,6 +1250,9 @@ int main() {
   RunGroup(TestReaderPromises, "reader_promises");
   RunGroup(TestTocRefusalReason, "toc_refusal_reason");
   RunGroup(TestAllocationFailures, "allocation_failures");
+  RunGroup(TestAllocationFailuresSticky, "allocation_failures_sticky");
+  RunGroup(TestDefaultOpener, "default_opener");
+  RunGroup(TestHashFailureInstallsNothing, "hash_failure_installs_nothing");
   RunRealArchive();
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
