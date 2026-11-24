@@ -1255,6 +1255,24 @@ static void TestAdvice() {
   CHECK(Has(no_tag, "older game") && Has(no_tag, "Releases page") && !Has(no_tag, "Check for Updates"));
   // the same version with different builds: the updater refuses an equal tag, so the page again
   CHECK(Has(same, "same version") && Has(same, "Releases page") && Has(same, "v1.0.14"));
+  // Task 7b: a Windows and a native Linux game never share a build id; the same-version text says so (text only)
+  CHECK(same == "Both games say the same version (v1.0.14) but the builds differ: download it again from the Releases page, unless one is native Linux.");
+  const std::string cross_same = rules::MismatchAdvice("alpha-v0.3.0", "beta-v0.3.0");  // two channels, equal numbers
+  CHECK(cross_same == "Both games say the same version (alpha-v0.3.0, beta-v0.3.0) but the builds differ: download it again from the Releases page, unless one is native Linux.");
+  // the branches whose two games may both be Windows builds name no Linux
+  CHECK(!Has(no_tag, "Linux"));
+  CHECK(!Has(older_me, "Linux"));
+  CHECK(!Has(older_them, "Linux"));
+  // the host cuts its advice at wire::kMaxText (the Welcome copy and its own event line): the longer texts still fit
+  CHECK(same.size() <= wire::kMaxText);
+  CHECK(cross_same.size() <= wire::kMaxText);
+  CHECK(rules::MismatchAdvice("dev", "alpha-v0.3.0").size() <= wire::kMaxText);
+  CHECK(rules::MismatchAdvice("alpha-v0.3.0", "dev").size() <= wire::kMaxText);
+  // the host's event line is drawn unwrapped: 41 + 136 = 177 characters was the longest line before Task 7b
+  CHECK(same.size() <= 136);
+  CHECK(rules::MismatchAdvice("dev", "alpha-v0.3.0").size() <= 136);
+  CHECK(rules::MismatchAdvice("alpha-v0.3.0", "dev").size() <= 136);
+  CHECK(cross_same.size() == 152);  // over 136, accepted (ledger L52): two channels with equal numbers do not occur today
 
   Group("MismatchAdvice: two channels (P3D-3): the retired netplay channel is the older game whatever its numbers");
   {
@@ -1280,8 +1298,8 @@ static void TestAdvice() {
   }
   Group("MismatchAdvice: the build was renamed, the texts say \"release\" (P3D-3)");
   CHECK(rules::MismatchAdvice("alpha-v0.3.0", "") == "The other player has an older game: they need the newest release from the GitHub Releases page.");
-  CHECK(rules::MismatchAdvice("dev", "alpha-v0.3.0") == "You run a self-built exe: both of you should use the latest release (press Check for Updates).");
-  CHECK(rules::MismatchAdvice("alpha-v0.3.0", "dev") == "The other player runs a self-built exe: both of you should use the latest release (Check for Updates).");
+  CHECK(rules::MismatchAdvice("dev", "alpha-v0.3.0") == "You run a self-built exe: both of you should use the latest release (press Check for Updates), or the same native Linux build.");
+  CHECK(rules::MismatchAdvice("alpha-v0.3.0", "dev") == "The other player runs a self-built exe: both of you should use the latest release (Check for Updates), or the same native Linux build.");
 
   Group("MismatchAdvice: a local build is \"dev\" (DOA4_RELEASE_TAG), which is not a version");
   CHECK(Has(rules::MismatchAdvice("dev", "netplay-v1.0.5"), "You run a self-built exe"));

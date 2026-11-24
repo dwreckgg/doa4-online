@@ -2,9 +2,19 @@
 
 #include "doa4_updater.h"
 
+#if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
 #include <winhttp.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cerrno>
+
+#include "picosha2/picosha2.h"  // the SDK's thirdparty/picosha2 (okdshin, MIT)
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -22,8 +32,9 @@
 #include "net/np_rules.h"
 
 #ifdef DOA4_UPDATER_HOST_TEST
-// tests/host/run_updater_test.bat: the release identity CMake gives the game target, as a stand-in (the test never
-// calls GameEnv, so it never uses them)
+// tests/host/run_updater_test.bat and run_updater_refusal_test.bat: the release identity CMake gives the game target, as
+// a stand-in (updater_host_test never calls GameEnv; updater_refusal_host_test calls GameEnv() and reads only its
+// may_install, so neither uses them)
 #define DOA4_RELEASE_TAG "dev"
 #define DOA4_RELEASE_REPO "none/none"
 #define DOA4_RELEASE_CHANNEL "alpha"
@@ -55,12 +66,35 @@ void SetMessage(const Request& request, const std::string& text) {
   if (request.log) request.log("[doa4][UPDATE] " + text);
 }
 
+#if defined(_WIN32)
 std::string ErrorText(DWORD e) { return "error " + std::to_string(e); }
+uint32_t LastError() { return GetLastError(); }
+#else
+std::string ErrorText(int e) { return "error " + std::to_string(e); }
+uint32_t LastError() { return uint32_t(errno); }
+#endif
+
+// Renames that never replace (false when `to` exists) and that replace in one step; LastError() says why one failed.
+bool RenameNoReplace(const fs::path& from, const fs::path& to) {
+#if defined(_WIN32)
+  return MoveFileExW(from.c_str(), to.c_str(), 0) != 0;
+#else
+  return renameat2(AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE) == 0;
+#endif
+}
+bool RenameReplace(const fs::path& from, const fs::path& to) {
+#if defined(_WIN32)
+  return MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+  return std::rename(from.c_str(), to.c_str()) == 0;
+#endif
+}
 
 std::string SizeText(uint64_t bytes) {
   return bytes % (uint64_t(1) << 20) == 0 ? std::to_string(bytes >> 20) + " MB" : std::to_string(bytes) + " bytes";
 }
 
+#if defined(_WIN32)
 bool IsMissing(const fs::path& p) {
   if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
   const DWORD e = GetLastError();
@@ -96,7 +130,14 @@ std::string HttpsHost(const std::wstring& url, std::wstring* path) {
   }
   return AsciiOf(std::wstring_view(uc.lpszHostName, uc.dwHostNameLength));
 }
+#else
+bool IsMissing(const fs::path& p) {
+  struct stat st;
+  return lstat(p.c_str(), &st) != 0 && (errno == ENOENT || errno == ENOTDIR);
+}
+#endif
 
+#if defined(_WIN32)
 // GameEnv's GET: WinHTTP over the system proxy (DOA2U's HttpGet) with review M-3's rules: https only, redirects only
 // from HTTPS to HTTPS, the asked-for host and the final host must pass HostAllowed, only a 200 answer, and the bytes
 // received must equal Content-Length when the server sends one.
@@ -182,16 +223,31 @@ bool WinHttpGet(const std::string& url_text, bool api, const Sink& sink, std::st
   if (s) WinHttpCloseHandle(s);
   return ok;
 }
+#else
+// No HTTPS client is linked into the Linux build yet: the check reports that instead of reaching GitHub.
+bool LinuxHttpGet(const std::string&, bool, const Sink&, std::string* error) {
+  *error = "Check for Updates is not available in the Linux build; build the new version from source";
+  return false;
+}
+#endif
 
 // Downloads `url` into the new file `path` (it must not exist), at most `cap` bytes; a copy of the bytes goes to `copy`
 // when not null. The file is flushed before it is closed.
 bool Download(const Env& env, const std::string& url, const fs::path& path, uint64_t cap, std::string* copy,
               std::string* error) {
+#if defined(_WIN32)
   HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (f == INVALID_HANDLE_VALUE) {
     *error = "cannot create it (" + ErrorText(GetLastError()) + ")";
     return false;
   }
+#else
+  const int f = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0755);  // the exe is among the files
+  if (f < 0) {
+    *error = "cannot create it (" + ErrorText(errno) + ")";
+    return false;
+  }
+#endif
   uint64_t got = 0;
   bool over = false, write_failed = false, cancelled = false;
   std::string get_error;
@@ -204,8 +260,12 @@ bool Download(const Env& env, const std::string& url, const fs::path& path, uint
       over = true;
       return false;
     }
+#if defined(_WIN32)
     DWORD wrote = 0;
     if (!WriteFile(f, data, DWORD(n), &wrote, nullptr) || wrote != n) {
+#else
+    if (write(f, data, n) != ssize_t(n)) {
+#endif
       write_failed = true;
       return false;
     }
@@ -213,8 +273,13 @@ bool Download(const Env& env, const std::string& url, const fs::path& path, uint
     if (copy) copy->append(data, n);
     return true;
   }, &get_error);
+#if defined(_WIN32)
   const bool flushed = FlushFileBuffers(f) != 0;
   const bool closed = CloseHandle(f) != 0;
+#else
+  const bool flushed = fsync(f) == 0;
+  const bool closed = close(f) == 0;
+#endif
   if (cancelled) {
     *error = "the game is closing";
   } else if (over) {
@@ -300,6 +365,18 @@ std::string Sha256File(const fs::path& file, std::string* error) {
     if (error) *error = why;
     return std::string();
   };
+#if !defined(_WIN32)
+  std::ifstream in(file, std::ios::binary);
+  if (!in) return fail("cannot open it (" + ErrorText(errno) + ")");
+  picosha2::hash256_one_by_one hasher;
+  std::vector<char> buf(1 << 16);
+  while (in.read(buf.data(), std::streamsize(buf.size())) || in.gcount() > 0) {
+    hasher.process(buf.begin(), buf.begin() + in.gcount());
+  }
+  if (in.bad()) return fail("cannot read it");
+  hasher.finish();
+  return picosha2::get_hash_hex_string(hasher);
+#else
   HANDLE f = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                          FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
   if (f == INVALID_HANDLE_VALUE) return fail("cannot open it (" + ErrorText(GetLastError()) + ")");
@@ -336,6 +413,7 @@ std::string Sha256File(const fs::path& file, std::string* error) {
     out += kHex[b & 15];
   }
   return out;
+#endif
 }
 
 bool HostAllowed(std::string_view host) {
@@ -391,8 +469,8 @@ std::string VerifyAndSwap(const fs::path& dir, const fs::path& staging, std::str
                              : "an old copy of " + f + " is still in use: close other copies of the game and try again";
       break;
     }
-    if (!MoveFileExW(from.c_str(), to.c_str(), 0)) {  // never replaces
-      why = what + " failed (" + ErrorText(GetLastError()) + ")";
+    if (!RenameNoReplace(from, to)) {
+      why = what + " failed (" + ErrorText(LastError()) + ")";
       break;
     }
     done.push_back({from, to});
@@ -401,8 +479,8 @@ std::string VerifyAndSwap(const fs::path& dir, const fs::path& staging, std::str
   // 3. rollback, newest first
   std::string stuck;
   for (auto it = done.rbegin(); it != done.rend(); ++it) {
-    if (!MoveFileExW(it->to.c_str(), it->from.c_str(), 0))
-      stuck += (stuck.empty() ? "" : ", ") + it->to.filename().string() + " (" + ErrorText(GetLastError()) + ")";
+    if (!RenameNoReplace(it->to, it->from))
+      stuck += (stuck.empty() ? "" : ", ") + it->to.filename().string() + " (" + ErrorText(LastError()) + ")";
   }
   if (!stuck.empty())
     return why + "; putting back " + stuck + " failed too: reinstall the game from the GitHub Releases page";
@@ -413,17 +491,30 @@ void DeleteOldFiles(const fs::path& dir) {
   for (const char* name : kFiles) {
     const fs::path file = dir / name, old = dir / (std::string(name) + ".old");
     if (IsMissing(file)) continue;  // the .old may be the only copy left by an interrupted swap
+#if defined(_WIN32)
     DeleteFileW(old.c_str());       // in use (an instance still running from it) or absent: left as it is
+#else
+    std::error_code ec;
+    fs::remove(old, ec);            // in use (an instance still running from it) or absent: left as it is
+#endif
   }
 }
 
-void CleanUpAtStart(const fs::path& dir) {
+void CleanUpAtStart(const fs::path& dir, bool may_install) {
+  if (!may_install) return;
   if (dir.empty() || !dir.is_absolute()) return;
   DeleteOldFiles(dir);
   std::error_code ec;
   fs::remove_all(dir / kStagingName, ec);  // an interrupted check's downloads (review M-2)
 }
 
+#if !defined(_WIN32)
+fs::path ExeDir() {
+  std::error_code ec;
+  const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+  return ec ? fs::path() : exe.parent_path();
+}
+#else
 fs::path ExeDir() {
   std::wstring buf(512, L'\0');
   for (;;) {
@@ -437,12 +528,17 @@ fs::path ExeDir() {
     buf.resize(buf.size() * 2);
   }
 }
+#endif
 
 // ---- the check ----
 
 Env GameEnv() {
   Env e;
+#if defined(_WIN32)
   e.get = WinHttpGet;
+#else
+  e.get = LinuxHttpGet;
+#endif
   e.dir = ExeDir();
   e.repo = DOA4_RELEASE_REPO;
   e.channel = DOA4_RELEASE_CHANNEL;
@@ -466,9 +562,9 @@ void RefreshFolderSums(const Request& request, const fs::path& dir, const std::s
     out.flush();
     ok = out.good();
   }
-  if (ok) ok = MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+  if (ok) ok = RenameReplace(tmp, target);
   if (!ok) {
-    const DWORD e = GetLastError();
+    const uint32_t e = LastError();
     fs::remove(tmp, ec);
     if (request.log)
       request.log("[doa4][UPDATE] WARN: could not refresh " + std::string(kSumsName) + " in the game folder (" + ErrorText(e) +
@@ -503,6 +599,7 @@ static bool ListAndChoose(const Env& env, Choice* c, Result* r) {
 
 Result CheckAndUpdate(const Request& request, const Env& env) {
   Result r;
+  if (!env.may_install) { r.message = kNoInstallText; return r; }
   {
     std::lock_guard<std::mutex> lock(g_mu);
     if (!g_installed.empty()) {

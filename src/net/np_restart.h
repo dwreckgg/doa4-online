@@ -32,9 +32,10 @@ std::filesystem::path SessionDir(const std::filesystem::path& user_data, const s
 bool RedirectHolds(const std::filesystem::path& runtime_user_data, const std::filesystem::path& session_user_data);
 
 // The carried guest settings this build never registers (fix round M1): kernel_pix (sdk src/kernel/xboxkrnl/
-// debug_monitor.cpp, left out by src/kernel/CMakeLists.txt:37) and the Vulkan backend's vulkan_readback_resolve /
-// vulkan_readback_memexport (not built on Windows). Only these are skipped when the registry does not know them; any
-// other unknown name fails the session start.
+// debug_monitor.cpp, left out of every build by src/kernel/CMakeLists.txt:37) and the readback pair of the back end
+// the build leaves out: on Windows the Vulkan backend's vulkan_readback_resolve / vulkan_readback_memexport (not built
+// on Windows), on other platforms the D3D12 backend's d3d12_readback_resolve / d3d12_readback_memexport (not built
+// there). Only these are skipped when the registry does not know them; any other unknown name fails the session start.
 bool KnownUnregisteredSetting(std::string_view name);
 
 // The harness's lobby-only peer (Task 15 carry f, gate S8d): true only when the game runs with a test dir

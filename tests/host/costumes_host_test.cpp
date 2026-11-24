@@ -12,6 +12,8 @@
 #include <utility>
 #ifdef _WIN32
 #include <process.h>
+#else
+#include <unistd.h>
 #endif
 #include <filesystem>
 #include <fstream>
@@ -1734,7 +1736,11 @@ static void TestOldOverloadNoExtras() {
 static std::filesystem::path WriteFakeImage(std::vector<uint8_t>* bytes) {
   // One name per process: a second run at the same time must not delete this one's file.
   const std::filesystem::path path = std::filesystem::temp_directory_path() /
+#ifdef _WIN32
                                      ("doa4_test_image_reader_check_" + std::to_string(unsigned(_getpid())) + ".bin");
+#else
+                                     ("doa4_test_image_reader_check_" + std::to_string(unsigned(getpid())) + ".bin");
+#endif
   bytes->resize(0x300);
   for (size_t i = 0; i < bytes->size(); ++i) (*bytes)[i] = uint8_t(i * 7 + 3);
   std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()), std::streamsize(bytes->size()));
@@ -1744,6 +1750,12 @@ static std::filesystem::path WriteFakeImage(std::vector<uint8_t>* bytes) {
 static void SetImageVariable(const std::filesystem::path* value) {
 #ifdef _WIN32
   _wputenv_s(L"DOA4_TEST_IMAGE", value ? value->c_str() : L"");
+#else
+  if (value) {
+    setenv("DOA4_TEST_IMAGE", value->c_str(), 1);
+  } else {
+    unsetenv("DOA4_TEST_IMAGE");
+  }
 #endif
 }
 
@@ -1796,21 +1808,20 @@ static void TestImageReader() {
   CHECK(!ReadRangeFromFile(path, ImageRange{0x820002F8, 16, plain_pin.c_str()}, &why));
   CHECK(why == name + ": cannot read");
 
-  // Through the environment variable (Windows: read as UTF-16).
-#ifdef _WIN32
+  // Through the environment variable (Windows: set and read as UTF-16; elsewhere: setenv and getenv, the path's bytes).
   const std::optional<std::filesystem::path> before = ImagePath();
   SetImageVariable(nullptr);
   why.clear();
   CHECK(!ReadImageRange(ImageRange{0x82000040, 16, plain_pin.c_str()}, &why) && why == "DOA4_TEST_IMAGE unset");
   SetImageVariable(&path);
   CHECK(ReadImageRange(ImageRange{0x82000040, 16, plain_pin.c_str()}, &why) == plain);
-  const std::filesystem::path missing = path.wstring() + L".missing";
+  std::filesystem::path missing = path;
+  missing += ".missing";
   SetImageVariable(&missing);
   why.clear();
   CHECK(!ReadImageRange(ImageRange{0x82000040, 16, plain_pin.c_str()}, &why) && why == name + ".missing: cannot read");
   SetImageVariable(before ? &*before : nullptr);
   CHECK(ImagePath() == before);
-#endif
   std::error_code ec;
   std::filesystem::remove(path, ec);
 }

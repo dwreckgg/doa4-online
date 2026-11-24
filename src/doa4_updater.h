@@ -10,6 +10,8 @@
 // caller's may_swap predicate is asked again.
 // No SDK and no ImGui here. The network and the folder come in through Env, so the whole check is host-tested on temp
 // folders with a fake HTTP source (tests/host/updater_host_test.cpp); only GameEnv's WinHTTP source is not.
+// A non-Windows build never downloads or installs a release (Env::may_install, kIsWindows; native Linux bring-in Task 7,
+// tests/host/updater_refusal_host_test.cpp); it may still list releases (CheckOnly).
 #pragma once
 
 #include <cstddef>
@@ -43,7 +45,8 @@ inline constexpr uint64_t kMaxListBytes = uint64_t(16) << 20;
 
 // What the release list said (Task 15: the start-up notice's memory follows it). kNewer: the channel's highest release
 // is newer than the running tag (every release, for a self-built game); kUpToDate: it is not; kFailed: no answer, an
-// error, no release of the channel, or nothing asked (a swap already done in this process, the game closing).
+// error, no release of the channel, or nothing asked (a swap already done in this process, the game closing, or a
+// CheckAndUpdate on a build that may not install: refused first, message kNoInstallText, found left at kFailed).
 enum class Found { kFailed, kUpToDate, kNewer };
 
 struct Result {
@@ -61,6 +64,19 @@ struct Request {
   std::function<void(const Result&)> done;      // Start: the result, on the check's thread, after its last log line
 };
 
+// True in a Windows build. A non-Windows build never downloads or installs a release (the release's files are
+// Windows programs); it may still list releases (CheckOnly).
+#if defined(_WIN32)
+inline constexpr bool kIsWindows = true;
+#else
+inline constexpr bool kIsWindows = false;
+#endif
+namespace rules {
+constexpr bool MayInstall(bool is_windows) { return is_windows; }
+}  // namespace rules
+// The whole answer of a check on a build that may not install.
+inline constexpr const char* kNoInstallText = "This build cannot update itself. Build the new version from source.";
+
 // Where a check reads from and writes to: the game's own (GameEnv), or the host test's fakes and temp folder.
 using Sink = std::function<bool(const char* data, size_t n)>;  // false = stop the transfer
 struct Env {
@@ -69,6 +85,7 @@ struct Env {
   std::filesystem::path dir;           // the game's folder (absolute)
   std::string repo, channel, current;  // DOA4_RELEASE_REPO, DOA4_RELEASE_CHANNEL, DOA4_RELEASE_TAG
   uint64_t max_file_bytes = kMaxFileBytes;
+  bool may_install = rules::MayInstall(kIsWindows);  // false: CheckAndUpdate refuses before anything is asked or written
 };
 // WinHTTP (system proxy; redirects followed only from HTTPS to HTTPS; the asked-for and the final host must pass
 // HostAllowed; only a 200 answer; Content-Length, when sent, must equal the bytes received), ExeDir(), the build's
@@ -82,6 +99,7 @@ Env GameEnv();
 // (each game file at most max_file_bytes); deletes stale .old files; asks may_swap (a no leaves everything as it was);
 // VerifyAndSwap; removes update_new in every case. After one successful swap, later checks in the same process download
 // nothing and say so (RestartPending). After Shutdown, nothing more is downloaded or swapped.
+// First of all: when !env.may_install (a non-Windows build) it asks nothing, writes nothing and answers kNoInstallText.
 Result CheckAndUpdate(const Request& request, const Env& env);
 
 // Task 15, the start-up notice: only the release list and Choose (blocks; call it from StartCheckOnly's thread). It never
@@ -95,8 +113,9 @@ Result CheckOnly(const Env& env);
 bool StartCheckOnly(Env env, std::function<void(const Result&)> done);
 
 // The decision once the releases JSON arrived (pure). `json`: GitHub's release list; `channel`: DOA4_RELEASE_CHANNEL;
-// `current`: DOA4_RELEASE_TAG. update = true when the highest release with kFiles + SHA256SUMS.txt (rules::PickRelease)
-// is newer than `current` (CompareVersions > 0), or `current` is a self-built game (rules::IsDevBuild): any release.
+// `current`: DOA4_RELEASE_TAG. update = true when the highest release with kFiles + SHA256SUMS.txt
+// (np::rules::PickRelease) is newer than `current` (CompareVersions > 0), or `current` is a self-built game
+// (np::rules::IsDevBuild): any release.
 // update = false: `message` says why ("No <channel> release found yet", "Already on the latest <channel> release
 // (<current>)"). `urls` holds the four names -> their download URLs.
 struct Choice {
@@ -129,8 +148,9 @@ std::string VerifyAndSwap(const std::filesystem::path& dir, const std::filesyste
 // use) is left for the next start.
 void DeleteOldFiles(const std::filesystem::path& dir);
 // At start (OnPreSetup, after the previous instance has exited): DeleteOldFiles and removes a leftover <dir>/update_new
-// (review M-2). Nothing happens for an empty or relative `dir`.
-void CleanUpAtStart(const std::filesystem::path& dir);
+// (review M-2). Nothing happens for an empty or relative `dir`. Nothing happens when !may_install (a non-Windows build:
+// no install can have left an .old or an update_new).
+void CleanUpAtStart(const std::filesystem::path& dir, bool may_install = rules::MayInstall(kIsWindows));
 
 // SHA256SUMS.txt lines: "<64 hex digits>  <name>" (sha256sum's text mode) or "<64 hex> *<name>" (binary mode); CRLF or
 // LF; a UTF-8 BOM is skipped; other lines are ignored. `hex`: name -> lower-case hex (the last line for a name);

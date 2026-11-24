@@ -2,7 +2,15 @@
 
 #include "doa4_update_notice.h"
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
+#endif
 
 #include <array>
 #include <fstream>
@@ -106,6 +114,7 @@ std::string ReadMemory(const std::filesystem::path& dir) {
   return text.substr(first);
 }
 
+#if defined(_WIN32)
 std::string WriteMemory(const std::filesystem::path& dir, std::string_view tag) {
   const std::filesystem::path file = dir / kMemoryFile;
   if (tag.empty()) {
@@ -136,6 +145,33 @@ std::string WriteMemory(const std::filesystem::path& dir, std::string_view tag) 
   }
   return {};
 }
+#else
+// As on Windows: written to a .tmp, flushed to the disk, then renamed over the file in one step.
+std::string WriteMemory(const std::filesystem::path& dir, std::string_view tag) {
+  const std::filesystem::path file = dir / kMemoryFile;
+  if (tag.empty()) {
+    if (unlink(file.c_str()) == 0 || errno == ENOENT) return {};
+    return "cannot delete " + file.filename().string() + " (error " + std::to_string(errno) + ")";
+  }
+  const std::filesystem::path tmp = dir / (std::string(kMemoryFile) + ".tmp");
+  const std::string bytes = std::string(tag) + "\n";
+  const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0) return "cannot create " + tmp.filename().string() + " (error " + std::to_string(errno) + ")";
+  const bool ok = write(fd, bytes.data(), bytes.size()) == ssize_t(bytes.size()) && fsync(fd) == 0;
+  const int write_error = ok ? 0 : errno;
+  close(fd);
+  if (!ok) {
+    unlink(tmp.c_str());
+    return "cannot write " + tmp.filename().string() + " (error " + std::to_string(write_error) + ")";
+  }
+  if (std::rename(tmp.c_str(), file.c_str()) != 0) {
+    const int e = errno;
+    unlink(tmp.c_str());
+    return "cannot replace " + file.filename().string() + " (error " + std::to_string(e) + ")";
+  }
+  return {};
+}
+#endif
 
 namespace {
 // R107: the mailbox lives on the heap and is never destroyed, so a check thread that ends during static destruction

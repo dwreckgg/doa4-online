@@ -102,6 +102,12 @@ std::string SaveTomlKeys(const std::filesystem::path& path,
   if (keys.size() == 0) return "no setting to save; dead_or_alive_4.toml was left unchanged";
   std::string text;
   {
+#if !defined(_WIN32)
+    // A folder in the file's place: libstdc++ opens it and its read throws (Windows refuses the open), so it is
+    // refused here first, the same answer on both.
+    std::error_code dir_ec;
+    if (std::filesystem::is_directory(path, dir_ec)) return "cannot read " + Utf8(path);
+#endif
     std::ifstream in(path, std::ios::binary);
     if (in) {
       text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());

@@ -6,6 +6,7 @@
 #include <exception>
 #include <utility>
 
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -13,6 +14,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 namespace doa4::photo {
 
@@ -126,7 +132,14 @@ void Service::Run() {
   // Background priority (CPU, memory and disk): capturing and encoding a x4
   // frame (59 MB) must not take time from the game's threads. Measured at x4
   // before this: up to 280 of 600 game frames over 17.5 ms around a photo.
+#if defined(_WIN32)
   SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+#else
+  // Linux sets both per thread: the lowest CPU priority (nice 19) and the idle I/O class (IOPRIO_CLASS_IDLE = 3,
+  // IOPRIO_CLASS_SHIFT = 13, linux/ioprio.h).
+  setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 19);
+  syscall(SYS_ioprio_set, 1 /* IOPRIO_WHO_PROCESS */, gettid(), 3 << 13);
+#endif
   for (;;) {
     Job job;
     {

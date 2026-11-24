@@ -189,7 +189,9 @@ std::string CompletePendingSwap(const std::filesystem::path& user_data,
 std::wstring FolderClaimNameForTest(const std::filesystem::path& user_data);
 // Test seam: replaces CreateEventW when a folder is claimed (nullptr restores it). A function returning null (with SetLastError)
 // makes every claim fail with that error: the job ends kFailed "could not lock ...", CompletePendingSwap returns the same words.
+#if defined(_WIN32)
 void SetFolderClaimCreateEventForTest(void* (*create_event)(const wchar_t* name));
+#endif
 
 // "" when `folder` is a good import: manifest.txt parses, every line is a pick, every file exists with the listed size and
 // SHA-1. Otherwise the first reason.

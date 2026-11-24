@@ -8,6 +8,7 @@
 // answers are parsed by rules::StunMapped (the codec of Task 3).
 #include "np_transport.h"
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX  // std::min / std::max below; windows.h's macros must not see them, whatever the build defines
 #endif
@@ -16,6 +17,15 @@
 #include <mstcpip.h>
 #include <windows.h>
 #include <wlanapi.h>  // types only: wlanapi.dll is loaded at run time (Config::wifi_streaming), nothing is linked
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <poll.h>
+
+#include "np_posix.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -27,7 +37,7 @@
 
 #include "np_spsc.h"
 
-#ifndef SIO_UDP_CONNRESET
+#if defined(_WIN32) && !defined(SIO_UDP_CONNRESET)
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)  // mstcpip.h hides it without _WIN32_WINNT (as DOA2U netplay.c:43)
 #endif
 
@@ -134,6 +144,12 @@ const char* NatName(rules::Nat n) {
   return "?";
 }
 
+#if defined(_WIN32)
+void SignalEvent(HANDLE event) { SetEvent(event); }
+#else
+void SignalEvent(int event) { posix::Signal(event); }
+#endif
+
 constexpr uint32_t kTickMs = 5;
 constexpr uint32_t kStunRetryMs = 500;     // DOA2U STUN_RETRY_MS
 constexpr int kRecvBuffer = 2048;          // > wire::kMaxDatagram, so a 1,401-byte datagram reaches wire::Decode
@@ -149,8 +165,12 @@ struct Resolve {
 };
 
 void ResolveServers(std::shared_ptr<Resolve> res, std::vector<std::string> names) {
+#if defined(_WIN32)
   WSADATA w;
   const bool wsa = WSAStartup(MAKEWORD(2, 2), &w) == 0;
+#else
+  constexpr bool wsa = true;  // POSIX sockets need no startup
+#endif
   std::vector<std::optional<rules::Endpoint>> eps(names.size());
   for (size_t i = 0; wsa && i < names.size(); ++i) {
     const size_t colon = names[i].rfind(':');
@@ -165,7 +185,9 @@ void ResolveServers(std::shared_ptr<Resolve> res, std::vector<std::string> names
       freeaddrinfo(ai);
     }
   }
+#if defined(_WIN32)
   if (wsa) WSACleanup();
+#endif
   std::lock_guard<std::mutex> lock(res->mu);
   res->eps = std::move(eps);
   res->done = true;
@@ -185,10 +207,15 @@ struct Transport::Impl {
   bool sim_on = false;
 
   SOCKET sock = INVALID_SOCKET;
+#if defined(_WIN32)
   WSAEVENT sock_event = WSA_INVALID_EVENT;
   HANDLE wake = nullptr;     // auto-reset: PushGekko (a packet to send) and Stop
   HANDLE arrived = nullptr;  // auto-reset: gekko_arrived()
   HANDLE timer = nullptr;    // high-resolution waitable timer: the next 5 ms tick or held datagram (nullptr: 5 ms timeout)
+#else
+  int wake = -1;     // eventfd, auto-reset: PushGekko (a packet to send) and Stop
+  int arrived = -1;  // eventfd, auto-reset: gekko_arrived()
+#endif
   std::thread thread;
   std::atomic<bool> stop{false};
   std::atomic<DWORD> io_tid{0};
@@ -231,8 +258,10 @@ struct Transport::Impl {
   std::optional<rules::Endpoint> logged_mapped;
   int64_t next_tick_us = 0;  // on_tick runs at the first loop at or after this
   uint64_t gekko_out = 0;    // kGekko datagrams drained so far: the index Config::sim_drop counts
+#if defined(_WIN32)
   HANDLE wlan = nullptr;     // the WLAN client handle while media streaming mode is held (Config::wifi_streaming)
   void* wlan_close = nullptr;  // WlanCloseHandle, from wlanapi.dll
+#endif
 
   void Log(const std::string& line) const {
     std::lock_guard<std::mutex> lock(log_mu);
@@ -285,6 +314,7 @@ struct Transport::Impl {
   }
 
   void Run();
+  void WaitForWork();
   void ReceiveAll(std::vector<uint8_t>& buf);
   void Handle(const rules::Endpoint& from, std::span<const uint8_t> d, bool* arrived_any);
   void DrainOutbound();
@@ -308,23 +338,10 @@ void Transport::Impl::Run() {
   Log("[doa4][NET] transport started on port " + std::to_string(port.load()));
   if (config.wifi_streaming) WifiOn();
   std::vector<uint8_t> buf(kRecvBuffer);
-  HANDLE waits[3] = {sock_event, wake, timer};
-  const DWORD n_waits = timer ? 3 : 2;
   next_tick_us = NowUs();
   while (!stop.load()) {
-    DWORD timeout = kTickMs;
-    if (timer) {
-      int64_t next = next_tick_us;
-      if (!held.empty()) next = std::min(next, held.front().due_us);
-      const int64_t wait_us = next - NowUs();
-      LARGE_INTEGER due;
-      due.QuadPart = -wait_us * 10;  // relative, in 100 ns
-      if (wait_us <= 0) timeout = 0;
-      else if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) timeout = 4 * kTickMs;  // a guard only
-    }
-    WaitForMultipleObjects(n_waits, waits, FALSE, timeout);
+    WaitForWork();
     if (stop.load()) break;
-    WSAResetEvent(sock_event);  // before the drain: a datagram arriving during it sets the event again
     ReceiveAll(buf);
     DrainOutbound();
     if (!held.empty()) ReleaseHeld();
@@ -339,6 +356,38 @@ void Transport::Impl::Run() {
   WifiOff();  // the mode ends with the handle (Stop joins this thread before it returns)
 }
 
+#if defined(_WIN32)
+void Transport::Impl::WaitForWork() {
+  HANDLE waits[3] = {sock_event, wake, timer};
+  const DWORD n_waits = timer ? 3 : 2;
+  DWORD timeout = kTickMs;
+  if (timer) {
+    int64_t next = next_tick_us;
+    if (!held.empty()) next = std::min(next, held.front().due_us);
+    const int64_t wait_us = next - NowUs();
+    LARGE_INTEGER due;
+    due.QuadPart = -wait_us * 10;  // relative, in 100 ns
+    if (wait_us <= 0) timeout = 0;
+    else if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) timeout = 4 * kTickMs;  // a guard only
+  }
+  WaitForMultipleObjects(n_waits, waits, FALSE, timeout);
+  if (stop.load()) return;
+  WSAResetEvent(sock_event);  // before the drain: a datagram arriving during it sets the event again
+}
+#else
+// ppoll's timeout is in nanoseconds on Linux's high-resolution timers, so no separate timer is needed for the 5 ms tick
+// or a held datagram.
+void Transport::Impl::WaitForWork() {
+  int64_t next = next_tick_us;
+  if (!held.empty()) next = std::min(next, held.front().due_us);
+  const int64_t wait_us = std::max<int64_t>(0, next - NowUs());
+  const timespec timeout{time_t(wait_us / 1000000), long(wait_us % 1000000) * 1000};
+  pollfd waits[2] = {{sock, POLLIN, 0}, {wake, POLLIN, 0}};
+  if (ppoll(waits, 2, &timeout, nullptr) > 0 && (waits[1].revents & POLLIN)) posix::Consume(wake);
+}
+#endif
+
+#if defined(_WIN32)
 // ---- Wi-Fi media streaming mode: DOA2U recomp by Parker Allan (parkerallan/doa2u-recomp, MIT), nic_net.c 277-302
 // (wlan_no_background_scans, commit 361dccf), with the handle closed at the end instead of kept for the process. ----
 void Transport::Impl::WifiOn() {
@@ -381,11 +430,17 @@ void Transport::Impl::WifiOff() {
   if (wlan && wlan_close) reinterpret_cast<DWORD(WINAPI*)(HANDLE, PVOID)>(wlan_close)(wlan, nullptr);
   wlan = nullptr;
 }
+#else
+// Media streaming mode is a Windows WLAN API setting; Linux has no per-application equivalent.
+void Transport::Impl::WifiOn() { Log("[doa4][NET] Wi-Fi media streaming mode is not available on this system"); }
+void Transport::Impl::WifiOff() {}
+#endif
 
 void Transport::Impl::ReceiveAll(std::vector<uint8_t>& buf) {
   bool arrived_any = false;
   for (int i = 0; i < kMaxReceivesPerLoop; ++i) {
     sockaddr_in from{};
+#if defined(_WIN32)
     int fl = sizeof from;
     const int n = recvfrom(sock, reinterpret_cast<char*>(buf.data()), int(buf.size()), 0, reinterpret_cast<sockaddr*>(&from), &fl);
     if (n == SOCKET_ERROR) {
@@ -397,9 +452,22 @@ void Transport::Impl::ReceiveAll(std::vector<uint8_t>& buf) {
       if (e == WSAECONNRESET || e == WSAENETRESET) continue;  // an ICMP report; SIO_UDP_CONNRESET keeps them rare
       break;                                                  // WSAEWOULDBLOCK: nothing more queued
     }
+#else
+    socklen_t fl = sizeof from;
+    // MSG_TRUNC: n is the datagram's real length, so one longer than the buffer is seen (Winsock's WSAEMSGSIZE)
+    const ssize_t n = recvfrom(sock, buf.data(), buf.size(), MSG_TRUNC, reinterpret_cast<sockaddr*>(&from), &fl);
+    if (n < 0) {
+      if (errno == ECONNREFUSED || errno == EINTR) continue;  // an ICMP report on the socket, or a signal
+      break;                                                  // EAGAIN: nothing more queued
+    }
+    if (size_t(n) > buf.size()) {
+      CountDrop(wire::Drop::kTooLarge);
+      continue;
+    }
+#endif
     Handle(EndpointOf(from), std::span<const uint8_t>(buf.data(), size_t(n)), &arrived_any);
   }
-  if (arrived_any) SetEvent(arrived);
+  if (arrived_any) SignalEvent(arrived);
 }
 
 void Transport::Impl::Handle(const rules::Endpoint& from, std::span<const uint8_t> d, bool* arrived_any) {
@@ -561,6 +629,7 @@ void Transport::Impl::Close() {
     closesocket(sock);
     sock = INVALID_SOCKET;
   }
+#if defined(_WIN32)
   if (sock_event != WSA_INVALID_EVENT) {
     WSACloseEvent(sock_event);
     sock_event = WSA_INVALID_EVENT;
@@ -573,6 +642,7 @@ void Transport::Impl::Close() {
     WSACleanup();
     wsa = false;
   }
+#endif
 }
 
 // =====================================================================================================
@@ -580,14 +650,24 @@ void Transport::Impl::Close() {
 // =====================================================================================================
 Transport::Transport() : impl_(std::make_unique<Impl>()) {
   impl_->owner = this;
+#if defined(_WIN32)
   impl_->wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   impl_->arrived = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+#else
+  impl_->wake = posix::CreateEvent();
+  impl_->arrived = posix::CreateEvent();
+#endif
 }
 
 Transport::~Transport() {
   Stop();
+#if defined(_WIN32)
   if (impl_->wake) CloseHandle(impl_->wake);
   if (impl_->arrived) CloseHandle(impl_->arrived);
+#else
+  if (impl_->wake >= 0) close(impl_->wake);
+  if (impl_->arrived >= 0) close(impl_->arrived);
+#endif
 }
 
 bool Transport::Start(const Config& config, Log log, std::string* error) {
@@ -601,7 +681,11 @@ bool Transport::Start(const Config& config, Log log, std::string* error) {
     if (error) *error = "the transport was already started (a Transport starts once)";
     return false;
   }
+#if defined(_WIN32)
   if (!m.wake || !m.arrived) return fail("could not create the transport's events");
+#else
+  if (m.wake < 0 || m.arrived < 0) return fail("could not create the transport's events");
+#endif
   m.config = config;
   std::sort(m.config.sim_drop.begin(), m.config.sim_drop.end());  // DrainOutbound binary-searches it
   {
@@ -613,9 +697,11 @@ bool Transport::Start(const Config& config, Log log, std::string* error) {
     if (!sim::Parse(config.sim, &m.sim)) return fail("bad DOA4_NP_SIM \"" + config.sim + "\" (expected delay_ms,jitter_ms,loss_pct)");
     m.sim_on = true;
   }
+#if defined(_WIN32)
   WSADATA w;
   if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return fail("WSAStartup failed");
   m.wsa = true;
+#endif
 
   // ---- the socket (DOA2U sock_open) ----
   std::vector<uint16_t> ports;
@@ -633,8 +719,10 @@ bool Transport::Start(const Config& config, Log log, std::string* error) {
   for (uint16_t p : ports) {
     m.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (m.sock == INVALID_SOCKET) return fail("socket() failed (WSA error " + std::to_string(WSAGetLastError()) + ")");
+#if defined(_WIN32)
     BOOL on = TRUE;
     setsockopt(m.sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&on), sizeof on);
+#endif  // POSIX: without SO_REUSEADDR / SO_REUSEPORT a bound port is already exclusive
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(config.loopback ? INADDR_LOOPBACK : INADDR_ANY);
@@ -654,22 +742,34 @@ bool Transport::Start(const Config& config, Log log, std::string* error) {
   }
   {
     sockaddr_in a{};
+#if defined(_WIN32)
     int l = sizeof a;
+#else
+    socklen_t l = sizeof a;
+#endif
     m.port = getsockname(m.sock, reinterpret_cast<sockaddr*>(&a), &l) == 0 ? ntohs(a.sin_port) : config.port;
   }
   // an ICMP "port unreachable" from a peer that is gone must not fail every later recvfrom with WSAECONNRESET
+  // (POSIX: an unconnected UDP socket is not told of ICMP errors; ReceiveAll still skips ECONNREFUSED)
+#if defined(_WIN32)
   DWORD b = FALSE, ret = 0;
   WSAIoctl(m.sock, SIO_UDP_CONNRESET, &b, sizeof b, nullptr, 0, &ret, nullptr, nullptr);
+#endif
   int big = kSocketBuffer;
   setsockopt(m.sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&big), sizeof big);
   setsockopt(m.sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&big), sizeof big);
   if (!config.loopback && config.lan_broadcast) {
-    BOOL on = TRUE;
+    int on = 1;
     setsockopt(m.sock, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&on), sizeof on);
   }
+#if defined(_WIN32)
   m.sock_event = WSACreateEvent();
   if (m.sock_event == WSA_INVALID_EVENT || WSAEventSelect(m.sock, m.sock_event, FD_READ) != 0)  // also makes it non-blocking
     return fail("WSAEventSelect failed (WSA error " + std::to_string(WSAGetLastError()) + ")");
+#else
+  if (fcntl(m.sock, F_SETFL, fcntl(m.sock, F_GETFL) | O_NONBLOCK) != 0)
+    return fail("could not make the socket non-blocking (errno " + std::to_string(errno) + ")");
+#endif
 
   // ---- STUN: resolve on a helper thread ----
   m.stun_on = config.stun && !config.stun_servers.empty();
@@ -683,9 +783,11 @@ bool Transport::Start(const Config& config, Log log, std::string* error) {
   }
   m.rng = uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()) ^ (uint64_t(GetCurrentProcessId()) << 32) ^
           reinterpret_cast<uintptr_t>(&m);
+#if defined(_WIN32)
   m.timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
   if (!m.timer) m.Log("[doa4][NET] transport: no high-resolution timer (error " + std::to_string(GetLastError()) +
                       "); ticking on the 5 ms timeout");
+#endif
   m.t0 = std::chrono::steady_clock::now();
   m.stop = false;
   try {
@@ -701,7 +803,7 @@ void Transport::Stop() {
   Impl& m = *impl_;
   if (!m.running) return;
   m.stop = true;
-  SetEvent(m.wake);
+  SignalEvent(m.wake);
   if (m.thread.joinable()) m.thread.join();
   m.io_tid = 0;  // a later thread that reuses the id is not the I/O thread
   m.Close();
@@ -754,13 +856,17 @@ bool Transport::PushGekko(std::vector<uint8_t> payload) {
     ++m.queue_full;
     return false;
   }
-  SetEvent(m.wake);  // the packet leaves at once, not at the next 5 ms tick
+  SignalEvent(m.wake);  // the packet leaves at once, not at the next 5 ms tick
   return true;
 }
 
 bool Transport::PopGekko(std::vector<uint8_t>* payload) { return impl_->in.Pop(payload); }
 
+#if defined(_WIN32)
 void* Transport::gekko_arrived() const { return impl_->arrived; }
+#else
+int Transport::gekko_arrived() const { return impl_->arrived; }
+#endif
 
 Stats Transport::stats() const {
   Stats s;
