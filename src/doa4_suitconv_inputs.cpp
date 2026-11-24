@@ -4,7 +4,11 @@
 
 #include "doa4_suitconv_inputs.h"
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
+
+#include "doa4_utf8.h"
 
 #include <algorithm>
 #include <memory>
@@ -23,6 +27,9 @@ namespace {
 
 constexpr size_t kChunk = size_t(4) << 20;  // the hash loop checks the cancel token at least every 4 MiB
 
+#if !defined(_WIN32)
+std::string Utf8(const fs::path& p) { return doa4::Utf8(p); }  // a POSIX path is already UTF-8
+#else
 std::string Utf8(const fs::path& p) {
   const std::wstring w = p.wstring();
   if (w.empty()) return {};
@@ -31,6 +38,7 @@ std::string Utf8(const fs::path& p) {
   if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), s.data(), n, nullptr, nullptr);
   return s;
 }
+#endif
 
 // A window onto one archive inside an image file: the archive's bytes, positionally, through the image's one shared
 // afs::FileSource.
@@ -102,21 +110,22 @@ void ReadTocs(Side& side) {
 }
 
 // The file in `dir` whose name equals `name` ignoring ASCII case.
-// Names compare as wide strings: no code page conversion, so no name can throw (a sibling file named in katakana
-// under a Western code page must not matter).
-std::wstring LowerAsciiWide(std::wstring s) {
-  for (wchar_t& c : s)
-    if (c >= L'A' && c <= L'Z') c = wchar_t(c - L'A' + L'a');
+// Names compare in the path's native form (wide on Windows, bytes elsewhere): no code page conversion, so no name can
+// throw (a sibling file named in katakana under a Western code page must not matter).
+fs::path::string_type LowerAsciiNative(fs::path::string_type s) {
+  for (auto& c : s)
+    if (c >= 'A' && c <= 'Z') c = static_cast<fs::path::value_type>(c - 'A' + 'a');
   return s;
 }
 
 std::optional<fs::path> FindInFolder(const fs::path& dir, const std::string& name) {
-  const std::wstring want = LowerAsciiWide(std::wstring(name.begin(), name.end()));  // the archive names are ASCII
+  // the archive names are ASCII
+  const fs::path::string_type want = LowerAsciiNative(fs::path::string_type(name.begin(), name.end()));
   std::error_code ec;
   for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
     std::error_code ec2;
     if (!it->is_regular_file(ec2)) continue;
-    if (LowerAsciiWide(it->path().filename().native()) == want) return it->path();
+    if (LowerAsciiNative(it->path().filename().native()) == want) return it->path();
   }
   return std::nullopt;
 }

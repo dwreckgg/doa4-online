@@ -1,10 +1,17 @@
 // See np_files.h.
 #include "np_files.h"
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+
+#include "np_posix.h"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -34,6 +41,9 @@ std::string Lower(std::string s) {
   return s;
 }
 
+#if defined(_WIN32)
+using FileHandle = HANDLE;
+
 std::string Utf8(const std::wstring& w) {
   if (w.empty()) return {};
   int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
@@ -41,11 +51,17 @@ std::string Utf8(const std::wstring& w) {
   if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
   return s;
 }
+#else
+using FileHandle = int;
+
+std::string Utf8(const std::wstring& w) { return std::filesystem::path(w).string(); }  // a POSIX path is UTF-8
+#endif
 
 bool Skipped(const std::string& lower_name) {
   return lower_name == "desktop.ini" || lower_name == "thumbs.db";
 }
 
+#if defined(_WIN32)
 bool ReadAt(HANDLE h, uint64_t off, unsigned char* dst, DWORD len, DWORD* got) {
   LARGE_INTEGER pos;
   pos.QuadPart = static_cast<LONGLONG>(off);
@@ -54,9 +70,21 @@ bool ReadAt(HANDLE h, uint64_t off, unsigned char* dst, DWORD len, DWORD* got) {
   if (len == 0) return true;
   return ReadFile(h, dst, len, got, nullptr) && *got == len;
 }
+#else
+bool ReadAt(int fd, uint64_t off, unsigned char* dst, DWORD len, DWORD* got) {
+  *got = 0;
+  while (*got < len) {
+    const ssize_t n = pread(fd, dst + *got, len - *got, off_t(off + *got));
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return false;
+    *got += DWORD(n);
+  }
+  return true;
+}
+#endif
 
 // 64 KB at every 16 MB and the last 64 KB, each hashed with its offset. False when a read fails.
-bool SampledHash(HANDLE h, uint64_t len, unsigned char* buf, uint64_t* hash) {
+bool SampledHash(FileHandle h, uint64_t len, unsigned char* buf, uint64_t* hash) {
   for (uint64_t at = 0;; at += kStride) {
     uint64_t off = at;
     bool last = false;
@@ -75,7 +103,7 @@ bool SampledHash(HANDLE h, uint64_t len, unsigned char* buf, uint64_t* hash) {
 }
 
 // Every byte of the file. False when a read fails.
-bool FullHash(HANDLE h, uint64_t len, unsigned char* buf, uint64_t* hash) {
+bool FullHash(FileHandle h, uint64_t len, unsigned char* buf, uint64_t* hash) {
   for (uint64_t off = 0; off < len; off += kSample) {
     DWORD want = static_cast<DWORD>(len - off < kSample ? len - off : kSample);
     DWORD got = 0;
@@ -90,6 +118,7 @@ bool FoldFile(const std::filesystem::path& full, const std::string& rel, bool wh
               uint64_t* hash) {
   // Every share mode: a file someone else holds for writing, or with delete access (an installer, a launcher), is still
   // read, and while it is open here nobody is stopped from renaming it (the game folder is never locked).
+#if defined(_WIN32)
   HANDLE h = CreateFileW(full.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
   if (h == INVALID_HANDLE_VALUE) return false;
@@ -99,6 +128,18 @@ bool FoldFile(const std::filesystem::path& full, const std::string& rel, bool wh
   uint64_t size = ok ? static_cast<uint64_t>(sz.QuadPart) : 0;
   if (ok) ok = whole ? FullHash(h, size, buf, &content) : SampledHash(h, size, buf, &content);
   CloseHandle(h);
+#else
+  // (POSIX opens never lock a file against others)
+  const int h = open(full.c_str(), O_RDONLY | O_CLOEXEC);
+  if (h < 0) return false;
+  posix_fadvise(h, 0, 0, POSIX_FADV_SEQUENTIAL);
+  struct stat st;
+  uint64_t content = kFnvInit;
+  bool ok = fstat(h, &st) == 0;
+  uint64_t size = ok ? static_cast<uint64_t>(st.st_size) : 0;
+  if (ok) ok = whole ? FullHash(h, size, buf, &content) : SampledHash(h, size, buf, &content);
+  close(h);
+#endif
   if (!ok) return false;
   *hash = Fnv(*hash, rel.c_str(), rel.size() + 1);
   *hash = Fnv(*hash, &size, sizeof size);

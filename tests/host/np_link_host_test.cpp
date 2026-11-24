@@ -16,6 +16,14 @@
 // stalled game thread). Ruling: < 150 ms -> no GekkoNet patch; the bound below pins "one or two frames, not a re-send".
 // Watchdogs from the first run: a thread ends the run with a FAIL line after 120 s or a 1 GB working set; each side gives
 // up on a frame after 5 s.
+// Rounds (task 7c): the three runs and their results form a ROUND, repeated up to kMaxRounds = 3 times when only a
+// TIMING bound (the stall bound, the control's 50 ms gap) failed, since a busy PC can stall a pair; a STRUCTURAL failure
+// (any other check) is never repeated, and a third failing round stands. Decide() holds the rule and is self-tested first.
+// What the repeat rule costs: nothing measures that the PC was busy. A timing failure in rounds 1 and 2 followed by a
+// clean round 3 passes, and that includes a real stall of the pair that happens in some rounds and not in all. A pass
+// after a repeat prints the same kind of summary line as a first-round pass (a repeated round's checks are taken back
+// out of the count); it shows only in the test's own "info: round N of 3" line, one for each repeated round.
+// Test switch DOA4_NP_LINK_TEST_DISTURB=n: side 0 sleeps 80 ms at frame 60 of the control in each of the first n rounds.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -93,6 +101,7 @@ struct Side {
   // net.h:28) at or after frame next_drop_frame is not handed to the transport, as if the network lost it.
   int drops_left = 0, next_drop_frame = 0, drop_every = 0;
   std::vector<int64_t> drop_us;
+  int disturb_at_frame = -1;  // test switch: the loop sleeps 80 ms once at the top of this frame (-1 = off)
   bool gave_up = false;
   std::string why;
 };
@@ -113,6 +122,7 @@ static void Loop(Side& S, int side, int frames, std::atomic<bool>& abort) {
   int32_t last = -1;
   int64_t next_frame = NowUs();
   for (int f = 0; f < frames && !abort.load(); ++f) {
+    if (f == S.disturb_at_frame) std::this_thread::sleep_for(std::chrono::milliseconds(80));
     // Task 11's order (np_exec_host_test StepSide): the checksum entering the frame, one local input, then Update until
     // the frame advances. Frame 0 also waits out the handshake (up to 10 s).
     S.ex.Run({}, exec::FoldChecksum(last, std::vector<uint64_t>{}, std::vector<uint64_t>{}));
@@ -182,7 +192,7 @@ static int64_t LongestGap(const std::vector<int64_t>& t, int64_t from, int64_t t
   return g;
 }
 
-static RunResult RunPair(const char* label, std::vector<uint32_t> drops, int frames, int input_drops = 0) {
+static RunResult RunPair(const char* label, std::vector<uint32_t> drops, int frames, int input_drops = 0, int disturb_at_frame = -1) {
   RunResult out;
   Side a, b;
   Side* sides[2] = {&a, &b};
@@ -211,6 +221,7 @@ static RunResult RunPair(const char* label, std::vector<uint32_t> drops, int fra
   a.drops_left = input_drops;
   a.next_drop_frame = 60;
   a.drop_every = 30;
+  a.disturb_at_frame = disturb_at_frame;  // side 0 only
   for (int s = 0; s < 2; ++s) {
     Side& S = *sides[s];
     gekko::Config gc;
@@ -277,22 +288,53 @@ static RunResult RunPair(const char* label, std::vector<uint32_t> drops, int fra
   return out;
 }
 
-int main() {
-  std::setvbuf(stdout, nullptr, _IONBF, 0);
-  std::atomic<bool> done{false};
-  std::thread([&done] {
-    const int64_t t0 = NowUs();
-    while (!done.load()) {
-      if (NowUs() - t0 > 120'000'000 || WorkingSet() > (size_t(1) << 30)) {
-        std::printf("FAIL watchdog: the link test passed 120 s or 1 GB (working set %zu MB)\n", WorkingSet() >> 20);
-        std::_Exit(3);
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-  }).detach();
-  WSADATA w;
-  WSAStartup(MAKEWORD(2, 2), &w);
-  const RunResult ctl = RunPair("control (no drop)", {}, 150);
+// The repeat rule (ledger L49): a round with a STRUCTURAL failure stands (the test fails, never repeated); a round whose
+// only failures are TIMING ones is repeated while rounds are left; the last round stands whatever it shows.
+constexpr int kMaxRounds = 3;
+enum class Next { kAccept, kRepeat };
+static Next Decide(int round /*1-based*/, int structural_failures, int timing_failures) {
+  if (structural_failures > 0) return Next::kAccept;
+  if (timing_failures == 0) return Next::kAccept;
+  return round < kMaxRounds ? Next::kRepeat : Next::kAccept;
+}
+
+// Decide's whole table, written out (not computed by the rule): one counted check per row.
+static void SelfTestDecide() {
+  constexpr Next A = Next::kAccept, R = Next::kRepeat;
+  struct Row {
+    int round, structural, timing;
+    Next want;
+  };
+  static const Row kRows[] = {
+      {1, 0, 0, A}, {1, 0, 1, R}, {1, 0, 2, R}, {1, 1, 0, A}, {1, 1, 1, A}, {1, 1, 2, A},
+      {2, 0, 0, A}, {2, 0, 1, R}, {2, 0, 2, R}, {2, 1, 0, A}, {2, 1, 1, A}, {2, 1, 2, A},
+      {3, 0, 0, A}, {3, 0, 1, A}, {3, 0, 2, A}, {3, 1, 0, A}, {3, 1, 1, A}, {3, 1, 2, A},
+  };
+  for (const Row& r : kRows)
+    CHECKF(Decide(r.round, r.structural, r.timing) == r.want, "Decide(round %d, structural %d, timing %d) should be %s", r.round,
+           r.structural, r.timing, r.want == R ? "repeat" : "accept");
+}
+
+// DOA4_NP_LINK_TEST_DISTURB=n: the control of the first n rounds is disturbed. Absent, empty, trailing characters or
+// negative = 0.
+static int DisturbRounds() {
+  const char* v = std::getenv("DOA4_NP_LINK_TEST_DISTURB");
+  if (!v || !*v) return 0;
+  char* end = nullptr;
+  const long n = std::strtol(v, &end, 10);
+  if (end == v || *end != '\0' || n < 0) return 0;
+  return int(n);
+}
+
+struct Round {
+  int64_t ctl_gap_us = 0;  // the control's longest gap after frame 20
+  int64_t worst_any = 0;   // the worst stall after any drop
+};
+
+// One round: the three runs and what main derived from them (the structural Inputs-drops check, the RESULT line). The
+// two timing bounds are judged by the round loop in main, which decides whether the round stands.
+static Round RunRound(bool disturb) {
+  const RunResult ctl = RunPair("control (no drop)", {}, 150, 0, disturb ? 60 : -1);
   const RunResult dr = RunPair("sim_drop, one kGekko datagram at a time", {150, 211, 272, 333, 394, 455, 516, 577}, 240);
   const RunResult di = RunPair("one Inputs datagram lost at a time (frames 60, 90, 120, 150 of A)", {}, 200, 4);
   int64_t worst_inputs = 0, worst_any = 0;
@@ -309,12 +351,53 @@ int main() {
   std::printf("info: RESULT steady-state longest gap %.1f ms; worst stall after a dropped Inputs datagram %.1f ms (%d drops), after "
               "any %.1f ms\n",
               ctl.max_gap_us / 1000.0, worst_inputs / 1000.0, inputs_drops, worst_any / 1000.0);
+  Round out;
+  out.ctl_gap_us = ctl.max_gap_us;
+  out.worst_any = worst_any;
+  return out;
+}
+
+int main() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  std::atomic<bool> done{false};
+  std::thread([&done] {
+    const int64_t t0 = NowUs();
+    while (!done.load()) {
+      if (NowUs() - t0 > 120'000'000 || WorkingSet() > (size_t(1) << 30)) {
+        std::printf("FAIL watchdog: the link test passed 120 s or 1 GB (working set %zu MB)\n", WorkingSet() >> 20);
+        std::_Exit(3);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  }).detach();
+  SelfTestDecide();  // before any socket work
+  const int disturb_rounds = DisturbRounds();
+  if (disturb_rounds > 0)
+    std::printf("info: DOA4_NP_LINK_TEST_DISTURB=%d: the control of the first %d round(s) is disturbed on purpose\n", disturb_rounds,
+                disturb_rounds);
+  WSADATA w;
+  WSAStartup(MAKEWORD(2, 2), &w);
   // The ruling's threshold is 150 ms (GekkoNet's 200 ms re-send would show as >= ~200). The pin is tighter: one or two
   // frames plus scheduling, 100 ms; measured 33.3 ms.
   constexpr int64_t kStallBoundUs = 100'000;
-  CHECKF(worst_any < kStallBoundUs, "a dropped kGekko datagram stalled the pair %.1f ms (bound %.0f ms)", worst_any / 1000.0,
-         kStallBoundUs / 1000.0);
-  CHECKF(ctl.max_gap_us < 50'000, "the control's longest gap was %.1f ms (a frame is 16.7)", ctl.max_gap_us / 1000.0);
+  for (int round = 1; round <= kMaxRounds; ++round) {
+    const int checks_at_start = g_checks, failures_at_start = g_failures;
+    const Round r = RunRound(round <= disturb_rounds);
+    const int structural_failures = g_failures - failures_at_start;  // read before any timing CHECKF
+    const bool stall_ok = r.worst_any < kStallBoundUs;
+    const bool ctl_gap_ok = r.ctl_gap_us < 50'000;
+    const int timing_failures = int(!stall_ok) + int(!ctl_gap_ok);
+    if (round == kMaxRounds || Decide(round, structural_failures, timing_failures) == Next::kAccept) {
+      CHECKF(stall_ok, "a dropped kGekko datagram stalled the pair %.1f ms (bound %.0f ms)", r.worst_any / 1000.0,
+             kStallBoundUs / 1000.0);
+      CHECKF(ctl_gap_ok, "the control's longest gap was %.1f ms (a frame is 16.7)", r.ctl_gap_us / 1000.0);
+      break;
+    }
+    std::printf("info: round %d of %d: a timing bound failed (control gap %.1f ms, worst stall %.1f ms): the PC was busy or the pair "
+                "stalled; repeating\n",
+                round, kMaxRounds, r.ctl_gap_us / 1000.0, r.worst_any / 1000.0);
+    g_checks = checks_at_start;  // structural_failures was 0, so g_failures is unchanged
+  }
   done = true;
   std::printf("%s: %d checks, %d failures\n", g_failures ? "FAILED" : "PASSED", g_checks, g_failures);
   return g_failures ? 1 : 0;

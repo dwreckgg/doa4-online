@@ -3,8 +3,13 @@
 // environment and show state). Built and run by run_np_restart_test.bat. Files go under %TEMP%\doa4_np_restart_<pid>\
 // and only that folder is removed at the end. A junction is made with "cmd /c mklink /J" (no console window).
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
+#include <cctype>
 #include <cstdio>
 #include <cwctype>
 #include <ctime>
@@ -49,7 +54,14 @@ static std::string ReadAll(const fs::path& p) {
 }
 
 // A directory junction at `link` pointing to `target` (cmd's mklink /J; no window). True if the link exists afterwards
-// as a reparse point.
+// as a reparse point. Outside Windows: a symbolic link to the folder.
+#if !defined(_WIN32)
+static bool MakeJunction(const fs::path& link, const fs::path& target) {
+  std::error_code ec;
+  fs::create_directory_symlink(target, link, ec);
+  return !ec && fs::is_symlink(fs::symlink_status(link, ec));
+}
+#else
 static bool MakeJunction(const fs::path& link, const fs::path& target) {
   std::wstring cmd = L"cmd.exe /c mklink /J \"" + link.wstring() + L"\" \"" + target.wstring() + L"\" >nul";
   STARTUPINFOW si{};
@@ -64,6 +76,7 @@ static bool MakeJunction(const fs::path& link, const fs::path& target) {
   const DWORD a = GetFileAttributesW(link.c_str());
   return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
 }
+#endif
 
 static size_t CountEntries(const fs::path& dir) {
   std::error_code ec;
@@ -121,7 +134,11 @@ static void TestClearFolder() {
   WriteFile(sess / "B13EBABEBABEBABE" / "544307D1" / "00000001" / "ups.dat", "old save");
   WriteFile(sess / "loose.txt", "x");
   WriteFile(sess / "ro.txt", "ro");
+#if defined(_WIN32)
   SetFileAttributesW((sess / "ro.txt").c_str(), FILE_ATTRIBUTE_READONLY);
+#else
+  fs::permissions(sess / "ro.txt", fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read);
+#endif
   const bool junction = MakeJunction(sess / "link", outside);
   CHECK(junction);  // the fixture's precondition: a real reparse point inside the session folder
   CHECK(Exists(sess / "link" / "keep.txt"));  // and it resolves to the outside folder
@@ -211,11 +228,18 @@ static void TestRelaunchPlan() {
 static void TestRedirectAndNames() {
   const fs::path sess = g_root / "u9" / "netplay" / "session";
   CHECK(restart::RedirectHolds(sess, sess));
+#if defined(_WIN32)
   CHECK(restart::RedirectHolds(sess.wstring() + L"\\", sess));                       // a trailing separator
   CHECK(restart::RedirectHolds(fs::path(sess.generic_wstring()), sess));             // '/' against '\'
   std::wstring upper = sess.wstring();
   for (wchar_t& c : upper) c = wchar_t(towupper(c));
   CHECK(restart::RedirectHolds(upper, sess));                                        // one folder on Windows
+#else
+  CHECK(restart::RedirectHolds(sess.string() + "/", sess));                          // a trailing separator
+  std::string upper = sess.string();
+  for (char& c : upper) c = char(std::toupper(static_cast<unsigned char>(c)));
+  CHECK(!restart::RedirectHolds(upper, sess));                                       // two folders outside Windows
+#endif
   CHECK(restart::RedirectHolds(g_root / "u9" / "netplay" / "x" / ".." / "session", sess));
   // the likeliest wrong answers: the real user data (the redirect did not happen), a parent, a sibling, empty
   CHECK(!restart::RedirectHolds(g_root / "u9", sess));
@@ -223,12 +247,20 @@ static void TestRedirectAndNames() {
   CHECK(!restart::RedirectHolds(g_root / "u9" / "netplay" / "sessions", sess));
   CHECK(!restart::RedirectHolds(g_root / "u9" / "netplay" / "session2", sess));
   CHECK(!restart::RedirectHolds({}, sess) && !restart::RedirectHolds(sess, {}));
-  // exactly the three known unregistered names
+  // exactly the three known unregistered names (per platform: the back end the build leaves out)
   CHECK(restart::KnownUnregisteredSetting("kernel_pix"));
+#if defined(_WIN32)
   CHECK(restart::KnownUnregisteredSetting("vulkan_readback_resolve"));
   CHECK(restart::KnownUnregisteredSetting("vulkan_readback_memexport"));
-  CHECK(!restart::KnownUnregisteredSetting("kernel_debug_monitor"));
   CHECK(!restart::KnownUnregisteredSetting("d3d12_readback_resolve"));
+  CHECK(!restart::KnownUnregisteredSetting("d3d12_readback_memexport"));
+#else
+  CHECK(restart::KnownUnregisteredSetting("d3d12_readback_resolve"));
+  CHECK(restart::KnownUnregisteredSetting("d3d12_readback_memexport"));
+  CHECK(!restart::KnownUnregisteredSetting("vulkan_readback_resolve"));
+  CHECK(!restart::KnownUnregisteredSetting("vulkan_readback_memexport"));
+#endif
+  CHECK(!restart::KnownUnregisteredSetting("kernel_debug_monitor"));
   CHECK(!restart::KnownUnregisteredSetting("kernel_pix2") && !restart::KnownUnregisteredSetting("kernel_pi"));
   CHECK(!restart::KnownUnregisteredSetting(""));
 }
@@ -245,9 +277,13 @@ static void TestNoRestartSwitch() {
 }
 
 int main() {
+#if defined(_WIN32)
   wchar_t tmp[MAX_PATH];
   GetTempPathW(MAX_PATH, tmp);
   g_root = fs::path(tmp) / ("doa4_np_restart_" + std::to_string(GetCurrentProcessId()));
+#else
+  g_root = fs::temp_directory_path() / ("doa4_np_restart_" + std::to_string(getpid()));
+#endif
   std::error_code ec;
   fs::create_directories(g_root, ec);
   TestPaths();
@@ -259,7 +295,11 @@ int main() {
   // clean up only what this run made: remove junctions as links first (never through them)
   std::string error;
   restart::ClearFolder(g_root, &error);
+#if defined(_WIN32)
   RemoveDirectoryW(g_root.c_str());
+#else
+  fs::remove(g_root, ec);
+#endif
   std::printf("%s: %d checks, %d failures\n", g_failures ? "FAILED" : "PASSED", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

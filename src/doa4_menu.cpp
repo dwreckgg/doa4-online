@@ -24,12 +24,14 @@
 #include <rex/input/pad_remap.h>
 #include <rex/input/pad_vibration.h>
 #include <rex/logging.h>
-#include <rex/ui/d3d12/d3d12_presenter.h>
 #include <rex/ui/display_mode.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/keybinds.h>
 #include <rex/ui/ui_event.h>
 #include <rex/ui/window.h>
+
+#if defined(_WIN32)
+#include <rex/ui/d3d12/d3d12_presenter.h>
 #include <rex/ui/window_win.h>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -39,6 +41,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 
 #include "doa4_config.h"
 #include "doa4_discord.h"
@@ -52,6 +55,7 @@
 #include "doa4_speakers.h"
 #include "doa4_suits_bust.h"
 #include "doa4_utf8.h"
+#include "net/np_restart.h"
 #include "net/np_session.h"
 #include "doa4_unlocks.h"
 
@@ -1210,7 +1214,9 @@ void MenuDialog::DrawDisplayRows() {
   Mode want = mode;
   if (ImGui::RadioButton(kDisplayModes[0], mode == kWindowed)) want = kWindowed;
   if (ImGui::RadioButton(kDisplayModes[1], mode == kBorderless)) want = kBorderless;
-  if (ImGui::RadioButton(kDisplayModes[2], mode == kExclusive)) want = kExclusive;
+#if defined(_WIN32)
+  if (ImGui::RadioButton(kDisplayModes[2], mode == kExclusive)) want = kExclusive;  // DXGI exclusive: Windows only
+#endif
   // A click on Borderless while the wish is still exclusive (entry refused or lost) also clears the wish.
   if (want != mode || (want == kBorderless && window->IsFullscreenExclusive())) {
     const bool fs = want != kWindowed;
@@ -1295,7 +1301,9 @@ void MenuDialog::DrawDisplayRows() {
 // inside the draw, and at most once per opening while exclusive is off (display::ExclusiveModesStep). The SDK merges the
 // output's live mode in as the desktop entry: made while exclusive is off that is the desktop mode; made while it is on
 // (only when the game started in exclusive and no list exists yet) it is the mode exclusive set, so it is dropped.
+// DXGI exclusive fullscreen is the only source of the list: Windows only.
 void MenuDialog::EnsureExclusiveModes() {
+#if defined(_WIN32)
   const bool first_frame = exclusive_modes_first_frame_;
   exclusive_modes_first_frame_ = false;
   if (!host_.window) return;
@@ -1325,6 +1333,7 @@ void MenuDialog::EnsureExclusiveModes() {
     cache.built = true;
     cache.from_active = active_now;
   });
+#endif
 }
 
 void MenuDialog::DrawGameTab() {
@@ -1414,8 +1423,7 @@ void MenuDialog::DrawPhotoTab() {
   if (ImGui::Button("Choose folder...")) {
     // After this frame: the folder dialog is modal and must not run inside
     // the menu's drawing.
-    auto* win32 = dynamic_cast<rex::ui::Win32Window*>(host_.window);
-    void* hwnd = win32 ? win32->hwnd() : nullptr;
+    void* hwnd = host_.dialog_owner;
     host_.defer([this, hwnd, folder] {
       if (std::optional<std::filesystem::path> chosen = photo::PickFolder(hwnd, folder)) {
         const std::u8string text = chosen->u8string();
@@ -1578,6 +1586,17 @@ void MenuDialog::Restart(online_view::Control control) {
                           [](const std::string& line) { REXLOG_INFO("{}", line); })) {
     return;
   }
+#if !defined(_WIN32)
+  // np::restart::Relaunch without a handoff: the new instance waits for this one to exit
+  // (DeadOrAlive4App::OnPreSetup) before it opens the save data and the shader cache.
+  std::string error;
+  if (!doa4::np::restart::Relaunch(nullptr, false, &error)) {
+    status_ = "Restart failed (" + error + ").";
+    REXLOG_ERROR("[doa4][menu] restart: {}", error);
+    return;
+  }
+  REXLOG_INFO("[doa4][menu] restarting");
+#else
   wchar_t exe[MAX_PATH];
   DWORD length = GetModuleFileNameW(nullptr, exe, MAX_PATH);
   if (length == 0 || length == MAX_PATH) {
@@ -1610,6 +1629,7 @@ void MenuDialog::Restart(online_view::Control control) {
   REXLOG_INFO("[doa4][menu] restarting: new process {}", process.dwProcessId);
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);
+#endif
   rex::ui::Window* window = host_.window;
   host_.defer([window] { window->RequestClose(); });
 }

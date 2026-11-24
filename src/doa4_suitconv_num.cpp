@@ -158,6 +158,11 @@ double PySum::Result() const {
 double PyFloorDiv(double x, double y) {
   if (y == 0.0) throw ConvertError("float floor division by zero");
   double mod = std::fmod(x, y);
+#if !defined(_WIN32)
+  // fmod(+-inf, y) is a NaN whose sign C leaves open: the UCRT's has x's sign (the pins), glibc's is the x86 default
+  // NaN, always negative. x's sign keeps the result the same on every PC.
+  if (std::isinf(x) && !std::isnan(y)) mod = std::copysign(std::numeric_limits<double>::quiet_NaN(), x);
+#endif
   double div = (x - mod) / y;
   if (mod != 0.0) {  // C's "if (*mod)": NaN counts as non-zero
     if ((y < 0) != (mod < 0)) {

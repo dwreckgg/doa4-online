@@ -14,10 +14,11 @@
 // read_callback_throws, sha1_of_built_is_stable_and_ordered, boxes_at_start_bits, unknown_cvar_row, read_entry_from,
 // reader_promises, toc_refusal_reason, allocation_failures and allocation_failures_sticky (a replaced global operator
 // new, armed only in those groups), default_opener, hash_failure_installs_nothing, install_order, extras_refusal,
-// not_built_refusal, built_counts, show_restart_button, restart_note_text (in the order main runs them); the Builds of
-// the groups from boxes_off_reads_nothing to hash_failure_installs_nothing, built_counts and the real-archive group go
-// through BuildI, which also checks Built::built == chrtwo.size() / 2 (Task 11 fix wave); then the gated real-archive check "extras real archive": DOA4_EXTRAS_GAME_DIR (a game folder holding chrtwo.afs, read
-// only) runs Build on the real archive and expects all three built with G0's SHA-1s (g0_sha1.txt); unset, it prints
+// not_built_refusal, built_counts, show_restart_button, restart_note_text (in the order main runs them); every Build of
+// the groups from boxes_off_reads_nothing to hash_failure_installs_nothing (except the two allocation_failures groups,
+// which call Build directly and count the invariant per K), of built_counts and of the real-archive group goes through
+// BuildI, which also checks Built::built == chrtwo.size() / 2 and built <= selected (Task 11 fix wave); then the gated
+// real-archive check "extras real archive": DOA4_EXTRAS_GAME_DIR (a game folder holding chrtwo.afs, read only) runs Build on the real archive and expects all three built with G0's SHA-1s (g0_sha1.txt); unset, it prints
 // "extras real archive: SKIPPED (DOA4_EXTRAS_GAME_DIR unset)" and counts nothing. DOA4_EXTRAS_TEST_FLIP=1 (with the
 // game folder) flips one byte of what the reader returns for entry 46: the group must then fail on hak03 alone.
 // Last line: "PASSED: N checks, 0 failures" or "FAILED: N checks, M failures".
@@ -480,7 +481,8 @@ static bool ClosingLine(const std::string& s, int k, int n, bool unhashed = fals
 static std::string LogAt(const xc::Built& b, size_t i) { return i < b.log.size() ? b.log[i] : std::string("<none>"); }
 
 // Task 11 fix wave F1 (ledger X99): every Build of the groups from boxes_off_reads_nothing to
-// hash_failure_installs_nothing, and the real-archive group, goes through here, so each of them also checks the header's
+// hash_failure_installs_nothing (the allocation_failures groups aside), of built_counts and of the real-archive group
+// goes through here, so each of them also checks the header's
 // invariant Built::built == chrtwo.size() / 2 and built <= selected (one extra check per Build call). The
 // allocation_failures groups count the same invariant per K instead (a CHECK there would run while the allocator is
 // armed).

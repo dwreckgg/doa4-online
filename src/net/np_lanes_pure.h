@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace doa4::np::lanes {
@@ -276,8 +277,10 @@ std::string SectionLine(uint32_t addr, SectionState state, uint32_t w8, uint32_t
 std::string LanesLine(uint64_t frames, uint64_t frames_2plus, int most_at_once, int most_beside_main, int lanes_beside_main,
                       uint64_t stalls, uint64_t end_requests);
 // "cpu: fight frames <n>, wait p50 <x.xx> ms p99 <x.xx> ms max <x.xx> ms, cycles main <n> workers <n>" (ms rounded half up to the
-// hundredth from the microseconds)
-std::string CpuLine(uint64_t fight_frames, const WaitHistogram& wait, uint64_t cycles_main, uint64_t cycles_workers);
+// hundredth from the microseconds). The word after "ms, " is unit: "cycles" on Windows, "thread ns" where the counts are the
+// threads' CPU time in nanoseconds (off Windows), so a log never passes one unit off as the other.
+std::string CpuLine(uint64_t fight_frames, const WaitHistogram& wait, uint64_t cycles_main, uint64_t cycles_workers,
+                    std::string_view unit = "cycles");
 // "lanes stall at frame <f>: <who> has waited 2 s for worker <n>"; who: "worker <n>" for waiter 0 to 24, "main (first wait)" for
 // kMainFirstWait, "main (second wait)" for kMainSecondWait.
 std::string StallLine(int32_t frame, int waiter, int waited_for);

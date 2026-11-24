@@ -1,6 +1,7 @@
 // The start-up log's hardware line: "[doa4][LIFE] cpu: <name>, N cores, M threads, R MB RAM". A slowdown report's log
 // named the GPU and no CPU, so "a better CPU" could not be checked. Header-only and free of the SDK, for
-// tests/host/cpu_info_host_test.cpp. CleanBrand and LogLine are pure; Read asks Windows and the processor.
+// tests/host/cpu_info_host_test.cpp. CleanBrand and LogLine are pure; Read asks the processor and the OS (Windows, or
+// elsewhere sysconf, the sysfs topology files and sysinfo).
 
 #pragma once
 
@@ -15,6 +16,15 @@
 #endif
 #include <windows.h>
 #include <intrin.h>
+#else
+#include <fstream>
+#include <set>
+#include <utility>
+#include <sys/sysinfo.h>
+#include <unistd.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#endif
 #endif
 
 namespace doa4::cpu_info {
@@ -24,6 +34,7 @@ struct Info {
   uint32_t cores = 0;    // physical cores; 0: not known
   uint32_t logical = 0;  // logical processors, all groups; 0: not known
   uint64_t ram_mb = 0;   // installed memory the OS can use; 0: not known
+  bool cores_assumed = false;  // cores was not read: it repeats logical
 };
 
 // The brand text without its padding: NULs end it, runs of blanks become one space, no blank at either end, bytes
@@ -48,8 +59,8 @@ inline std::string CleanBrand(std::string_view raw) {
 // The text after "[doa4][LIFE] cpu: ". A count that is not known reads "?".
 inline std::string LogLine(const Info& info) {
   const auto count = [](uint64_t n) { return n ? std::to_string(n) : std::string("?"); };
-  return CleanBrand(info.brand) + ", " + count(info.cores) + " cores, " + count(info.logical) + " threads, " +
-         count(info.ram_mb) + " MB RAM";
+  return CleanBrand(info.brand) + ", " + count(info.cores) + (info.cores_assumed ? " cores (assumed), " : " cores, ") +
+         count(info.logical) + " threads, " + count(info.ram_mb) + " MB RAM";
 }
 
 #ifdef _WIN32
@@ -88,6 +99,47 @@ inline Info Read() {
   MEMORYSTATUSEX memory{};
   memory.dwLength = sizeof memory;
   if (GlobalMemoryStatusEx(&memory)) info.ram_mb = memory.ullTotalPhys / (1024ull * 1024ull);
+  return info;
+}
+#else
+// This machine, off Windows. Every field that cannot be read stays "not known"; nothing here throws or fails the start-up.
+inline Info Read() {
+  Info info;
+#if defined(__x86_64__) || defined(__i386__)
+  unsigned int regs[4] = {};  // eax, ebx, ecx, edx: the Windows loop's regs[0..3]
+  if (__get_cpuid(0x80000000u, &regs[0], &regs[1], &regs[2], &regs[3]) && regs[0] >= 0x80000004u) {
+    char brand[48] = {};
+    bool read = true;
+    for (unsigned int leaf = 0; leaf < 3 && read; ++leaf) {
+      read = __get_cpuid(0x80000002u + leaf, &regs[0], &regs[1], &regs[2], &regs[3]) != 0;
+      for (int r = 0; r < 4 && read; ++r) {
+        for (int b = 0; b < 4; ++b) brand[leaf * 16 + r * 4 + b] = char((regs[r] >> (8 * b)) & 0xff);
+      }
+    }
+    if (read) info.brand.assign(brand, sizeof brand);
+  }
+#endif
+  const long online = sysconf(_SC_NPROCESSORS_ONLN);
+  if (online > 0) info.logical = uint32_t(online);
+  // Physical cores: distinct (package, core) pairs over the configured processors; an offline one has no topology folder.
+  std::set<std::pair<long long, long long>> pairs;
+  const long configured = sysconf(_SC_NPROCESSORS_CONF);
+  for (long n = 0; n < configured; ++n) {
+    const std::string topology = "/sys/devices/system/cpu/cpu" + std::to_string(n) + "/topology/";
+    std::ifstream package_file(topology + "physical_package_id");
+    std::ifstream core_file(topology + "core_id");
+    long long package = 0, core = 0;
+    if (!(package_file >> package) || !(core_file >> core)) continue;
+    pairs.insert(std::make_pair(package, core));
+  }
+  if (!pairs.empty()) {
+    info.cores = uint32_t(pairs.size());
+  } else if (info.logical) {
+    info.cores = info.logical;
+    info.cores_assumed = true;
+  }
+  struct sysinfo memory {};
+  if (sysinfo(&memory) == 0) info.ram_mb = uint64_t(memory.totalram) * uint64_t(memory.mem_unit) / (1024ull * 1024ull);
   return info;
 }
 #endif

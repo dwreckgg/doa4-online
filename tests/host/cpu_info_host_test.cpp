@@ -1,11 +1,16 @@
-// Host test for src/doa4_cpu_info.h (the start-up log's cpu line). Built and run by run_cpu_info_test.bat.
+// Host test for src/doa4_cpu_info.h (the start-up log's cpu line), on Windows and off it. Built and run by run_cpu_info_test.bat.
 
 #include "../../src/doa4_cpu_info.h"
 
 #include <cstdio>
 #include <cstring>
 
+#if defined(_WIN32)
 #pragma comment(lib, "advapi32.lib")  // RegGetValueA (TestRead's second source)
+#else
+#include <fstream>  // /proc/cpuinfo (TestRead's second source)
+#include <string>
+#endif
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -65,18 +70,28 @@ static void TestLogLine() {
   big.logical = 128;
   big.ram_mb = 5000000;
   CHECK(LogLine(big) == "X, 64 cores, 128 threads, 5000000 MB RAM");
+  // A core count that was not read but repeats the thread count says so.
+  Info assumed;
+  assumed.brand = "X";
+  assumed.cores = 8;
+  assumed.logical = 8;
+  assumed.ram_mb = 16000;
+  assumed.cores_assumed = true;
+  CHECK(LogLine(assumed) == "X, 8 cores (assumed), 8 threads, 16000 MB RAM");
 }
 
 // This machine: every field is read, and the counts make sense together.
 static void TestRead() {
   const Info info = Read();
   std::printf("this machine: %s\n", LogLine(info).c_str());
+  std::printf("cores assumed: %s\n", info.cores_assumed ? "yes" : "no");  // which route Read took (no check: never set on Windows)
   CHECK(CleanBrand(info.brand) != "unknown");
   CHECK(info.cores >= 1);
   CHECK(info.logical >= info.cores);
   CHECK(info.logical <= info.cores * 2);  // x86: at most two threads per core
   CHECK(info.ram_mb >= 1024);
   CHECK(LogLine(info).find('?') == std::string::npos);
+#if defined(_WIN32)
   // The name Windows keeps for processor 0 is the same text (a second source: it catches the three brand leaves
   // read in the wrong order, which every check above passes).
   char name[256] = {};
@@ -86,6 +101,25 @@ static void TestRead() {
   CHECK(status == ERROR_SUCCESS);
   std::printf("windows says: %s\n", name);
   CHECK(CleanBrand(name) == CleanBrand(info.brand));
+#else
+  // The name Linux reports in /proc/cpuinfo is the same text (the same second source). The first "model name" line reads
+  // "model name<TAB>: <name>" on x86, so the name is what follows the line's first ": ". No file or no line: a failure.
+  std::ifstream cpuinfo("/proc/cpuinfo");
+  std::string line, name;
+  bool found = false;
+  while (std::getline(cpuinfo, line)) {
+    if (line.rfind("model name", 0) != 0) continue;
+    const std::string::size_type colon = line.find(": ");
+    if (colon != std::string::npos) {
+      name = line.substr(colon + 2);
+      found = true;
+    }
+    break;
+  }
+  CHECK(found);
+  std::printf("linux says: %s\n", name.c_str());
+  CHECK(CleanBrand(name) == CleanBrand(info.brand));
+#endif
 }
 
 int main() {

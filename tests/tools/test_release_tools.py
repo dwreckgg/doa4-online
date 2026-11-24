@@ -1416,6 +1416,953 @@ def test_pgo_recipe_configure_off(root):
           and lines[-1:] and lines[-1].endswith(" recipe stopped: before the build"), f"stopped before the build: no configure: {lines}")
 
 
+# ---- the Linux job: run_host_tests_posix.py, tests/host/posix_manifest.txt, linux-build.yml -------------------------
+
+RUN_POSIX = os.path.join(TOOLS, "run_host_tests_posix.py")
+POSIX_MANIFEST = os.path.join(HOST, "posix_manifest.txt")
+LINUX_WORKFLOW = os.path.join(REPO, ".github", "workflows", "linux-build.yml")
+BACKSLASH = chr(92)
+LEFT_OUT_STARTS = ("windows header: ", "needs the SDK: ", "needs game files: ", "other: ")
+UPDATER_REFUSAL_FLAGS = ["-D_GLIBCXX_ASSERTIONS", "-DDOA4_UPDATER_HOST_TEST", "-pthread", "-I", "{SDK}/thirdparty"]
+
+
+def rel_repo(path):
+    """`path` as a repo-relative name with '/', or None when it lies outside the repo or holds an unexpanded variable."""
+    if "%" in path or "!" in path:
+        return None
+    rel = os.path.relpath(os.path.normpath(path), REPO)
+    return None if rel.startswith("..") or os.path.isabs(rel) else rel.replace(BACKSLASH, "/")
+
+
+def bat_tokens(line):
+    return re.findall(r'(?:[^\s"]+|"[^"]*")+', line)
+
+
+def read_runner_bat(path):
+    """How run_<name>_test.bat builds its test, by the three shapes the manifest's rules name:
+    'a' one literal clang-cl line; 'b' the same line with flags, folders or its source list held in set variables (a
+    `for ... do set SRCS=!SRCS! "%%f"` over a folder's *.cpp included); 'c' compile loops, separate object and link
+    steps, or a Python step. shape None = the file fits none of them.
+    Returns a dict: shape; sources (the .cpp files as repo-relative '/' names; for 'c' the test source its /Fe exe
+    names, then every literal and loop-expanded .cpp of its compile lines); outside (.cpp tokens that are not repo
+    files); options (the other tokens of the one /Fe line of 'a' and 'b', variables expanded); compile_lines (how many
+    command lines call clang-cl); sdk (a line names %REXSDK_DIR%)."""
+    import glob
+    here = os.path.dirname(os.path.abspath(path)) + os.sep
+    text = read(path).decode("utf-8", "replace").replace("\r\n", "\n")
+    lines = [l.strip() for l in text.split("\n")]
+    lines = [l for l in lines if l and not re.match(r"(?i)(rem\b|::)", l)]
+    var = {}
+
+    def expand(s):
+        s = s.replace("%~dp0", here)
+        s = re.sub(r"!(\w+)!", lambda m: var.get(m.group(1).upper(), m.group(0)), s)
+        return re.sub(r"%(\w+)%", lambda m: var.get(m.group(1).upper(), m.group(0)), s)
+
+    def calls_compiler(l):
+        return re.search(r"(?<![\w-])clang-cl(?![\w-])", l) is not None
+
+    loops, compile_lines, block = [], [], None
+    loop_compiles = python_step = 0
+    for l in lines:
+        m = re.fullmatch(r'(?i)(?:if not defined \w+ )?set "?(\w+)=(.*?)"?', l)
+        if m:
+            var[m.group(1).upper()] = expand(m.group(2))
+            continue
+        m = re.fullmatch(r'(?i)for %%(\w) in \("([^"]*\*[^"]*)"\) do set (\w+)=!(\w+)! "%%(\w)"', l)
+        if m and m.group(3).upper() == m.group(4).upper() and m.group(1) == m.group(5):
+            var[m.group(3).upper()] = " ".join(f'"{p}"' for p in sorted(glob.glob(expand(m.group(2)))))
+            continue
+        m = re.fullmatch(r'(?i)for %%(\w) in \(([^()"*]+)\) do (.+)', l)
+        if m:
+            body = [] if m.group(3) == "(" else [m.group(3)]
+            loops.append((m.group(1), m.group(2).split(), body))
+            block = body if m.group(3) == "(" else None
+            loop_compiles += sum(1 for b in body if calls_compiler(b))
+            continue
+        if block is not None:
+            if l == ")":
+                block = None
+            else:
+                block.append(l)
+                loop_compiles += 1 if calls_compiler(l) else 0
+            continue
+        if calls_compiler(l):
+            compile_lines.append(l)
+        elif re.match(r"(?i)(py|python|python3)(\.exe)?\s", l):
+            python_step += 1
+    fe = [l for l in compile_lines if "/Fe" in l]
+    link = any(t.rstrip('"').lower().endswith(".obj") and not t.startswith("/Fo")
+               for l in compile_lines for t in bat_tokens(l))
+
+    def cpps(l):
+        return re.findall(r'"([^"]+\.cpp)"', expand(l))
+
+    shape, raw, options = None, [], []
+    if loop_compiles or link or python_step:
+        shape = "c"
+        exe = re.findall(r'/Fe"%OUT%\\(\w+)\.exe"', text)
+        raw = [os.path.join(here, exe[0] + ".cpp")] if exe else []
+        for l in compile_lines:
+            raw += cpps(l)
+        for v, items, body in loops:
+            for b in body:
+                if calls_compiler(b):
+                    for item in items:
+                        raw += cpps(b.replace("%%" + v, item))
+    elif len(fe) == 1:
+        bare = fe[0].replace("%~dp0", "").replace("%OUT%", "")
+        shape = "b" if re.search(r"%\w+%|!\w+!", bare) else "a"
+        raw = cpps(fe[0])
+        options = [t for t in bat_tokens(expand(fe[0]))[1:] if not t.rstrip('"').lower().endswith(".cpp")]
+    sources, outside = [], []
+    for p in raw:
+        rel = rel_repo(p)
+        if rel is None:
+            outside.append(p)
+        elif rel not in sources:
+            sources.append(rel)
+    return {"shape": shape, "sources": sources, "outside": outside, "options": options,
+            "compile_lines": len(compile_lines) + loop_compiles, "sdk": any("%rexsdk_dir%" in l.lower() for l in lines)}
+
+
+def posix_flags(options):
+    """The Linux line's flags for a runner's clang-cl options (the manifest's translation rule): each /D<X> is -D<X>,
+    except /D_MSVC_STL_HARDENING=1 -> -D_GLIBCXX_ASSERTIONS and the Windows-only three, which are dropped; an include
+    folder inside the repo is `-I <folder>`; /clang:<x> is <x>. Returns a dict: flags; outside (include folders that are
+    not in the repo); fp (/fp: options); libs (Windows link libraries, dropped); std (a /std: other than c++latest);
+    unknown (anything else)."""
+    out = {"flags": [], "outside": [], "fp": [], "libs": [], "std": [], "unknown": []}
+    i = 0
+    while i < len(options):
+        t = options[i]
+        i += 1
+        if t in ("/nologo", "/EHsc", "/O2", "/std:c++latest") or t.startswith("/Fo") or t.startswith("/Fe"):
+            continue
+        if t.startswith("/std:"):
+            out["std"].append(t)
+        elif t == "/D_MSVC_STL_HARDENING=1":
+            out["flags"].append("-D_GLIBCXX_ASSERTIONS")
+        elif t.startswith("/D_WIN32_WINNT=") or t in ("/DWIN32_LEAN_AND_MEAN", "/DNOMINMAX"):
+            continue
+        elif t.startswith("/D"):
+            out["flags"].append("-D" + t[2:])
+        elif t.startswith("/I") or t == "-I":
+            folder = t[2:] if t.startswith("/I") else (options[i] if i < len(options) else "")
+            i += 0 if t.startswith("/I") else 1
+            rel = rel_repo(folder.strip('"'))
+            if rel is None:
+                out["outside"].append(folder.strip('"'))
+            else:
+                out["flags"] += ["-I", rel]
+        elif t.startswith("/clang:"):
+            out["flags"].append(t[len("/clang:"):])
+        elif t.startswith("/fp:"):
+            out["fp"].append(t)
+        elif t.lower().endswith(".lib"):
+            out["libs"].append(t)
+        else:
+            out["unknown"].append(t)
+    return out
+
+
+def include_dirs_of(flags):
+    """The repo folders a run line's flags give with -I ({SDK} folders are not in the repo and are left out)."""
+    return [flags[i + 1] for i, f in enumerate(flags[:-1]) if f == "-I" and "{SDK}" not in flags[i + 1]]
+
+
+PICOSHA2 = ("src/doa4_updater.cpp", 16, "picosha2/picosha2.h")
+# The runner's WINDOWS_HEADERS, written out here: a name dropped from or added to the constant fails a check below.
+WINDOWS_HEADERS_PIN = ("windows.h", "winsock2.h", "ws2tcpip.h", "winhttp.h", "bcrypt.h", "iphlpapi.h", "intrin.h", "process.h",
+                       "psapi.h", "shlobj.h", "shellapi.h", "shobjidl.h", "knownfolders.h", "objbase.h", "wincodec.h",
+                       "winioctl.h", "wrl/client.h", "mstcpip.h", "wlanapi.h", "io.h", "direct.h", "conio.h")
+# C and C++ standard headers that the sources include inside a Windows-only block (they are no Windows headers).
+STANDARD_IN_WINDOWS_BLOCKS = ("cwchar",)
+
+
+def left_out_reason(name, rp):
+    """The reason the manifest's rules give run_<name>_test.bat for being left out, or None when they give it a run
+    line. In the rules' order: a Windows header its sources reach outside a Windows-only block; a multi-step build;
+    the SDK or a folder outside the repo named by the .bat; floating-point build options; a quoted include that is in
+    no repo folder (updater_refusal's picosha2 is the one allowed)."""
+    bat = read_runner_bat(os.path.join(HOST, f"run_{name}_test.bat"))
+    if bat["shape"] is None:
+        return "no rule: the .bat fits none of the three shapes"
+    pf = posix_flags(bat["options"])
+    dirs = include_dirs_of(pf["flags"])
+    paths = [os.path.join(REPO, s) for s in bat["sources"]]
+    hits = ([h for h in (rp.windows_reach(p, REPO) for p in paths) if h]
+            or [h for h in (rp.windows_reach(p, REPO, dirs) for p in paths) if h])
+    if hits:
+        return "windows header: %s:%d %s" % hits[0]
+    if bat["shape"] == "c":
+        return f"other: multi-step build ({bat['compile_lines']} compile lines)"
+    outside = bat["outside"] + pf["outside"]
+    if bat["sdk"] or outside:
+        what = (["%REXSDK_DIR%"] if bat["sdk"] else []) + [o if "%" in o else os.path.relpath(o, REPO).replace(BACKSLASH, "/")
+                                                           for o in outside]
+        return "needs the SDK: " + ", ".join(dict.fromkeys(what))
+    if pf["fp"]:
+        return f"other: floating-point build options ({' '.join(pf['fp'])})"
+    unresolved = [u for p in paths for u in rp.unresolved_includes(p, REPO, dirs)
+                  if not (name == "updater_refusal" and u == PICOSHA2)]
+    if unresolved:
+        return "other: an include that is in no repo folder (%s:%d %s)" % unresolved[0]
+    if pf["unknown"]:
+        return f"no rule: clang-cl options {pf['unknown']}"
+    return None
+
+
+def real_manifest():
+    rp = load("run_host_tests_posix")
+    text = read(POSIX_MANIFEST).decode("utf-8") if os.path.isfile(POSIX_MANIFEST) else ""
+    return (rp, text) + tuple(rp.parse_manifest(text))
+
+
+def test_posix_manifest_covers_every_runner(root):
+    rp, text, runs, left, errors = real_manifest()
+    check(bool(text) and not errors, f"posix manifest: the real file parses with no error: {errors or 'no text'}")
+    bats = {f[len("run_"):-len("_test.bat")] for f in os.listdir(HOST) if re.fullmatch(r"run_\w+_test\.bat", f)}
+    check(len(bats) >= 30, f"posix manifest: the real runners are found: {len(bats)}")
+    names = {n for n, _, _ in runs} | {n for n, _ in left}
+    check(not (bats - names), f"posix manifest: every run_<name>_test.bat is on a line; missing: {sorted(bats - names)}")
+    check(not (names - bats), f"posix manifest: every line names a run_<name>_test.bat; no runner for: {sorted(names - bats)}")
+    by_name = {n: (s, f) for n, s, f in runs}
+    check("updater_refusal" in by_name and "cpu_info" in by_name,
+          f"posix manifest: updater_refusal and cpu_info are run lines: {sorted(by_name)}")
+    check(by_name.get("updater_refusal", (None, None))[1] == UPDATER_REFUSAL_FLAGS,
+          f"posix manifest: updater_refusal's flags are {UPDATER_REFUSAL_FLAGS}: {by_name.get('updater_refusal')}")
+    missing = [f"{n}: {s}" for n, srcs, _ in runs for s in srcs if not os.path.isfile(os.path.join(REPO, s))]
+    check(len(runs) >= 1 and not missing, f"posix manifest: at least one run line ({len(runs)}), every source a file: {missing}")
+    odd = [f"{n}: {r}" for n, r in left if not r.startswith(LEFT_OUT_STARTS)]
+    check(not odd, f"posix manifest: each left-out reason starts with one of {LEFT_OUT_STARTS}: {odd}")
+    attrs = read(os.path.join(REPO, ".gitattributes")).decode("ascii").replace("\r\n", "\n").split("\n")
+    want = [p + " text eol=lf" for p in (".github/workflows/linux-build.yml", "tools/run_host_tests_posix.py",
+                                         "tests/host/posix_manifest.txt")]
+    check(all(w in attrs for w in want), f".gitattributes: the three Linux job files are 'text eol=lf': {attrs}")
+
+
+def test_posix_manifest_parser(root):
+    parse = load("run_host_tests_posix").parse_manifest
+
+    def errors_name(errors, *needles):
+        return len(errors) == 1 and all(n in errors[0] for n in needles)
+
+    text = "# a comment\n\na | tests/host/a.cpp src/b.cpp | -DX=1 -I {SDK}/inc\nb | tests/host/b.cpp |\n!c | windows header: src/c.h:3 windows.h\n"
+    want = ([("a", ["tests/host/a.cpp", "src/b.cpp"], ["-DX=1", "-I", "{SDK}/inc"]), ("b", ["tests/host/b.cpp"], [])],
+            [("c", "windows header: src/c.h:3 windows.h")], [])
+    got = parse(text)
+    check(tuple(got) == want, f"parser: a comment, an empty line, a run line with flags, one with none, a left-out line: {got}")
+    got = parse(text.replace("\n", "\r\n"))
+    check(tuple(got) == want, f"parser: CRLF line ends give the same result as LF: {got}")
+    runs, left, errors = parse("a | x.cpp |\nb | y.cpp |\na | z.cpp | -DZ\n")
+    check(runs == [("a", ["x.cpp"], []), ("b", ["y.cpp"], [])] and left == [] and errors_name(errors, "line 3", "a", "line 1"),
+          f"parser: a name on two run lines is an error naming it and both lines, and the first stays: {runs} {errors}")
+    runs, left, errors = parse("a | x.cpp |\n!a | other: why\n")
+    check(runs == [("a", ["x.cpp"], [])] and left == [] and errors_name(errors, "line 2", "a", "line 1"),
+          f"parser: a name on a run line and a left-out line is an error: {runs} {left} {errors}")
+    runs, left, errors = parse("!a | other: one\n\n!a | other: two\n")
+    check(runs == [] and left == [("a", "other: one")] and errors_name(errors, "line 3", "a", "line 1"),
+          f"parser: a name on two left-out lines is an error, and the first stays: {left} {errors}")
+    for what, bad in (("a run line with one | only", "a | x.cpp\n"), ("an empty name", " | x.cpp |\n"),
+                      ("an empty sources field", "a |  | -DX\n"), ("a left-out line with no reason", "!a\n"),
+                      ("a left-out line with an empty reason", "!a |  \n"), ("a name that is not a word", "a-b | x.cpp |\n"),
+                      ("a left-out line with no name", "! | other: why\n")):
+        runs, left, errors = parse("ok | k.cpp |\n" + bad)
+        check(runs == [("ok", ["k.cpp"], [])] and left == [] and errors_name(errors, "line 2"),
+              f"parser: {what} is an error on its line and adds nothing: {runs} {left} {errors}")
+    got = parse("a | x.cpp | -DX | -DY\n")
+    check(tuple(got) == ([("a", ["x.cpp"], ["-DX", "|", "-DY"])], [], []), f"parser: a third | belongs to the flags: {got}")
+    got = parse("!a | other: p | q\n")
+    check(tuple(got) == ([], [("a", "other: p | q")], []), f"parser: a | inside a reason belongs to the reason: {got}")
+    got = parse("")
+    check(tuple(got) == ([], [], []), f"parser: an empty text is three empty lists: {got}")
+
+
+def test_posix_manifest_windows_reach(root):
+    rp = load("run_host_tests_posix")
+    w = os.path.join(root, "walk")
+
+    def src(rel, *lines):
+        write(os.path.join(w, rel), ("\n".join(lines) + "\n").encode("ascii"))
+        return os.path.join(w, rel)
+
+    def reach(rel, *lines, dirs=()):
+        return rp.windows_reach(src(rel, *lines), w, dirs)
+
+    check("windows.h" in rp.WINDOWS_HEADERS and "winsock2.h" in rp.WINDOWS_HEADERS and "vector" not in rp.WINDOWS_HEADERS
+          and "unistd.h" not in rp.WINDOWS_HEADERS, f"walk: WINDOWS_HEADERS names the Windows headers only: {sorted(rp.WINDOWS_HEADERS)}")
+    got = reach("u1.cpp", "#include <vector>", "#include <windows.h>")
+    check(got == ("u1.cpp", 2, "windows.h"), f"walk: an unguarded Windows header is reached, with its file and line: {got}")
+    got = reach("u1b.cpp", "#include <vector>", "  #  include <Windows.h>  // the SDK's spelling")
+    check(got == ("u1b.cpp", 2, "Windows.h"), f"walk: the header's name is compared without case, spaces allowed: {got}")
+    got = reach("u0.cpp", "#include <vector>", "#include <unistd.h>", "// #include <windows.h>", "/* text", "#include <windows.h>", "*/")
+    check(got is None, f"walk: a source with no Windows header outside a comment reaches none: {got}")
+    src("a/one.h", '#include "two.h"')
+    src("a/two.h", "#pragma once", "#include <string>", "#include <winsock2.h>")
+    got = reach("u2.cpp", '#include "a/one.h"')
+    check(got == ("a/two.h", 3, "winsock2.h"), f"walk: a Windows header two local includes away is reached where it sits: {got}")
+    # where a quoted include is looked for: the including file's folder first, then the repo root, then src/
+    src("sub/pick.h", "#include <vector>")
+    src("pick.h", "#include <windows.h>")
+    got = reach("sub/first.cpp", '#include "pick.h"')
+    check(got is None, f"walk: the including file's folder comes before the repo root: {got}")
+    src("rooted/x.h", "#include <io.h>")
+    got = reach("sub/second.cpp", '#include "rooted/x.h"')
+    check(got == ("rooted/x.h", 1, "io.h"), f"walk: an include not beside the file is found from the repo root: {got}")
+    src("src/deep/s.h", "#include <winhttp.h>")
+    got = reach("sub/third.cpp", '#include "deep/s.h"')
+    check(got == ("src/deep/s.h", 1, "winhttp.h"), f"walk: then from src/: {got}")
+    src("inc/lib/l.h", "#include <bcrypt.h>")
+    got = reach("sub/fourth.cpp", '#include "lib/l.h"', dirs=("inc",))
+    check(got == ("inc/lib/l.h", 1, "bcrypt.h"), f"walk: then from the run line's -I folders: {got}")
+    check(rp.unresolved_includes(os.path.join(w, "sub/fourth.cpp"), w) == [("sub/fourth.cpp", 1, "lib/l.h")]
+          and rp.windows_reach(os.path.join(w, "sub/fourth.cpp"), w) is None,
+          "walk: without that folder the include is reported as unresolved (file, line, name), not followed")
+    check(rp.unresolved_includes(os.path.join(w, "u2.cpp"), w) == [], "walk: a closure whose includes all resolve reports none unresolved")
+    # guards
+    got = reach("g1.cpp", "#ifdef _WIN32", "#include <windows.h>", "#endif")
+    check(got is None, f"walk: inside #ifdef _WIN32 is guarded: {got}")
+    got = reach("g2.cpp", "#if defined(_WIN32)  // Windows", "#include <windows.h>", "#endif")
+    check(got is None, f"walk: inside #if defined(_WIN32) is guarded: {got}")
+    got = reach("g3.cpp", "#ifndef _WIN32", "#include <unistd.h>", "#else", "#include <windows.h>", "#endif")
+    check(got is None, f"walk: the #else of #ifndef _WIN32 is guarded: {got}")
+    got = reach("g3b.cpp", "#if !defined(_WIN32)", "#include <unistd.h>", "#else", "#include <windows.h>", "#endif")
+    check(got is None, f"walk: the #else of #if !defined(_WIN32) is guarded: {got}")
+    got = reach("g3c.cpp", "#ifndef _WIN32", "#include <windows.h>", "#else", "#include <io.h>", "#endif")
+    check(got == ("g3c.cpp", 2, "windows.h"), f"walk: the first branch of #ifndef _WIN32 is the non-Windows one: {got}")
+    got = reach("g4.cpp", "#ifdef _WIN32", "#include <io.h>", "#else", "#include <windows.h>", "#endif")
+    check(got == ("g4.cpp", 4, "windows.h"), f"walk: the #else of #ifdef _WIN32 is the non-Windows branch, unguarded: {got}")
+    got = reach("g5.cpp", "#ifndef G5_H", "#define G5_H", "#ifdef _WIN32", "#include <io.h>", "#endif", "#include <windows.h>", "#endif")
+    check(got == ("g5.cpp", 6, "windows.h"), f"walk: a guard closed before the include does not guard it: {got}")
+    got = reach("g6.cpp", "#if defined(_WIN32) || defined(X)", "#include <windows.h>", "#endif")
+    check(got == ("g6.cpp", 2, "windows.h"), f"walk: #if defined(_WIN32) || ... is not a Windows-only block: {got}")
+    got = reach("g7.cpp", "#ifdef _WIN32", "#ifndef NOMINMAX", "#define NOMINMAX", "#endif", "#include <windows.h>", "#endif")
+    check(got is None, f"walk: an unrelated #ifndef closed inside the _WIN32 block leaves the block open: {got}")
+    got = reach("g7b.cpp", "#ifdef _WIN32", "#ifdef X", "#include <io.h>", "#else", "#include <windows.h>", "#endif", "#endif")
+    check(got is None, f"walk: an unrelated #ifdef / #else inside the _WIN32 block stays guarded: {got}")
+    src("winonly.h", "#include <windows.h>")
+    got = reach("g8.cpp", "#ifdef _WIN32", '#include "winonly.h"', "#endif", "#include <vector>")
+    check(got is None, f"walk: a quoted include inside a Windows-only block is not followed: {got}")
+    got = reach("g8b.cpp", "#ifdef _WIN32", "#else", '#include "winonly.h"', "#endif")
+    check(got == ("winonly.h", 1, "windows.h"), f"walk: the same include in the non-Windows branch is followed: {got}")
+    got = reach("g9.cpp", "#if defined(__linux__)", "#include <unistd.h>", "#elif defined(_WIN32)", "#include <windows.h>", "#endif")
+    check(got is None, f"walk: an #elif defined(_WIN32) branch is guarded: {got}")
+    got = reach("g9b.cpp", "#ifdef _WIN32", "#include <io.h>", "#elif defined(__APPLE__)", "#include <windows.h>", "#endif")
+    check(got == ("g9b.cpp", 4, "windows.h"), f"walk: an #elif after the _WIN32 branch is not Windows-only: {got}")
+    got = reach("g9c.cpp", "#if defined(__linux__)", "#elif defined(_WIN32)", "#include <io.h>", "#else", "#include <windows.h>", "#endif")
+    check(got == ("g9c.cpp", 5, "windows.h"), f"walk: the #else after an #elif chain is not Windows-only: {got}")
+    got = reach("g10.cpp", "#ifdef _MSC_VER", "#include <intrin.h>", "#endif")
+    check(got == ("g10.cpp", 2, "intrin.h"), f"walk: a guard the walk does not know (_MSC_VER) counts as unguarded: {got}")
+    # an include cycle ends, and the walk goes on after it
+    src("c1.h", '#include "c2.h"')
+    src("c2.h", '#include "c1.h"')
+    got = reach("cyc.cpp", '#include "c1.h"')
+    check(got is None, f"walk: an include cycle ends: {got}")
+    got = reach("cyc2.cpp", '#include "c1.h"', "#include <conio.h>")
+    check(got == ("cyc2.cpp", 2, "conio.h"), f"walk: a header after an include cycle is still reached: {got}")
+    # C++23's #elifdef / #elifndef, and text that only looks like a comment or a directive
+    got = reach("e1.cpp", "#ifdef _WIN32", "#include <io.h>", "#elifndef FOO", "#include <windows.h>", "#endif")
+    check(got == ("e1.cpp", 4, "windows.h"), f"walk: an #elifndef branch after #ifdef _WIN32 is not Windows-only: {got}")
+    got = reach("e2.cpp", "#ifdef _WIN32", "#include <io.h>", "#elifdef __linux__", "#include <windows.h>", "#endif")
+    check(got == ("e2.cpp", 4, "windows.h"), f"walk: an #elifdef branch after #ifdef _WIN32 is not Windows-only: {got}")
+    got = reach("e3.cpp", "#ifdef __linux__", "#include <unistd.h>", "#elifdef _WIN32", "#include <windows.h>", "#endif")
+    check(got is None, f"walk: an #elifdef _WIN32 branch is guarded: {got}")
+    got = reach("s1.cpp", 'const char* a = "dir/*";', "#include <windows.h>", 'const char* b = "*/";')
+    check(got == ("s1.cpp", 2, "windows.h"), f"walk: a /* inside a string opens no comment: {got}")
+    got = reach("s2.cpp", "#ifdef _WIN32", 'const char* a = "dir/*";', "#endif", 'const char* b = "*/";', "#include <windows.h>")
+    check(got == ("s2.cpp", 5, "windows.h"), f"walk: a /* inside a string does not hide the #endif after it: {got}")
+    got = reach("s3.cpp", "// see a/* for the files", "#include <windows.h>", "int x; /* later */")
+    check(got == ("s3.cpp", 2, "windows.h"), f"walk: a /* inside a // comment opens no comment: {got}")
+    got = reach("r1.cpp", 'const char* t = R"(', "#ifdef _WIN32", ')";', "#include <windows.h>")
+    check(got == ("r1.cpp", 4, "windows.h"), f"walk: a directive inside a raw string is text: {got}")
+    got = reach("r2.cpp", 'const char* t = R"x(', "#include <windows.h>", ')" still inside', ')x";', "#include <vector>")
+    check(got is None, f"walk: an #include inside a raw string is text: {got}")
+    got = reach("r3.cpp", "int k = 1'000;", "#ifdef _WIN32", "#include <windows.h>", "#endif", "char c = '\"';", "#include <io.h>")
+    check(got == ("r3.cpp", 6, "io.h"), f"walk: a digit separator and a quote in a character literal open nothing: {got}")
+    # local_includes: one file's quoted includes outside a Windows-only block, which the walk follows
+    found, missing = rp.local_includes(os.path.join(w, "sub/fourth.cpp"), w)
+    check((found, missing) == ([], [(1, "lib/l.h")])
+          and rp.local_includes(os.path.join(w, "u2.cpp"), w) == ([(1, "a/one.h", os.path.normpath(os.path.join(w, "a/one.h")))], [])
+          and rp.local_includes(os.path.join(w, "g8.cpp"), w) == ([], []),
+          f"walk: local_includes gives a file's resolved and unresolved quoted includes, none from a Windows-only block: {found} {missing}")
+    # the second net: a call spelled the Microsoft way outside a Windows-only block
+    m1 = src("m1.cpp", "#ifdef _WIN32", "#include <process.h>", "#endif", "#include <string>",  # costumes_host_test.cpp as it was
+             'static std::string Name() { return "check_" + std::to_string(unsigned(_getpid())) + ".bin"; }')
+    got = rp.msvc_calls(m1, w)
+    check(got == [("m1.cpp", 5, "_getpid")], f"calls: _getpid() outside the block that includes <process.h> is found: {got}")
+    m2 = src("m2.cpp", "#ifdef _WIN32", "int a = _getpid(); errno_t e = fopen_s(&f, n, m);", "#else",
+             "int a = getpid(); x._flush(); ns::_init(); p->_go(); int _Big(); int size = sizeof(a_s);", "#endif",
+             "// _getpid() in a comment", 'const char* t = "_getpid()"; /* fopen_s(a) */', 'const char* u = R"(', "_getpid()", ')";')
+    got = rp.msvc_calls(m2, w)
+    check(got == [], f"calls: none in a Windows-only block, a comment, a string, a member or a qualified name: {got}")
+    src("mh.h", "inline int Open() { return fopen_s (0, 0, 0); }")
+    got = rp.msvc_calls(src("m3.cpp", "#ifdef _WIN32", "#else", '#include "mh.h"', "#endif", "#define PID _getpid()"), w)
+    check(got == [("mh.h", 1, "fopen_s"), ("m3.cpp", 5, "_getpid")], f"calls: found through a local include and in a #define: {got}")
+
+    # the real tree
+    _, text, runs, left, errors = real_manifest()
+    check(len(runs) >= 1 and not errors, f"reach: the real manifest has run lines ({len(runs)}) and no error: {errors}")
+    unresolved = set()
+    for name, sources, flags in runs:
+        dirs = include_dirs_of(flags)
+        hits = [h for h in (rp.windows_reach(os.path.join(REPO, s), REPO, dirs) for s in sources) if h]
+        check(not hits, f"reach: run line {name} reaches no Windows header outside a _WIN32 block: {hits}")
+        calls = [c for s in sources for c in rp.msvc_calls(os.path.join(REPO, s), REPO, dirs)]
+        check(not calls, f"calls: run line {name} makes no Microsoft-spelled call outside a _WIN32 block: {calls}")
+        for s in sources:
+            unresolved.update(rp.unresolved_includes(os.path.join(REPO, s), REPO, dirs))
+        bat = read_runner_bat(os.path.join(HOST, f"run_{name}_test.bat"))
+        want = posix_flags(bat["options"])["flags"] + (UPDATER_REFUSAL_FLAGS[2:] if name == "updater_refusal" else [])
+        check(bat["shape"] in ("a", "b") and sources == bat["sources"] and flags == want and not bat["outside"],
+              f"reach: run line {name} names its .bat's sources and translated flags: shape {bat['shape']}, "
+              f"{sources} / {bat['sources']}, {flags} / {want}, outside {bat['outside']}")
+    check(unresolved == {("src/doa4_updater.cpp", 16, "picosha2/picosha2.h")},
+          f"reach: the run lines' one unresolved quoted include is picosha2 (it lives in the SDK): {sorted(unresolved)}")
+    for name, reason in left:
+        path = os.path.join(HOST, f"run_{name}_test.bat")
+        bat = read_runner_bat(path) if os.path.isfile(path) else {"shape": None, "sources": []}
+        check(bat["shape"] in ("a", "b", "c"), f"reach: run_{name}_test.bat fits one of the three shapes: {bat['shape']}")
+        if reason.startswith("windows header: "):
+            m = re.fullmatch(r"windows header: (\S+):(\d+) (\S+)", reason)
+            hits = [h for h in (rp.windows_reach(os.path.join(REPO, s), REPO) for s in bat["sources"]) if h]
+            check(bool(m) and bool(hits) and hits[0] == (m.group(1), int(m.group(2)), m.group(3)),
+                  f"reach: left-out {name} names the walk's first Windows header {hits[:1]}: {reason!r}")
+        elif reason.startswith("other: multi-step build"):
+            check(bat["shape"] == "c" and reason == f"other: multi-step build ({bat['compile_lines']} compile lines)",
+                  f"reach: left-out {name} is a multi-step runner with {bat.get('compile_lines')} compile lines: shape {bat['shape']}, {reason!r}")
+    # every line is the one the rules give its runner: a left-out reason is the rules' own text, never an invented one
+    for name, reason in left:
+        want = left_out_reason(name, rp) if os.path.isfile(os.path.join(HOST, f"run_{name}_test.bat")) else "no runner"
+        check(reason == want, f"rules: left-out {name} carries the reason the rules give ({want!r}): {reason!r}")
+    wrong = [(name, left_out_reason(name, rp)) for name, _, _ in runs]
+    check(bool(runs) and all(r is None for _, r in wrong), f"rules: no run line is a runner the rules leave out: {[w for w in wrong if w[1]]}")
+    # WINDOWS_HEADERS: the pinned set; every header found inside a Windows-only block, over all the runners' closures,
+    # is in it (or is a standard header); a left-out test that reaches one of them unguarded says so
+    check(rp.WINDOWS_HEADERS == frozenset(WINDOWS_HEADERS_PIN), f"headers: WINDOWS_HEADERS is the pinned set: "
+          f"{sorted(rp.WINDOWS_HEADERS ^ frozenset(WINDOWS_HEADERS_PIN))}")
+    guarded, silent = set(), []
+    reasons = dict(left)
+    for bat_file in sorted(f for f in os.listdir(HOST) if re.fullmatch(r"run_\w+_test\.bat", f)):
+        name = bat_file[len("run_"):-len("_test.bat")]
+        bat = read_runner_bat(os.path.join(HOST, bat_file))
+        dirs = include_dirs_of(posix_flags(bat["options"])["flags"])
+        events = [e for s in bat["sources"] for e in rp.walk(os.path.join(REPO, s), REPO, dirs)]
+        guarded.update(h.lower() for kind, _, _, h in events if kind == "guarded")
+        open_windows = sorted({h.lower() for kind, _, _, h in events if kind == "angle"} & set(WINDOWS_HEADERS_PIN))
+        if open_windows and not reasons.get(name, "").startswith("windows header: "):
+            silent.append((name, open_windows))
+    odd = guarded - set(WINDOWS_HEADERS_PIN) - set(STANDARD_IN_WINDOWS_BLOCKS)
+    check(len(guarded) >= 8 and {"bcrypt.h", "mstcpip.h", "wlanapi.h"} <= guarded and not odd,
+          f"headers: every header inside a Windows-only block is a known Windows header (or standard): unplaced {sorted(odd)}, seen {sorted(guarded)}")
+    check(not silent, f"headers: a runner that reaches a Windows header unguarded is left out for it: {silent}")
+
+
+FAKE_CXX = r'''"""A stand-in for the C++ compiler (the release-tools suite's): it checks the line it is given and writes a
+"program" (a .bat that starts fakeprog.py on the first source) at the -o path. The first source says what it expects
+(// argv: the tokens between -O2 and -o) and what its program does (// print:, // eprint:, // sleep:, // exit:)."""
+import json
+import os
+import sys
+
+here = os.path.dirname(os.path.abspath(__file__))
+a = sys.argv[1:]
+with open(os.path.join(here, "log.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"what": "compile", "argv": a, "cwd": os.getcwd(), "pid": os.getpid()}) + "\n")
+
+
+def fail(why):
+    print("fake compiler: " + why)
+    sys.exit(9)
+
+
+if a[:2] != ["-std=c++23", "-O2"] or a.count("-o") != 1 or a.index("-o") != len(a) - 2:
+    fail("the line is not '-std=c++23 -O2 ... -o <program>': %r" % (a,))
+middle, out = a[2:-2], a[-1]
+sources = [t for t in middle if t.endswith(".cpp")]
+if not sources or not all(os.path.isfile(s) for s in sources):
+    fail("a source is not a file seen from the compiler's folder: %r" % (sources,))
+lines = open(sources[0], encoding="utf-8").read().splitlines()
+want = [json.loads(l[len("// argv: "):]) for l in lines if l.startswith("// argv: ")]
+if len(want) != 1 or middle != want[0]:
+    fail("flags and sources differ: got %r, the source says %r" % (middle, want))
+if "// compile: fail" in lines:
+    print("fixture.cpp:1:1: error: the fake compile failure")
+    sys.exit(1)
+if "// compile: sleep" in lines:  # a compiler that hangs
+    import time
+    time.sleep(60)
+if "// compile: no program" in lines:  # a compiler that says 0 and writes nothing
+    sys.exit(0)
+with open(out, "w", encoding="ascii", newline="") as f:
+    f.write("@echo off\r\n" + '"%s" -I "%s" "%s"\r\n' % (sys.executable, os.path.join(here, "fakeprog.py"),
+                                                       os.path.abspath(sources[0])) + "exit /b %errorlevel%\r\n")
+'''
+
+FAKE_PROG = r'''"""The program the fake compiler's .bat starts: does what the fixture source's // lines say."""
+import json
+import os
+import sys
+import time
+
+here = os.path.dirname(os.path.abspath(__file__))
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+try:
+    given = sys.stdin.read()
+except Exception as e:
+    given = "stdin: %r" % (e,)
+with open(os.path.join(here, "log.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"what": "program", "source": os.path.basename(sys.argv[1]), "cwd": os.getcwd(), "pid": os.getpid(),
+                        "stdin": given}) + "\n")
+code = 0
+for l in lines:
+    if l.startswith("// print: "):
+        print(l[len("// print: "):], flush=True)
+    elif l.startswith("// eprint: "):
+        print(l[len("// eprint: "):], file=sys.stderr, flush=True)
+    elif l.startswith("// sleep: "):
+        time.sleep(float(l[len("// sleep: "):]))
+    elif l.startswith("// exit: "):
+        code = int(l[len("// exit: "):])
+sys.exit(code)
+'''
+
+
+def posix_setup(root):
+    """(repo, cxx, log): a stand-in repo folder, the fake compiler's .bat (a space in both paths) and its log."""
+    tool = os.path.join(root, "fake cxx")
+    write(os.path.join(tool, "fakecxx.py"), FAKE_CXX.encode("ascii"))
+    write(os.path.join(tool, "fakeprog.py"), FAKE_PROG.encode("ascii"))
+    cxx = os.path.join(tool, "fakecxx.bat")
+    write(cxx, ("\r\n".join(["@echo off", f'"{sys.executable}" -I "%~dp0fakecxx.py" %*', "exit /b %errorlevel%"]) + "\r\n").encode("ascii"))
+    repo = os.path.join(root, "the repo")
+    os.makedirs(os.path.join(repo, "tests", "host"))
+    return repo, cxx, os.path.join(tool, "log.jsonl")
+
+
+def posix_source(repo, rel, argv, *lines):
+    """A fixture source: `argv` = the words the fake compiler must get between -O2 and -o (a text, or a list when a
+    word may hold a space); `lines` = what its program does."""
+    import json
+    argv = argv.split() if isinstance(argv, str) else list(argv)
+    write(os.path.join(repo, rel), ("\n".join(["// argv: " + json.dumps(argv)] + ["// " + l for l in lines]) + "\n").encode("ascii"))
+
+
+def posix_run(repo, cxx, log, manifest, *args, env=None, where=None):
+    """Runs the POSIX runner on `manifest` (a text, written to the stand-in repo's own manifest path, or to `where` and
+    given with --manifest) with the fake compiler; (exit code, output, the fake's records)."""
+    import json
+    path = where or os.path.join(repo, "tests", "host", "posix_manifest.txt")
+    write(path, manifest.encode("utf-8"))
+    if os.path.exists(log):
+        os.remove(log)
+    extra = ["--manifest", where] if where else []
+    code, text = run(RUN_POSIX, "--repo", repo, "--cxx", cxx, "--exe-suffix", ".bat", *extra, *args, env=env)
+    records = [json.loads(l) for l in read(log).decode("utf-8").splitlines()] if os.path.exists(log) else []
+    return code, text, records
+
+
+def last_line(text):
+    lines = text.rstrip("\n").split("\n")
+    return lines[-1] if lines else ""
+
+
+def same_folder(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def pid_alive(pid):
+    p = subprocess.run(["tasklist", "/NH", "/FI", f"PID eq {pid}"], capture_output=True, text=True, errors="replace")
+    return re.search(rf"\s{pid}\s", p.stdout) is not None
+
+
+def test_posix_runner_verdicts(root):
+    repo, cxx, log = posix_setup(root)
+    passed = "print: PASSED: 3 checks, 0 failures"
+    posix_source(repo, "tests/host/pass_host_test.cpp", "-DX=1 -I inc tests/host/pass_host_test.cpp src/extra.cpp", "print: working", passed)
+    write(os.path.join(repo, "src", "extra.cpp"), b"// a second source\n")
+    posix_source(repo, "tests/host/fail.cpp", "tests/host/fail.cpp", "print: FAILED: 3 checks, 1 failures", "exit: 1")
+    posix_source(repo, "tests/host/nosum.cpp", "tests/host/nosum.cpp", "print: hello")
+    posix_source(repo, "tests/host/nocomp.cpp", "tests/host/nocomp.cpp", "compile: fail")
+    run_pass = "pass | tests/host/pass_host_test.cpp src/extra.cpp | -DX=1 -I inc\n"
+    mixed = ("# the stand-in manifest\n" + run_pass + "fail | tests/host/fail.cpp |\nnosum | tests/host/nosum.cpp |\n"
+             "nocomp | tests/host/nocomp.cpp |\n!gone | windows header: src/x.h:3 windows.h\n")
+    code, text, rec = posix_run(repo, cxx, log, mixed)
+    check(code == 1, f"posix runner, mixed manifest: exit 1: {code}\n{text}")
+    check(line_for(text, "pass") == "pass: passed 3", f"posix runner: 'pass: passed 3': {line_for(text, 'pass')!r}\n{text}")
+    check(line_for(text, "fail") == "fail: FAILED (FAILED: 3 checks, 1 failures; exit 1)", f"posix runner: the FAILED line: {line_for(text, 'fail')!r}\n{text}")
+    check(line_for(text, "nosum") == "nosum: did not run (no summary line; exit 0)", f"posix runner: no summary line: {line_for(text, 'nosum')!r}\n{text}")
+    check(line_for(text, "nocomp") == "nocomp: did not run (compile failed; exit 1)", f"posix runner: a compile failure: {line_for(text, 'nocomp')!r}\n{text}")
+    check("left out: gone (windows header: src/x.h:3 windows.h)" in text.split("\n"), f"posix runner: the left-out line\n{text}")
+    check(last_line(text) == "posix host tests: 3 ran, 1 passed, 1 left out, manifest 4", f"posix runner: the last line: {last_line(text)!r}\n{text}")
+    after_fail = text.split(line_for(text, "fail") or "\0", 1)[-1].split("\n")
+    check("    | FAILED: 3 checks, 1 failures" in after_fail, f"posix runner: a failed test's output follows its line\n{text}")
+    after_nocomp = text.split(line_for(text, "nocomp") or "\0", 1)[-1].split("\n")
+    check("    | fixture.cpp:1:1: error: the fake compile failure" in after_nocomp, f"posix runner: the compiler's output follows a compile failure\n{text}")
+    compiles = [r for r in rec if r["what"] == "compile"]
+    programs = [r for r in rec if r["what"] == "program"]
+    first = compiles[0]["argv"] if compiles else []
+    check(first[:-1] == ["-std=c++23", "-O2", "-DX=1", "-I", "inc", "tests/host/pass_host_test.cpp", "src/extra.cpp", "-o"]
+          and os.path.basename(first[-1]) == "pass.bat",
+          f"posix runner: the compile line is -std=c++23 -O2, the flags, every source, -o <tmp>/<name><suffix>: {first}")
+    check(len(compiles) == 4 and [p["source"] for p in programs] == ["pass_host_test.cpp", "fail.cpp", "nosum.cpp"],
+          f"posix runner: four compiles, three programs started, in the manifest's order: {rec}")
+    check(bool(compiles) and all(same_folder(c["cwd"], repo) for c in compiles), f"posix runner: the compiler runs in the repo root: {[c['cwd'] for c in compiles]}")
+    check(bool(programs) and all(same_folder(p["cwd"], os.path.join(repo, "tests", "host")) for p in programs),
+          f"posix runner: a test program runs in tests/host: {[p['cwd'] for p in programs]}")
+    check(bool(programs) and all(p["stdin"] == "" for p in programs), f"posix runner: a test program gets no input: {[p['stdin'] for p in programs]}")
+    check(bool(first) and not os.path.exists(os.path.dirname(first[-1])), f"posix runner: the run's temporary folder is removed: {first[-1:]}")
+    # --only
+    code, text, rec = posix_run(repo, cxx, log, mixed, "--only", "pass")
+    check(code == 0 and line_for(text, "pass") == "pass: passed 3" and line_for(text, "fail") is None
+          and last_line(text) == "posix host tests: 1 ran, 1 passed, 1 left out, manifest 4" and len(rec) == 2
+          and "left out: gone (windows header: src/x.h:3 windows.h)" in text.split("\n"),
+          f"posix runner --only pass: exit 0, one test, the whole manifest's counts: exit {code}, {len(rec)} records\n{text}")
+    code, text, rec = posix_run(repo, cxx, log, mixed, "--only", "pass", "fail")
+    check(code == 1 and last_line(text) == "posix host tests: 2 ran, 1 passed, 1 left out, manifest 4",
+          f"posix runner --only pass fail: exit 1 (one named test failed): exit {code}\n{text}")
+    code, text, rec = posix_run(repo, cxx, log, mixed, "--only", "zz")
+    check(code == 1 and "zz" in text and rec == [], f"posix runner --only zz: refused, nothing compiled: exit {code}, {rec}\n{text}")
+    code, text, rec = posix_run(repo, cxx, log, mixed, "--only", "pass", "gone")
+    check(code == 1 and "gone" in text and rec == [], f"posix runner --only with a left-out name: refused, nothing compiled: exit {code}, {rec}\n{text}")
+    # the passing test alone, its manifest given with --manifest
+    code, text, rec = posix_run(repo, cxx, log, run_pass, where=os.path.join(root, "elsewhere", "m.txt"))
+    check(code == 0 and last_line(text) == "posix host tests: 1 ran, 1 passed, 0 left out, manifest 1",
+          f"posix runner, one passing test (--manifest): exit 0: exit {code}\n{text}")
+    # ran == manifest alone decides: one pass, one compile failure
+    code, text, rec = posix_run(repo, cxx, log, run_pass + "nocomp | tests/host/nocomp.cpp |\n")
+    check(code == 1 and last_line(text) == "posix host tests: 1 ran, 1 passed, 0 left out, manifest 2",
+          f"posix runner, a pass and a compile failure: exit 1, '1 ran, 1 passed': exit {code}\n{text}")
+    code, text, rec = posix_run(repo, cxx, log, "!gone | other: why\n")
+    check(code == 1 and last_line(text) == "posix host tests: 0 ran, 0 passed, 1 left out, manifest 0" and rec == [],
+          f"posix runner, a manifest with no run line: exit 1: exit {code}\n{text}")
+    # judged by the test's own summary shape and by the exit code; stderr counts
+    posix_source(repo, "tests/host/speakers.cpp", "tests/host/speakers.cpp", "print: all speakers checks passed")
+    posix_source(repo, "tests/host/x3.cpp", "tests/host/x3.cpp", passed, "exit: 3")
+    posix_source(repo, "tests/host/err.cpp", "tests/host/err.cpp", "eprint: PASSED: 5 checks, 0 failures")
+    code, text, rec = posix_run(repo, cxx, log, "speakers | tests/host/speakers.cpp |\nx3 | tests/host/x3.cpp |\nerr | tests/host/err.cpp |\n")
+    check(line_for(text, "speakers") == "speakers: passed", f"posix runner: a test with an older summary shape is judged by its own: {line_for(text, 'speakers')!r}\n{text}")
+    check(line_for(text, "x3") == "x3: FAILED (PASSED: 3 checks, 0 failures; exit 3)", f"posix runner: a PASSED line with exit 3 is FAILED: {line_for(text, 'x3')!r}\n{text}")
+    check(line_for(text, "err") == "err: passed 5", f"posix runner: a summary on stderr is read: {line_for(text, 'err')!r}\n{text}")
+    check(code == 1 and last_line(text) == "posix host tests: 3 ran, 2 passed, 0 left out, manifest 3", f"posix runner, exit 3: exit 1 and the counts: exit {code}\n{text}")
+    # {SDK}
+    env = {k: v for k, v in os.environ.items() if k.upper() != "REXSDK_DIR"}
+    sdk = os.path.join(root, "sdk dir")
+    os.makedirs(sdk)
+    posix_source(repo, "tests/host/sdk.cpp", ["-I", sdk + "/thirdparty", "tests/host/sdk.cpp"], passed)
+    one_sdk = "sdk | tests/host/sdk.cpp | -I {SDK}/thirdparty\n"
+    for what, e in (("unset", env), ("not a folder", dict(env, REXSDK_DIR=os.path.join(root, "no such folder")))):
+        code, text, rec = posix_run(repo, cxx, log, one_sdk, env=e)
+        check(code == 1 and (line_for(text, "sdk") or "").startswith("sdk: did not run (") and "REXSDK_DIR" in (line_for(text, "sdk") or "")
+              and last_line(text) == "posix host tests: 0 ran, 0 passed, 0 left out, manifest 1" and rec == [],
+              f"posix runner, {{SDK}} with REXSDK_DIR {what}: did not run, nothing compiled: exit {code}, {rec}\n{text}")
+    code, text, rec = posix_run(repo, cxx, log, one_sdk, env=dict(env, REXSDK_DIR=sdk))
+    got = rec[0]["argv"] if rec else []
+    check(got[2:4] == ["-I", sdk + "/thirdparty"], f"posix runner, {{SDK}}: the compiler gets REXSDK_DIR's folder in its place, as one word: {got}")
+    # a parser error: exit 1 and nothing compiled, with and without --only
+    bad = run_pass + "pass | tests/host/fail.cpp |\n"
+    for args in ((), ("--only", "pass")):
+        code, text, rec = posix_run(repo, cxx, log, bad, *args)
+        check(code == 1 and "line 2" in text and rec == [] and line_for(text, "pass") is None,
+              f"posix runner, a manifest error {args}: exit 1, the error printed, nothing compiled: exit {code}, {rec}\n{text}")
+    # the output tail is 40 lines
+    posix_source(repo, "tests/host/long.cpp", "tests/host/long.cpp", *[f"print: row {i:02d}" for i in range(1, 51)],
+                 "print: FAILED: 2 checks, 1 failures", "exit: 1")
+    code, text, rec = posix_run(repo, cxx, log, "long | tests/host/long.cpp |\n")
+    tail = [l for l in text.split("\n") if l.startswith("    | ")]
+    check(len(tail) == 40 and tail[0] == "    | row 12" and tail[-1] == "    | FAILED: 2 checks, 1 failures",
+          f"posix runner: the last 40 lines of a failed test's 51: {len(tail)}, {tail[:1]} .. {tail[-1:]}\n{text}")
+    # a program that hangs is stopped with its children, and did not run
+    posix_source(repo, "tests/host/hang.cpp", "tests/host/hang.cpp", passed, "sleep: 60")
+    t0 = time.time()
+    code, text, rec = posix_run(repo, cxx, log, "hang | tests/host/hang.cpp |\n", "--timeout", "2")
+    took = time.time() - t0
+    check(code == 1 and line_for(text, "hang") == "hang: did not run (timed out after 2 s)"
+          and last_line(text) == "posix host tests: 0 ran, 0 passed, 0 left out, manifest 1",
+          f"posix runner, a hung program: did not run, '0 ran', exit 1: exit {code}\n{text}")
+    check(took < 40, f"posix runner, a hung program: stopped at the limit, not after its sleep ({took:.0f} s)")
+    pids = [r["pid"] for r in rec if r["what"] == "program"]
+    gone = False
+    for _ in range(20):
+        gone = bool(pids) and not any(pid_alive(p) for p in pids)
+        if gone or not pids:
+            break
+        time.sleep(0.5)
+    check(gone, f"posix runner, a hung program: its process (a child of the started .bat) is gone afterwards: pids {pids}")
+    # a compiler that hangs is stopped the same way, and the test did not run
+    posix_source(repo, "tests/host/slowcc.cpp", "tests/host/slowcc.cpp", "compile: sleep", passed)
+    t0 = time.time()
+    code, text, rec = posix_run(repo, cxx, log, "slowcc | tests/host/slowcc.cpp |\n", "--compile-timeout", "2")
+    took = time.time() - t0
+    check(code == 1 and line_for(text, "slowcc") == "slowcc: did not run (compile timed out after 2 s)"
+          and last_line(text) == "posix host tests: 0 ran, 0 passed, 0 left out, manifest 1" and took < 40
+          and not [r for r in rec if r["what"] == "program"],
+          f"posix runner, a hung compiler: did not run, '0 ran', exit 1, stopped at the limit ({took:.0f} s): exit {code}\n{text}")
+    pids = [r["pid"] for r in rec if r["what"] == "compile"]
+    gone = False
+    for _ in range(20):
+        gone = bool(pids) and not any(pid_alive(p) for p in pids)
+        if gone or not pids:
+            break
+        time.sleep(0.5)
+    check(gone, f"posix runner, a hung compiler: its process (a child of the compiler's .bat) is gone afterwards: pids {pids}")
+    code, text, rec = posix_run(repo, cxx, log, "slowcc | tests/host/slowcc.cpp |\n" + run_pass, "--only", "pass", "--compile-timeout", "30")
+    check(code == 0 and line_for(text, "pass") == "pass: passed 3", f"posix runner, a compile within its limit is judged as before: exit {code}\n{text}")
+    # a compiler that exits 0 and writes no program did not compile the test
+    posix_source(repo, "tests/host/noprog.cpp", "tests/host/noprog.cpp", "compile: no program", passed)
+    code, text, rec = posix_run(repo, cxx, log, "noprog | tests/host/noprog.cpp |\n")
+    check(code == 1 and line_for(text, "noprog") == "noprog: did not run (compile failed; exit 0)"
+          and last_line(text) == "posix host tests: 0 ran, 0 passed, 0 left out, manifest 1",
+          f"posix runner, a compile that says 0 and writes no program: did not run, '0 ran': exit {code}\n{text}")
+    check(load("run_host_tests_posix").DEFAULT_COMPILE_TIMEOUT == 1800, "posix runner: the default compile timeout is 1800 s")
+    check(load("run_host_tests_posix").DEFAULT_TIMEOUT == 600 and load("run_host_tests_posix").TAIL == 40,
+          "posix runner: the default timeout is 600 s and the tail 40 lines")
+    check(not os.path.exists(os.path.join(TOOLS, "__pycache__")), "posix runner: running and loading it leaves no tools/__pycache__")
+
+
+def test_posix_check_names(root):
+    # --check-names: the manifest's names against the run_<name>_test.bat files of tests/host; nothing is compiled
+    repo, cxx, log = posix_setup(root)
+    host = os.path.join(repo, "tests", "host")
+    path = os.path.join(host, "posix_manifest.txt")
+    posix_source(repo, "src/a.cpp", "src/a.cpp", "print: PASSED: 1 checks, 0 failures")
+    three = "# the stand-in manifest\na | src/a.cpp |\nb | src/a.cpp | -DX=1\n!c | other: a reason\n"
+
+    def runners(*files):
+        for f in os.listdir(host):
+            if f != "posix_manifest.txt":
+                os.remove(os.path.join(host, f))
+        for f in files:
+            write(os.path.join(host, f), b"@echo off\r\n")
+
+    def names_run(manifest, *args):
+        code, text, rec = posix_run(repo, cxx, log, manifest, "--check-names", *args)
+        return code, text.rstrip("\n").split("\n"), rec
+
+    def no_line(name):
+        return f"run_host_tests_posix: run_{name}_test.bat is on no line of {path}"
+
+    def no_runner(name):
+        return f"run_host_tests_posix: {path} names {name}, and tests/host has no run_{name}_test.bat"
+
+    def last(m, r, equal):
+        return f"posix manifest names: {m} lines, {r} runners, {'equal' if equal else 'NOT equal'}"
+
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 0 and lines == [last(3, 3, True)] and rec == [],
+          f"check-names, 2 run lines + 1 left-out line and their 3 runners: exit 0, the one line, no compile: {code}, {lines}, {rec}")
+    # the recorder's control: the same folder without the option does compile, and prints no names line
+    code, text, rec = posix_run(repo, cxx, log, three, "--only", "a")
+    check(code == 0 and [r["what"] for r in rec] == ["compile", "program"] and "posix manifest names:" not in text,
+          f"check-names control: without the option the fake compiler is called and no names line is printed: {code}, {rec}\n{text}")
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", "run_d_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [no_line("d"), last(3, 4, False)] and rec == [],
+          f"check-names, a runner on no line: exit 1, its line, NOT equal: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_c_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [no_runner("b"), last(3, 2, False)] and rec == [],
+          f"check-names, a run line with no runner: exit 1, its line, NOT equal: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_b_test.bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [no_runner("c"), last(3, 2, False)] and rec == [],
+          f"check-names, a left-out line with no runner: exit 1, its line, NOT equal: {code}, {lines}, {rec}")
+    # both at once, with as many lines as runners: runner lines first, each list sorted by name
+    runners("run_e_test.bat", "run_a_test.bat", "run_d_test.bat", "run_b_test.bat")
+    code, lines, rec = names_run(three + "z | src/a.cpp |\n")
+    check(code == 1 and lines == [no_line("d"), no_line("e"), no_runner("c"), no_runner("z"), last(4, 4, False)] and rec == [],
+          f"check-names, 4 lines and 4 runners that differ: exit 1, runner lines then manifest lines, sorted: {code}, {lines}, {rec}")
+    runners()
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [f"run_host_tests_posix: no run_<name>_test.bat in {host}"] and rec == [],
+          f"check-names, no runner in the folder: exit 1 and the one line, never 'equal': {code}, {lines}, {rec}")
+    # names that are not a runner's: a longer name, no middle part, a prefix
+    others = ("run_x_test.bat.bak", "run_test.bat", "xrun_a_test.bat")
+    runners(*others)
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [f"run_host_tests_posix: no run_<name>_test.bat in {host}"] and rec == [],
+          f"check-names, only files that are not runners: exit 1 and the no-runner line: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", *others)
+    code, lines, rec = names_run(three)
+    check(code == 0 and lines == [last(3, 3, True)] and rec == [],
+          f"check-names, {others} beside the 3 runners do not count: exit 0, the one line: {code}, {lines}, {rec}")
+    code, lines, rec = names_run("a | src/a.cpp\nb | src/a.cpp |\n!c | other: a reason\n")
+    check(code == 1 and lines == [f"run_host_tests_posix: {path}: line 1: a run line is '<name> | <sources> | <flags>' (both | are there): 'a | src/a.cpp'"]
+          and rec == [],
+          f"check-names, a manifest error: exit 1, the parser's line and no names line: {code}, {lines}, {rec}")
+    code, lines, rec = names_run(three, "--only", "a")
+    check(code == 1 and lines == ["run_host_tests_posix: --check-names takes no --only"] and rec == [],
+          f"check-names with --only: refused with one line, exit 1, no compile: {code}, {lines}, {rec}")
+    # letter case: the fixed parts of a runner's file name match in any case, as in tools/run_host_tests.py; the name in
+    # the middle keeps the file's spelling and equals a manifest name only letter for letter
+    four = three + "d | src/a.cpp |\n"
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", "Run_d_TEST.Bat")
+    code, lines, rec = names_run(three)
+    check(code == 1 and lines == [f"run_host_tests_posix: Run_d_TEST.Bat is on no line of {path}", last(3, 4, False)] and rec == [],
+          f"check-names, Run_d_TEST.Bat on no line: exit 1, a line with the file's own name, NOT equal: {code}, {lines}, {rec}")
+    code, lines, rec = names_run(four)
+    check(code == 0 and lines == [last(4, 4, True)] and rec == [],
+          f"check-names, Run_d_TEST.Bat and a line d: the name is d, exit 0, equal: {code}, {lines}, {rec}")
+    runners("run_a_test.bat", "run_b_test.bat", "run_c_test.bat", "run_D_test.bat")
+    code, lines, rec = names_run(four)
+    check(code == 1 and lines == [f"run_host_tests_posix: run_D_test.bat is on no line of {path}", no_runner("d"), last(4, 4, False)] and rec == [],
+          f"check-names, run_D_test.bat and a line d: two lines, NOT equal: {code}, {lines}, {rec}")
+    # a repository with no tests/host folder (the manifest given from elsewhere) has no runner: refused, never exit 0
+    bare = os.path.join(root, "bare repo")
+    os.makedirs(bare)
+    code, text = run(RUN_POSIX, "--check-names", "--repo", bare, "--manifest", path)
+    check(code == 1 and text == f"run_host_tests_posix: no run_<name>_test.bat in {os.path.join(bare, 'tests', 'host')}\n",
+          f"check-names, no tests/host folder: exit 1, the no-runner line and no names line: {code}\n{text}")
+    # the real tree: the numbers are this suite's own counts of the real runners and of the real manifest's lines
+    rp, text, runs, left, errors = real_manifest()
+    bats = [f for f in os.listdir(HOST) if re.fullmatch(r"run_\w+_test\.bat", f)]
+    code, text = run(RUN_POSIX, "--check-names")
+    check(len(bats) >= 30 and code == 0 and text == last(len(runs) + len(left), len(bats), True) + "\n",
+          f"check-names on the real tree: exit 0 and '{last(len(runs) + len(left), len(bats), True)}' alone: {code}\n{text}")
+
+
+def workflow_steps(text):
+    """The steps of a workflow text (each '      - ' item after a '    steps:' line), as texts."""
+    m = re.search(r"(?m)^    steps:\n", text)
+    return [s for s in re.split(r"(?m)^      - ", text[m.end():]) if s.strip()] if m else []
+
+
+def upload_paths(step):
+    """The path entries of one step: the lines under 'path: |', or the single value; None when it has no path key."""
+    lines = step.split("\n")
+    for i, l in enumerate(lines):
+        m = re.match(r"(\s*)path:\s*(.*)$", l)
+        if not m:
+            continue
+        if m.group(2).strip() not in ("|", "|-", "|+", ">", ">-"):
+            return [m.group(2).strip().strip("'\"")]
+        out = []
+        for k in lines[i + 1:]:
+            if k.strip() and len(k) - len(k.lstrip()) <= len(m.group(1)):
+                break
+            if k.strip():
+                out.append(k.strip())
+        return out
+    return None
+
+
+def upload_path_problems(text):
+    """What is wrong with the upload steps of a workflow text: each actions/upload-artifact step must name its files,
+    every one a .log file by its exact path (no folder, no *, nothing of the build's output or programs)."""
+    problems = []
+    for step in workflow_steps(text):
+        if "actions/upload-artifact" not in step:
+            continue
+        paths = upload_paths(step)
+        if not paths:
+            problems.append("an upload step names no path")
+            continue
+        for p in paths:
+            if not p.endswith(".log"):
+                problems.append(f"{p}: not a .log file")
+            elif "*" in p or "out/" in p or "bin" in p or p.endswith("/.log"):
+                problems.append(f"{p}: a pattern or a build output path")
+    return problems
+
+
+def workflow_fixture(*paths):
+    block = "path: " + paths[0] if len(paths) == 1 else "path: |\n" + "\n".join("            " + p for p in paths)
+    return ("name: x\njobs:\n  linux:\n    steps:\n      - uses: actions/checkout@v5\n        with: { path: doa4-recomp }\n"
+            "      - name: Upload logs\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n"
+            "          name: logs\n          " + block + "\n")
+
+
+def test_linux_workflow(root):
+    raw = read(LINUX_WORKFLOW) if os.path.isfile(LINUX_WORKFLOW) else b""
+    t = raw.decode("utf-8")
+    steps = workflow_steps(t)
+    check(len(steps) >= 6, f"linux workflow: the file is there and its steps are found: {len(steps)}")
+    check(b"\r" not in raw and b"\t" not in raw and bool(raw), "linux workflow: no CR byte and no tab")
+    on = re.search(r"(?ms)^on:\n(.*?)^(?=\S)", t)
+    on = on.group(1) if on else ""
+    check(re.search(r"(?m)^  push:\n    branches: \[main, linux-native\]$", on) is not None and re.search(r"(?m)^  workflow_dispatch:", on) is not None,
+          f"linux workflow: runs on a push to main and linux-native and on workflow_dispatch: {on!r}")
+    check(bool(t) and re.search(r"(?m)^\s*(paths|paths-ignore|tags|tags-ignore)\s*:", t) is None, "linux workflow: no paths: key and no tags: key")
+    check(re.search(r"(?m)^permissions:\n  contents: read\n(?=\S)", t) is not None, "linux workflow: permissions is contents: read and nothing else")
+    check(bool(t) and re.search(r":\s*write\b", t) is None, "linux workflow: no line gives a write permission")
+    check(re.findall(r"(?m)^\s*runs-on:\s*(.*)$", t) == ["ubuntu-24.04"], f"linux workflow: runs-on ubuntu-24.04: {re.findall(r'(?m)^ *runs-on:.*$', t)}")
+    check(re.search(r"(?m)^    timeout-minutes: \d+\s*(#.*)?$", t) is not None, "linux workflow: the job has a timeout-minutes")
+    group = re.search(r"(?m)^concurrency:\n(?:  .*\n)*?  group:\s*(\S.*)$", t)
+    check(group is not None and "netplay-release" not in group.group(1),
+          f"linux workflow: a concurrency group of its own (never the release's): {group.group(1) if group else None!r}")
+    checkouts = [s for s in steps if "actions/checkout@" in s]
+    check(len(checkouts) == 1 and "actions/checkout@v5" in checkouts[0] and re.search(r"persist-credentials:\s*false\b", checkouts[0]) is not None,
+          f"linux workflow: one checkout (v5) with persist-credentials: false: {checkouts}")
+    # the "Manifest names" step calls the same runner and has its own checks below
+    named = [s for s in steps if s.split("\n")[0].strip() == "name: Manifest names"]
+    tests = [s for s in steps if "run_host_tests_posix.py" in s and s not in named]
+    calls = [l.strip() for s in tests for l in s.split("\n") if "run_host_tests_posix.py" in l and not l.strip().startswith("#")]
+    call = calls[0] if len(calls) == 1 else ""
+    check(len(tests) == 1 and "python3 -I tools/run_host_tests_posix.py --cxx clang++-23" in call
+          and not any(o in call for o in ("--exe-suffix", "--only", "--manifest", "--repo", "--compile-timeout", "--timeout")),
+          f"linux workflow: one step calls 'python3 -I tools/run_host_tests_posix.py --cxx clang++-23' and no test-only option: {calls}")
+    check(re.search(r"(?<!\w)DOA4_CI=1(?!\w)", call) is not None or (bool(tests) and re.search(r"(?m)^\s*DOA4_CI:\s*['\"]?1['\"]?\s*$", tests[0]) is not None),
+          f"linux workflow: DOA4_CI is 1 for the test step: {call!r}")
+    check("| tee host_tests.log" in call and bool(tests) and "set -o pipefail" in tests[0].split(call)[0],
+          f"linux workflow: the test step's result survives the tee (set -o pipefail before it): {call!r}")
+    name_calls = [l.strip() for s in named for l in s.split("\n") if "run_host_tests_posix.py" in l and not l.strip().startswith("#")]
+    check(len(named) == 1 and name_calls == ["run: python3 -I tools/run_host_tests_posix.py --check-names"]
+          and re.search(r"(?m)^        working-directory: doa4-recomp$", named[0]) is not None
+          and not any(w in named[0] for w in ("REXSDK_DIR", "tee ", "--cxx", "pipefail")),
+          f"linux workflow: one step 'Manifest names' in doa4-recomp whose run line is "
+          f"'python3 -I tools/run_host_tests_posix.py --check-names' and nothing more: {name_calls}, {named}")
+    check(len(named) == 1 and "continue-on-error" not in named[0] and re.search(r"(?m)^\s*if:", named[0]) is None,
+          f"linux workflow: the 'Manifest names' step can fail the job: no continue-on-error and no if: key: {named}")
+    order = ["checkout" if "actions/checkout@" in s else "names" if s in named else "other" for s in steps]
+    check(order[:2] == ["checkout", "names"] and "checkout" not in order[1:] and "names" not in order[2:],
+          f"linux workflow: 'Manifest names' is the step after the checkout and before every other step: {order}")
+    check(len([s for s in steps if "run_host_tests_posix.py" in s]) == 2 and bool(call) and "--check-names" not in call,
+          f"linux workflow: two steps call the runner, and the host tests' call has no --check-names: {call!r}")
+    builds = [s for s in steps if "cmake --build --preset linux-amd64-release" in s]
+    conf = [l.strip() for s in steps for l in s.split("\n") if "cmake --preset linux-amd64-release" in l and not l.strip().startswith("#")]
+    check(len(conf) == 1 and "-DCMAKE_C_COMPILER=clang-23" in conf[0].split() and "-DCMAKE_CXX_COMPILER=clang++-23" in conf[0].split(),
+          f"linux workflow: cmake --preset linux-amd64-release with clang-23 and clang++-23: {conf}")
+    check(len(builds) == 1 and "| tee build.log" in builds[0] and "set -o pipefail" in builds[0].split("| tee build.log")[0],
+          "linux workflow: one build step, its output to build.log with set -o pipefail before it")
+    check(any("objects built:" in s for s in steps), "linux workflow: a step prints 'objects built:'")
+    check(len(conf) == 1 and '"-DCMAKE_C_FLAGS=-march=x86-64-v2"' in conf[0].split() and '"-DCMAKE_CXX_FLAGS=-march=x86-64-v2"' in conf[0].split(),
+          f"linux workflow: the configure passes -march=x86-64-v2 for C and C++, as every other build of this code: {conf}")
+    check(len(conf) == 1 and any(w.startswith("-DREXSDK_DIR=") and len(w) > len("-DREXSDK_DIR=") for w in conf[0].split()),
+          f"linux workflow: the configure names the SDK folder with -DREXSDK_DIR=: {conf}")
+    counts = [s for s in steps if "objects built:" in s]
+    check(len(counts) == 1 and re.search(r'(?m)^\s*if \[ "\$n" -eq 0 \]; then exit 1; fi$', counts[0]) is not None
+          and re.search(r"(?m)^\s*n=\$\(find out/build/linux-amd64-release -name '\*\.o' \| wc -l\)$", counts[0]) is not None,
+          "linux workflow: the object count step counts the build's .o files and fails on zero")
+    pins = [s for s in steps if "netplay_sdk.txt" in s]
+    check(len(pins) == 1 and re.search(r'(?m)^\s*if \[ -z "\$repo" \] \|\| \[ -z "\$commit" \]; then .*exit 1; fi$', pins[0]) is not None
+          and pins[0].index("exit 1; fi") < pins[0].index("git clone"),
+          "linux workflow: the SDK step stops on an empty repo or commit before it clones")
+    installs = [l.strip() for s in steps for l in s.split("\n") if l.strip().startswith("sudo apt-get install ")]
+    check(any("libstdc++-14-dev" in l.split() for l in installs), f"linux workflow: libstdc++-14-dev is installed (std::print): {installs}")
+    uploads = [s for s in steps if "actions/upload-artifact" in s]
+    check(len(uploads) == 1 and re.search(r"(?m)^\s*if:\s*always\(\)\s*$", uploads[0]) is not None and upload_path_problems(t) == [],
+          f"linux workflow: one upload step, if: always(), .log files by exact path only: {upload_path_problems(t)}, {uploads}")
+    check(bool(t) and not any(w in t for w in ("gh release", "upload-release", "contents: write")), "linux workflow: nothing publishes a release")
+    # the upload rule, on stand-in workflow texts
+    good = workflow_fixture("doa4-recomp/build.log", "doa4-recomp/host_tests.log")
+    check(len(workflow_steps(good)) == 2 and upload_path_problems(good) == [], f"upload rule: two .log files by exact path pass: {upload_path_problems(good)}")
+    check(upload_path_problems(workflow_fixture("doa4-recomp/build.log")) == [], "upload rule: a single .log value passes")
+    for what, paths in (("the build folder", ["out/build/linux-amd64-release/**"]), ("a program beside *.log", ["*.log", "dead_or_alive_4"]),
+                        ("a folder alone", ["doa4-recomp"]), ("a folder with a slash", ["doa4-recomp/"]),
+                        ("a .log pattern", ["doa4-recomp/*.log"]), ("a log under the build folder", ["doa4-recomp/out/build/x.log"]),
+                        ("a log under a bin folder", ["doa4-recomp/bin/x.log"])):
+        check(upload_path_problems(workflow_fixture(*paths)) != [], f"upload rule: {what} is refused: {paths}")
+    check(upload_path_problems(good.replace("          path: |\n            doa4-recomp/build.log\n            doa4-recomp/host_tests.log\n", "")) != [],
+          "upload rule: an upload step with no path is refused")
+    # the release workflow is still the one the older checks read, and the runner's manifest is the committed one
+    check(os.path.basename(WORKFLOW) == "netplay-release.yml" and os.path.isfile(WORKFLOW) and "netplay-release" in workflow_text()
+          and os.path.normcase(WORKFLOW) != os.path.normcase(LINUX_WORKFLOW), "WORKFLOW still names netplay-release.yml")
+    rp = load("run_host_tests_posix")
+    check(rp.MANIFEST == "tests/host/posix_manifest.txt" and same_folder(os.path.join(REPO, rp.MANIFEST), POSIX_MANIFEST),
+          f"posix runner: its default manifest is tests/host/posix_manifest.txt: {rp.MANIFEST!r}")
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for name, fn in tests:

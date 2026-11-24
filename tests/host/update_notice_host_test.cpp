@@ -6,7 +6,11 @@
 // Expected versions follow np::rules::CompareVersions (numbers, not text): 0.3.10 is newer than 0.3.9, which a text
 // comparison gets wrong, so those pairs are in every rule that compares.
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <atomic>
 #include <cstdio>
@@ -213,6 +217,7 @@ static void TestMemoryFile() {
   CHECK(!un::WriteMemory(d, "alpha-v0.3.5").empty());
   CHECK_EQ(Bytes(file), "alpha-v0.3.2<0A>");
   fs::remove(tmp);
+#if defined(_WIN32)
   // the rename cannot replace (the memory is held open without delete sharing): an error, the old bytes kept, no .tmp
   {
     HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -225,6 +230,17 @@ static void TestMemoryFile() {
   }
   CHECK_EQ(Bytes(file), "alpha-v0.3.2<0A>");
   CHECK(!Exists(tmp));
+#else
+  // an open file never blocks a POSIX rename; a folder in the memory's place does: the rename and the delete both fail
+  // with an error, and no .tmp is left
+  fs::remove(file);
+  fs::create_directories(file / "inside");
+  CHECK(!un::WriteMemory(d, "alpha-v0.3.6").empty());
+  CHECK(!un::WriteMemory(d, "").empty());  // a delete that fails is said too
+  CHECK(!Exists(tmp));
+  CHECK(fs::is_directory(file / "inside"));
+  fs::remove_all(file);
+#endif
 }
 
 // ---- arrivals ----
@@ -506,9 +522,13 @@ static void TestTitleWatch() {
 
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+#if defined(_WIN32)
   wchar_t tmp[MAX_PATH];
   GetTempPathW(MAX_PATH, tmp);
   g_root = fs::path(tmp) / ("doa4_update_notice_" + std::to_string(GetCurrentProcessId()));
+#else
+  g_root = fs::temp_directory_path() / ("doa4_update_notice_" + std::to_string(getpid()));
+#endif
   std::error_code ec;
   fs::remove_all(g_root, ec);
   fs::create_directories(g_root, ec);

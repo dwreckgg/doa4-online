@@ -32,7 +32,9 @@
 
 #include <xmmintrin.h>
 
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/graphics/graphics_system.h>
 #include <rex/hash.h>
 #include <rex/hook.h>
@@ -68,11 +70,18 @@
 #include "np_selftest.h"
 #include "np_transport.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <poll.h>
+#include <time.h>
+
+#include "np_posix.h"
+#endif
 
 #ifdef DOA4_PGO_DUMP
 extern "C" int __llvm_profile_dump(void);  // the clang profile runtime (docs/PGO.md, instrumented build only)
@@ -95,7 +104,7 @@ REX_EXTERN(__imp__sub_824F4498);
 REX_EXTERN(__imp__sub_82792040);
 REX_EXTERN(__imp__sub_82792038);
 // SDK netplay diagnostics export (sdk-np1 src/audio/sdl/sdl_audio_driver.cpp)
-__declspec(dllimport) void rex_audio_out_stats(uint64_t* silence_fills, uint32_t* queue_depth);
+REX_DLL_IMPORT void rex_audio_out_stats(uint64_t* silence_fills, uint32_t* queue_depth);
 }
 
 namespace doa4::np {
@@ -227,7 +236,9 @@ struct State {
   double unix_offset_ms = 0;  // unix ms = Now() / 1000 + offset
   uint64_t hold_begin_us = 0;
   std::atomic<bool> banner_shown{false};  // read by the UI thread (BannerWaiting)
+#if defined(_WIN32)
   HANDLE timer = nullptr;      // a high-resolution waitable timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), game thread
+#endif
   std::mutex result_mu;
   live::FrameResult last_result;
   bool result_by_abort = false;  // under result_mu: last_result is an end np::Abort made (its `why` is Abort's reason)
@@ -336,7 +347,10 @@ bool ReadFile(const std::filesystem::path& path, std::string* out) {
 }
 
 // A harness file read with FILE_SHARE_DELETE (carry 2j: a reader that holds a file open without it makes the
-// writer's rename-over fail on Windows).
+// writer's rename-over fail on Windows). A POSIX rename-over never fails on an open reader.
+#if !defined(_WIN32)
+bool ReadShared(const std::filesystem::path& path, std::string* out) { return ReadFile(path, out); }
+#else
 bool ReadShared(const std::filesystem::path& path, std::string* out) {
   HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -349,14 +363,21 @@ bool ReadShared(const std::filesystem::path& path, std::string* out) {
   CloseHandle(h);
   return ok;
 }
+#endif
 
 // The exe and the runtime DLL beside it (XXH3), computed once: 0 when either cannot be read.
 uint64_t ComputeBuildId(std::string* unreadable) {
+#if defined(_WIN32)
   std::wstring path(32768, L'\0');
   const DWORD n = GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()));
   const std::filesystem::path exe(path.substr(0, n));
+  const std::filesystem::path runtime = exe.parent_path() / "rexruntime.dll";
+#else
+  const std::filesystem::path exe = rex::filesystem::GetExecutablePath();
+  const std::filesystem::path runtime = exe.parent_path() / "librexruntime.so";
+#endif
   uint64_t h = 0;
-  for (const std::filesystem::path& p : {exe, exe.parent_path() / "rexruntime.dll"}) {
+  for (const std::filesystem::path& p : {exe, runtime}) {
     std::string bytes;
     if (!ReadFile(p, &bytes) || bytes.empty()) {
       *unreadable = p.string();
@@ -435,9 +456,7 @@ bool Take(const char* name, std::string* text) {
 }
 
 double Now(State& s) {
-  LARGE_INTEGER t;
-  QueryPerformanceCounter(&t);
-  return double(t.QuadPart) * s.qpc_us;
+  return double(rex::chrono::Clock::host_tick_count_platform()) * s.qpc_us;  // QueryPerformanceCounter on Windows
 }
 
 int64_t SteadyMs() {
@@ -736,7 +755,7 @@ void OpenFieldLog(State& s, const std::string& text) {
   s.field_ranges = ParseFieldRanges(text, &error);
   if (!error.empty()) Log("DOA4_NP_TEST_FIELDS: " + error);
   if (s.field_ranges.empty()) return;
-  s.fields = _wfopen((s.dir / "fields.d4f").wstring().c_str(), L"wb");
+  s.fields = rex::filesystem::OpenFile(s.dir / "fields.d4f", "wb");
   if (!s.fields) {
     Log("DOA4_NP_TEST_FIELDS: fields.d4f cannot be opened");
     return;
@@ -1057,12 +1076,14 @@ bool CreateLive(State& s) {
     Log("WARN session: no transport at the first frame (the session lobby did not start)");
     return false;
   }
+#if defined(_WIN32)
   s.timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
   if (!s.timer) {
     Log("high-resolution waitable timer unavailable (Windows error " + std::to_string(GetLastError()) +
         "); a plain waitable timer is used");
     s.timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
   }
+#endif
   s.gk = std::make_unique<gekko::Session>();
   s.ex = std::make_unique<exec::Executor>(2, [](int32_t, const FrameInput& input) {
     State& st = S();
@@ -1113,9 +1134,10 @@ bool CreateLive(State& s) {
     Log("WARN session: GekkoNet session could not be created");
     return false;
   }
-  HANDLE arrived = t->gekko_arrived();
   live::Clock clock;
   clock.now_us = [] { return uint64_t(Now(S())); };
+#if defined(_WIN32)
+  HANDLE arrived = t->gekko_arrived();
   clock.wait_packet = [arrived](uint32_t max_ms) {
     State& st = S();
     LARGE_INTEGER due;
@@ -1136,6 +1158,19 @@ bool CreateLive(State& s) {
     SetWaitableTimer(st.timer, &due, 0, nullptr, nullptr, FALSE);
     WaitForSingleObject(st.timer, us / 1000 + 100);
   };
+#else
+  // Linux sleeps and poll timeouts run on high-resolution timers, so no timer object is needed.
+  const int arrived = t->gekko_arrived();
+  clock.wait_packet = [arrived](uint32_t max_ms) {
+    const timespec timeout{time_t(max_ms / 1000), long(max_ms % 1000) * 1000000};
+    pollfd w{arrived, POLLIN, 0};
+    if (ppoll(&w, 1, &timeout, nullptr) > 0) posix::Consume(arrived);  // auto-reset, as the Windows wait
+  };
+  clock.sleep_precise = [](uint32_t us) {
+    const timespec duration{time_t(us / 1000000), long(us % 1000000) * 1000};
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &duration, nullptr);
+  };
+#endif
   live::Hooks hooks;
   hooks.on_event = OnLiveEvent;
   s.live = std::make_unique<live::Session>(s.gk.get(), s.ex.get(), clock, live::Limits{}, hooks);
@@ -1646,12 +1681,12 @@ void OpenHashFiles(State& s) {
     s.regions.push_back({"stage_fx", 0x82EDA260, 0x4A0, {}});
     s.regions.push_back({"ctr_831A7AC0", 0x831A7AC0, 0x20, {}});
   }
-  s.digest = _wfopen((s.dir / "digest.d4d").wstring().c_str(), L"wb");
+  s.digest = rex::filesystem::OpenFile(s.dir / "digest.d4d", "wb");
   if (s.digest) {
     const std::string head = EncodeDigestHeader(s.regions);
     std::fwrite(head.data(), 1, head.size(), s.digest);
   }
-  s.sweep = _wfopen((s.dir / "sweep.d4s").wstring().c_str(), L"wb");
+  s.sweep = rex::filesystem::OpenFile(s.dir / "sweep.d4s", "wb");
   if (s.sweep) {
     const std::string head = EncodeSweepHeader(kDataLo, kDataHi, kBlock, s.sweep_per_frame);
     std::fwrite(head.data(), 1, head.size(), s.sweep);
@@ -1670,7 +1705,7 @@ void OpenHashFiles(State& s) {
         "after a \"REX\\0\" header signature) hashed as zero");
     s.stash_logged.assign(nblocks, 0);
   }
-  s.counters = _wfopen((s.dir / "counters.d4k").wstring().c_str(), L"wb");
+  s.counters = rex::filesystem::OpenFile(s.dir / "counters.d4k", "wb");
   if (s.counters) {
     const std::string head = EncodeCountersHeader(det::CounterNames());
     std::fwrite(head.data(), 1, head.size(), s.counters);
@@ -1680,10 +1715,8 @@ void OpenHashFiles(State& s) {
 
 // Opens np_log.txt (with the lines EarlyLog kept) and the QPC scale.
 void OpenLog(State& s) {
-  s.log = _wfopen((s.dir / "np_log.txt").wstring().c_str(), L"w");
-  LARGE_INTEGER freq;
-  QueryPerformanceFrequency(&freq);
-  s.qpc_us = 1e6 / double(freq.QuadPart);
+  s.log = rex::filesystem::OpenFile(s.dir / "np_log.txt", "w");
+  s.qpc_us = 1e6 / double(rex::chrono::Clock::host_tick_frequency_platform());  // QueryPerformanceFrequency on Windows
   std::vector<std::string> early;
   {
     std::lock_guard lk(g_early_mu);
@@ -1724,7 +1757,7 @@ void StartOnline(Host host) {
   Log(std::string("session: ") + (s.slot == 0 ? "host" : "joiner") + ", delay " + std::to_string(s.ho.delay) +
       ", token " + tok + ", peer " + rules::EndpointText(s.ho.peer) + ", seed " + std::to_string(s.seed) + ", swimsuits " +
       rules::SuitSessionName(s.ho.suit_state) + ", holders " + std::to_string(unsigned(s.ho.suit_holders)));
-  s.events = _wfopen((s.dir / "events.txt").wstring().c_str(), L"a");
+  s.events = rex::filesystem::OpenFile(s.dir / "events.txt", "a");
   ReadSweepSetting(s, TestDirEnv("DOA4_NP_SWEEP"));
   if (!SweepOn(s.ho.suit_state)) s.sweep_per_frame = 0;  // whatever a test switch asked: both peers fold the same empty row
   s.unlock = true;
@@ -1745,7 +1778,7 @@ void StartOnline(Host host) {
   det::SetWorkerInputs(true, s.ho.worker_order == 1, false, std::string());
   const std::string meta = CurrentMeta(s.host.game_data_root, s.sweep_per_frame, extra);
   s.workers_mode = det::WorkersMode();  // decided by CurrentMeta's workers= line: latched once, mixed into every checksum (P20)
-  s.rec = _wfopen((s.dir / "rec.d4r").wstring().c_str(), L"wb");
+  s.rec = rex::filesystem::OpenFile(s.dir / "rec.d4r", "wb");
   const std::string head = EncodeRecHeader(s.seed, 0, meta);
   if (s.rec) std::fwrite(head.data(), 1, head.size(), s.rec);
   if (const std::string path = TestDirEnv("DOA4_NP_LOCAL_SCRIPT"); !path.empty()) {
@@ -2111,7 +2144,7 @@ void Start(Host host) {
     if (const std::string seed = Env("DOA4_NP_SEED"); !seed.empty()) {
       s.seed = std::strtoull(seed.c_str(), nullptr, 0);
     }
-    s.rec = _wfopen((s.dir / "rec.d4r").wstring().c_str(), L"wb");
+    s.rec = rex::filesystem::OpenFile(s.dir / "rec.d4r", "wb");
     const std::string head = EncodeRecHeader(s.seed, 0, meta);
     if (s.rec) std::fwrite(head.data(), 1, head.size(), s.rec);
     if (const std::string path = Env("DOA4_NP_SCRIPT"); !path.empty()) {

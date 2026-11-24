@@ -289,6 +289,97 @@ software is freely granted, provided that this notice
 is preserved.
 ```
 
+### discord-rpc (MIT): the socket lookup, an acknowledgement, no file copied
+
+Outside Windows, `src/doa4_discord.cpp` looks for Discord's IPC socket the way Discord's own discord-rpc does
+(its `src/connection_unix.cpp`): the first of `$XDG_RUNTIME_DIR`, `$TMPDIR`, `$TMP`, `$TEMP` that is set, else `/tmp`,
+and the names `discord-ipc-0` to `discord-ipc-9`. The lookup order was followed; no discord-rpc file was copied.
+discord-rpc: https://github.com/discord/discord-rpc, Discord, Inc., MIT.
+
+## Code the Linux build compiles from the SDK's `thirdparty/` folder
+
+Only a build for Linux (or another system that is not Windows) compiles these; the Windows build does not.
+
+### picosha2 (MIT)
+
+Copyright (C) 2017 okdshin. Header-only SHA-256, compiled into the Linux build's updater (`src/doa4_updater.cpp`) from
+the ReXGlue SDK's `thirdparty/picosha2/picosha2.h`. The licence text at the top of that header, reproduced here:
+
+```
+The MIT License (MIT)
+
+Copyright (C) 2017 okdshin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+### TinySHA1 (ISC)
+
+Copyright (c) 2012-22 Saurav Mohapatra. Upstream: https://github.com/mohaps/TinySHA1 (the SDK's copy is the one
+modified for Xenia). Header-only SHA-1 for the game-file check outside Windows (`src/doa4_gamefiles.cpp`), compiled from
+the ReXGlue SDK's `thirdparty/crypto/TinySHA1.hpp`. The permission notice at the top of that header, reproduced here:
+
+```
+Copyright (c) 2012-22 SAURAV MOHAPATRA <mohaps@gmail.com>
+
+Permission to use, copy, modify, and distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+## Libraries the build links
+
+### SDL3 (zlib)
+
+Simple DirectMedia Layer, Copyright (C) 1997-2026 Sam Lantinga. Every build links it through the ReXGlue SDK (sound
+and controller input on Windows too). The Linux build's window, file dialogs and photo files
+(`src/doa4_photo_posix.cpp`, `src/doa4_sdl_dialog.cpp`) use it through the ReXGlue SDK, whose `thirdparty/sdl3` it is
+built from. Its licence (`thirdparty/sdl3/LICENSE.txt`), reproduced here:
+
+```
+Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+```
+
 ## Credits
 
 The same names are in the README's Credits section.

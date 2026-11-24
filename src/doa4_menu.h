@@ -53,6 +53,7 @@ void AddMenuFont(ImFontAtlas* atlas);
 
 struct MenuHost {
   rex::ui::Window* window = nullptr;
+  void* dialog_owner = nullptr;  // the owner of the dialogs the menu opens: the HWND, or the SDL_Window outside Windows
   std::filesystem::path config_path;  // <exe dir>/dead_or_alive_4.toml
   int running_scale = 1;              // resolution_scale the game started with
   // resolution_scale saved for the next start; owned by the app so it survives

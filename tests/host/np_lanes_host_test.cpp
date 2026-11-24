@@ -1101,6 +1101,9 @@ static void TestLines() {
         "cpu: fight frames 3, wait p50 1.25 ms p99 7.25 ms max 7.00 ms, cycles main 123456789 workers 987654321");
   CHECK(CpuLine(1, H({15749}), 0, 0) == "cpu: fight frames 1, wait p50 15.75 ms p99 15.75 ms max 15.75 ms, cycles main 0 workers 0");
   CHECK(CpuLine(0, H({}), 0, 0) == "cpu: fight frames 0, wait p50 0.00 ms p99 0.00 ms max 0.00 ms, cycles main 0 workers 0");
+  // off Windows the counts are the threads' CPU time in nanoseconds, and the line names that unit in place of "cycles"
+  CHECK(CpuLine(3, H({1000, 1000, 7000}), 5, 6, "thread ns") ==
+        "cpu: fight frames 3, wait p50 1.25 ms p99 7.25 ms max 7.00 ms, thread ns main 5 workers 6");
   CHECK(StallLine(611, 13, 2) == "lanes stall at frame 611: worker 13 has waited 2 s for worker 2");
   CHECK(StallLine(611, kMainFirstWait, 0) == "lanes stall at frame 611: main (first wait) has waited 2 s for worker 0");
   CHECK(StallLine(611, kMainSecondWait, 19) == "lanes stall at frame 611: main (second wait) has waited 2 s for worker 19");

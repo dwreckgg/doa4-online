@@ -2,8 +2,12 @@
 
 #include "doa4_gamefiles.h"
 
+#if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include "crypto/TinySHA1.hpp"  // the SDK's thirdparty/crypto (Saurav Mohapatra, ISC licence)
+#endif
 
 #include <algorithm>
 #include <fstream>
@@ -13,7 +17,9 @@
 
 #include "doa4_utf8.h"
 
+#if defined(_WIN32)
 #pragma comment(lib, "bcrypt.lib")
+#endif
 
 namespace doa4::gamefiles {
 
@@ -76,6 +82,7 @@ struct Created {
 
 }  // namespace
 
+#if defined(_WIN32)
 struct Sha1::State {
   BCRYPT_ALG_HANDLE alg = nullptr;
   BCRYPT_HASH_HANDLE hash = nullptr;
@@ -107,6 +114,23 @@ std::string Sha1::HexDigest() {
   if (!state_->hash || BCryptFinishHash(state_->hash, digest, sizeof(digest), 0) != 0) return {};
   return Hex(digest, sizeof(digest));
 }
+#else
+struct Sha1::State {
+  sha1::SHA1 hash;
+};
+
+Sha1::Sha1() : state_(std::make_unique<State>()) {}
+
+Sha1::~Sha1() = default;
+
+void Sha1::Update(const void* data, size_t size) { state_->hash.processBytes(data, size); }
+
+std::string Sha1::HexDigest() {
+  sha1::SHA1::digest8_t digest;
+  state_->hash.finalize(digest);
+  return Hex(digest, sizeof(digest));
+}
+#endif
 
 std::string Sha1Hex(const void* data, size_t size) {
   Sha1 h;
@@ -132,6 +156,9 @@ UserDataChoice ChooseUserData(const fs::path& sdk_value, bool from_command_line,
   return {sdk_value, UserDataSource::kDefault, ""};
 }
 
+#if !defined(_WIN32)
+bool PathFitsCodePage(const fs::path&) { return true; }  // a POSIX path is bytes (UTF-8): every path fits
+#else
 bool PathFitsCodePage(const fs::path& path) {
   const std::wstring& text = path.native();
   if (text.empty() || GetACP() == CP_UTF8) return true;  // UTF-8 code page: everything fits
@@ -140,6 +167,7 @@ bool PathFitsCodePage(const fs::path& path) {
                                     nullptr, 0, nullptr, &lossy);
   return n > 0 && !lossy;
 }
+#endif
 
 StartChoice ChooseStartPath(const fs::path& command_line, const fs::path& saved,
                             const std::function<bool(const fs::path&)>& has_xex,

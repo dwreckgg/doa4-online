@@ -20,6 +20,7 @@
 #include <utility>
 
 #include <rex/hook.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
@@ -67,7 +68,7 @@ void LogThreads(uint32_t frame) {
 void TraceStart(const std::filesystem::path& dir) {
   const char* t = TestSwitch("DOA4_NP_TRACE");
   if (t && std::string_view(t).find("clock") != std::string_view::npos) {
-    g_trace = _wfopen((dir / "clock_trace.txt").wstring().c_str(), L"w");
+    g_trace = rex::filesystem::OpenFile(dir / "clock_trace.txt", "w");
   }
 }
 
