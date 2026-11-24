@@ -247,12 +247,20 @@ static void TestRedirectAndNames() {
   CHECK(!restart::RedirectHolds(g_root / "u9" / "netplay" / "sessions", sess));
   CHECK(!restart::RedirectHolds(g_root / "u9" / "netplay" / "session2", sess));
   CHECK(!restart::RedirectHolds({}, sess) && !restart::RedirectHolds(sess, {}));
-  // exactly the three known unregistered names
+  // exactly the three known unregistered names (per platform: the back end the build leaves out)
   CHECK(restart::KnownUnregisteredSetting("kernel_pix"));
+#if defined(_WIN32)
   CHECK(restart::KnownUnregisteredSetting("vulkan_readback_resolve"));
   CHECK(restart::KnownUnregisteredSetting("vulkan_readback_memexport"));
-  CHECK(!restart::KnownUnregisteredSetting("kernel_debug_monitor"));
   CHECK(!restart::KnownUnregisteredSetting("d3d12_readback_resolve"));
+  CHECK(!restart::KnownUnregisteredSetting("d3d12_readback_memexport"));
+#else
+  CHECK(restart::KnownUnregisteredSetting("d3d12_readback_resolve"));
+  CHECK(restart::KnownUnregisteredSetting("d3d12_readback_memexport"));
+  CHECK(!restart::KnownUnregisteredSetting("vulkan_readback_resolve"));
+  CHECK(!restart::KnownUnregisteredSetting("vulkan_readback_memexport"));
+#endif
+  CHECK(!restart::KnownUnregisteredSetting("kernel_debug_monitor"));
   CHECK(!restart::KnownUnregisteredSetting("kernel_pix2") && !restart::KnownUnregisteredSetting("kernel_pi"));
   CHECK(!restart::KnownUnregisteredSetting(""));
 }

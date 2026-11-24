@@ -62,7 +62,13 @@ bool RedirectHolds(const fs::path& runtime_user_data, const fs::path& session_us
 }
 
 bool KnownUnregisteredSetting(std::string_view name) {
+#if defined(_WIN32)
   return name == "kernel_pix" || name == "vulkan_readback_resolve" || name == "vulkan_readback_memexport";
+#else
+  // No D3D12 back end outside Windows (the SDK's CMakeLists.txt sets REXGLUE_USE_D3D12 OFF), so its two readback
+  // settings are never registered there; the Vulkan pair is.
+  return name == "kernel_pix" || name == "d3d12_readback_resolve" || name == "d3d12_readback_memexport";
+#endif
 }
 
 bool TestNoRestart(bool test_dir_set, const char* value) {
