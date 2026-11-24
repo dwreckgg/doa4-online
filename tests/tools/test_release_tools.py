@@ -2334,6 +2334,81 @@ def test_linux_workflow(root):
     check(len(counts) == 1 and re.search(r'(?m)^\s*if \[ "\$n" -eq 0 \]; then exit 1; fi$', counts[0]) is not None
           and re.search(r"(?m)^\s*n=\$\(find out/build/linux-amd64-release -name '\*\.o' \| wc -l\)$", counts[0]) is not None,
           "linux workflow: the object count step counts the build's .o files and fails on zero")
+    # the "Runtime libraries" step: the game binary resolves its shared libraries (a fresh build once stopped at start-up
+    # with "librexruntime.so: cannot open shared object file", the binary's RUNPATH being $ORIGIN), checked by ldd
+    rt = [s for s in steps if s.split("\n")[0].strip() == "name: Runtime libraries"]
+    rts = rt[0] if len(rt) == 1 else ""
+    rti = steps.index(rts) if rts else -1
+    check(len(rt) == 1, f"linux workflow: exactly one step 'Runtime libraries': {len(rt)}")
+    obj_i = [i for i, s in enumerate(steps) if "objects built:" in s]
+    host_i = [i for i, s in enumerate(steps) if "run_host_tests_posix.py --cxx" in s]
+    check(rti > 0 and obj_i == [rti - 1] and len(host_i) == 1 and host_i[0] > rti,
+          f"linux workflow: 'Runtime libraries' is the step directly after 'Objects built' and before the host tests: "
+          f"runtime {rti}, objects {obj_i}, host tests {host_i}")
+    check(bool(rts) and re.search(r"(?m)^        working-directory: doa4-recomp$", rts) is not None,
+          "linux workflow: the 'Runtime libraries' step runs in doa4-recomp")
+    check(bool(rts) and "continue-on-error" not in rts and re.search(r"(?m)^\s*if:", rts) is None,
+          f"linux workflow: the 'Runtime libraries' step can fail the job: no continue-on-error and no if: key: {rt}")
+    rm = re.search(r"(?m)^        run: \|\n", rts)
+    script = [l.strip() for l in rts[rm.end():].split("\n")] if rm else []
+    script = [l for l in script if l and not l.startswith("#")]
+    def at(pattern):
+        """The index of the one script line that matches pattern in full, else -1 (none, or more than one)."""
+        hits = [i for i, l in enumerate(script) if re.fullmatch(pattern, l)]
+        return hits[0] if len(hits) == 1 else -1
+    check(script[:1] in (["set -o pipefail"], ["set -euo pipefail"]),
+          f"linux workflow: the 'Runtime libraries' script starts with set -o pipefail: {script[:1]}")
+    find_at = at(r"mapfile -t bins < <\(find out/build/linux-amd64-release -type f -name dead_or_alive_4\)")
+    n_at = at(r'n=\$\{#bins\[@\]\}')
+    one_at = at(r'if \[ "\$n" -ne 1 \]; then (.*; )?exit 1; fi')
+    bin_at = at(r'bin=\$\{bins\[0\]\}')
+    check(0 < find_at < n_at < one_at < bin_at,
+          f"linux workflow: the 'Runtime libraries' step finds the game binary dead_or_alive_4 under the build folder and "
+          f"fails unless exactly one is found: lines {find_at}, {n_at}, {one_at}, {bin_at}")
+    ldd_at = at(r'libs=\$\(ldd "\$bin" 2>&1\) \|\| \{ echo "\$libs"; (.*; )?exit 1; \}')
+    print_at = at(r'echo "\$libs"')
+    nf_at = at(r"if grep -q 'not found' <<< \"\$libs\"; then (.*; )?exit 1; fi")
+    check(0 < bin_at < ldd_at < print_at < nf_at,
+          f"linux workflow: the 'Runtime libraries' step runs ldd on the binary, prints its output and fails on a "
+          f"'not found' line: lines {ldd_at}, {print_at}, {nf_at}")
+    dir_at = at(r'if \[ ! -e "\$\(dirname "\$bin"\)/librexruntime\.so" \]; then (.*; )?exit 1; fi')
+    check(0 < bin_at < dir_at, f"linux workflow: the 'Runtime libraries' step fails when librexruntime.so is not in the "
+          f"binary's own folder: line {dir_at}")
+    check(bool(script) and not any(re.search(r"\|\|\s*true\b|\bexit 0\b|^set \+e", l) for l in script),
+          f"linux workflow: the 'Runtime libraries' script swallows no failure (no '|| true', 'exit 0' or 'set +e'): {script}")
+    # an allowlist over the whole script, so the checks above pin what the step does, not only that its lines exist:
+    # every line is one of these, each exactly once, or an echo line of one shape: echo "<text>", where the text holds
+    # no quote, back quote or backslash and '$' only as $name or ${name} (an allowed shape, not a ban: printf -v,
+    # $[...] and ${a[i=1]} assign without any banned character)
+    rt_pinned = (("set -o pipefail", "set -euo pipefail"),
+                 ("mapfile -t bins < <(find out/build/linux-amd64-release -type f -name dead_or_alive_4)",),
+                 ('n=${#bins[@]}',),
+                 (r'''printf '%s\n' "${bins[@]}"''',),
+                 ('if [ "$n" -ne 1 ]; then echo "want exactly one game binary"; exit 1; fi',),
+                 ('bin=${bins[0]}',),
+                 ('libs=$(ldd "$bin" 2>&1) || { echo "$libs"; echo "ldd failed on $bin"; exit 1; }',),
+                 ('echo "$libs"',),
+                 ("if grep -q 'not found' <<< \"$libs\"; then echo \"a shared library of $bin is not found\"; exit 1; fi",),
+                 ('if [ ! -e "$(dirname "$bin")/librexruntime.so" ]; then echo "librexruntime.so is not in $(dirname "$bin")"; '
+                  'exit 1; fi',))
+    rt_seen = [sum(1 for l in script if l in alts) for alts in rt_pinned]
+    rt_free = [l for l in script if not any(l in alts for alts in rt_pinned)]
+    def rt_echo(l):
+        return re.fullmatch(r'echo "(?:[^"`\\$]|\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\})*"', l) is not None
+    rt_bad = [l for l in rt_free if not rt_echo(l)]
+    check(bool(script) and rt_seen == [1] * len(rt_pinned) and rt_bad == [],
+          f"linux workflow: the 'Runtime libraries' script is its {len(rt_pinned)} pinned lines, each once, and lines "
+          f'echo "<text>" with $ only as $name or ${{name}}: counts {rt_seen}, other lines {rt_bad}')
+    # the exit form reads commands, not echo text
+    rt_exits = re.findall(r"\bexit\b[^;}\n]*", "\n".join(l for l in script if not rt_echo(l)))
+    check(bool(rt_exits) and all(e.strip() == "exit 1" for e in rt_exits),
+          f"linux workflow: the only exit in the 'Runtime libraries' script is 'exit 1': {rt_exits}")
+    rt_keys = (["name"] if rts.startswith("name:") else []) + re.findall(r"""(?m)^        ["']?([A-Za-z_][\w-]*)["']?\s*:""", rts)
+    check(rt_keys == ["name", "working-directory", "run"],
+          f"linux workflow: the 'Runtime libraries' step has the keys name, working-directory and run and no other: {rt_keys}")
+    check(bool(t) and "LD_LIBRARY_PATH" not in t and "LD_PRELOAD" not in t,
+          "linux workflow: no LD_LIBRARY_PATH and no LD_PRELOAD anywhere (no env: key, no run: line): the game binary "
+          "finds its libraries by itself")
     pins = [s for s in steps if "netplay_sdk.txt" in s]
     check(len(pins) == 1 and re.search(r'(?m)^\s*if \[ -z "\$repo" \] \|\| \[ -z "\$commit" \]; then .*exit 1; fi$', pins[0]) is not None
           and pins[0].index("exit 1; fi") < pins[0].index("git clone"),
