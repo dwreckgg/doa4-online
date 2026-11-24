@@ -1326,6 +1326,35 @@ static void TestInstallOrder() {
   Order(__LINE__, true, false, true, {}, {X, S}, Outcome::kFailed);
 }
 
+// ---------------------------------------------------------------- extras_refusal (Task 9 fix wave 1, ledger X84): every
+// match process whose copies were built but not installed refuses. The expected column is the rule written out by hand
+// (refuse exactly when match, built and not installed), row by row; never the helper's output.
+static void TestExtrasRefusal() {
+  struct Row { bool match, built, installed, refuse; };
+  const Row rows[] = {
+      {false, false, false, false}, {false, false, true, false}, {false, true, false, false}, {false, true, true, false},
+      {true, false, false, false},  {true, false, true, false},  {true, true, false, true},    {true, true, true, false},
+  };
+  for (const Row& r : rows) {
+    CHECKF(xc::MustRefuseExtras(r.match, r.built, r.installed) == r.refuse, "match %d built %d installed %d: want %d",
+           r.match, r.built, r.installed, r.refuse);
+  }
+  // The message: the prefix, the error text inside it, the colour refusal's closing words for a failed install
+  // (doa4_colour_make.cpp RefusalMessage), and one line.
+  const std::string m = xc::ExtrasRefusalMessage("chrtwo.afs: cannot open");
+  CHECKF(m == "extras copies: built but not installed (chrtwo.afs: cannot open); check the game files and the swimsuit "
+              "import, then restart",
+         "%s", m.c_str());
+  CHECKF(m.find('\n') == std::string::npos && m.find('\r') == std::string::npos, "%s", m.c_str());
+  // Another error text is carried as given (excludes a fixed text); an empty one still names a cause.
+  const std::string m2 = xc::ExtrasRefusalMessage("avt.afs entry 3: x");
+  CHECKF(m2.rfind("extras copies: built but not installed (avt.afs entry 3: x); ", 0) == 0, "%s", m2.c_str());
+  const std::string m0 = xc::ExtrasRefusalMessage("");
+  CHECKF(m0 == "extras copies: built but not installed (the overlay install failed); check the game files and the "
+               "swimsuit import, then restart",
+         "%s", m0.c_str());
+}
+
 int main(int argc, char** argv) {  // no arguments are read
   (void)argc;
   (void)argv;
@@ -1352,6 +1381,7 @@ int main(int argc, char** argv) {  // no arguments are read
   RunGroup(TestDefaultOpener, "default_opener");
   RunGroup(TestHashFailureInstallsNothing, "hash_failure_installs_nothing");
   RunGroup(TestInstallOrder, "install_order");
+  RunGroup(TestExtrasRefusal, "extras_refusal");
   RunRealArchive();
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);

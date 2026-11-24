@@ -223,6 +223,16 @@ InstallPlan InstallOrder(bool extras_present, bool colours_usable, bool suits_pr
   return plan;
 }
 
+bool MustRefuseExtras(bool match_process, bool built, bool installed) {
+  return match_process && built && !installed;
+}
+
+std::string ExtrasRefusalMessage(std::string_view error) {
+  return "extras copies: built but not installed (" +
+         (error.empty() ? std::string("the overlay install failed") : std::string(error)) +
+         "); check the game files and the swimsuit import, then restart";
+}
+
 ReadEntry ReadEntryFromSource(std::shared_ptr<const afs::Source> archive) {
   struct State {
     std::shared_ptr<const afs::Source> source;

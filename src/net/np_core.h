@@ -149,7 +149,9 @@ std::string MetaMismatch(std::string_view recorded, std::string_view current);
 std::string MetaValue(std::string_view meta, std::string_view key);
 // The extras_copies meta line (extras-copies plan Task 9): "" when `sha1` is empty (no copies installed: no key, the
 // same as both extra-costume boxes off), else "extras_copies=<sha1>\n". The online, record and replay starts add it
-// to their meta (np_session.cpp), so two PCs or a replay with different copies are refused by MetaMismatch.
+// to their meta (np_session.cpp). A replay whose copies differ from the recording's is refused by MetaMismatch; a match
+// process whose built copies were not installed refuses itself at start (doa4_extras_copies.h MustRefuseExtras); two
+// live PCs compare no meta.
 std::string ExtrasCopiesMetaLine(std::string_view sha1);
 
 // ---- Fix sets (DOA4_NP_FIX; the recording's meta key "fixes") ----

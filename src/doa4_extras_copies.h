@@ -16,6 +16,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "doa4_afs_overlay.h"
@@ -95,5 +96,15 @@ struct InstallPlan {
 // extras failure never yields kFailed on its own (Decide never sees it). results[i] is whether attempt i built and
 // installed; an attempt past the end of `results` counts as failed.
 InstallPlan InstallOrder(bool extras_present, bool colours_usable, bool suits_present, const std::vector<bool>& results);
+
+// ---- The refusal (Task 9 fix wave 1; the user's decision, ledger X84) ----
+// A match process (online, record, replay: colour_costumes::ProcessKind::kMatch) whose copies were built (Built::chrtwo
+// not empty) but not installed (attempt X failed, or the install never ran) must not run: its meta carries the copies'
+// extras_copies key, written before the install, so it would claim files it does not draw. = match && built && !installed.
+bool MustRefuseExtras(bool match_process, bool built, bool installed);
+// The refusal's one line: "extras copies: built but not installed (<error>); check the game files and the swimsuit
+// import, then restart" (the colour refusal's closing words for a failed install, doa4_colour_make.cpp RefusalMessage).
+// An empty error reads "the overlay install failed".
+std::string ExtrasRefusalMessage(std::string_view error);
 
 }  // namespace doa4::extras_copies

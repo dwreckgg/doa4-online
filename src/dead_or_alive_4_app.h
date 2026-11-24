@@ -2205,6 +2205,11 @@ class DeadOrAlive4App : public rex::ReXApp {
     std::string error, retry_error;       // the overlay install's, and the retry's without the colour entries
     bool test_unusable = false;           // DOA4_COLOURS_TEST_UNUSABLE
     bool test_unequal = false;            // DOA4_COLOURS_TEST_UNEQUAL
+    // The extras copies' attempt X (InstallSuitsAndColours): installed, or dropped with X's error. Both stay false when
+    // X never ran (no copies built, or the install's early return).
+    bool extras_installed = false;
+    bool extras_dropped = false;
+    std::string extras_error;
   };
   void SetUpSuits() {
     ColourSetup colour;  // kNotUsable until InstallSuitsAndColours installs: also on its early return
@@ -2216,6 +2221,16 @@ class DeadOrAlive4App : public rex::ReXApp {
     if (doa4::colour_costumes::MustRefuse(kind_, colour.outcome)) {
       doa4::np::RefuseRun(doa4::colour_costumes::RefusalMessage(colour.outcome, colour.usable, colour.load_notes,
                                                                 colour.error, colour.retry_error, colour.test_unusable));
+    }
+    // The extras copies (fix wave 1, the user's decision, ledger X84): a match process (online, record, replay) whose
+    // copies were built but not installed is refused too, because its meta already carries their extras_copies key
+    // (written at session start, before the install). Only when the colour check did not refuse, so the colour message
+    // wins when both hold and RefuseRun is called once; after the test_unequal return above, so that test switch skips
+    // this refusal too, as it skips the other.
+    if (!doa4::colour_costumes::MustRefuse(kind_, colour.outcome) &&
+        doa4::extras_copies::MustRefuseExtras(kind_ == doa4::colour_costumes::ProcessKind::kMatch,
+                                              !extras_built_.chrtwo.empty(), colour.extras_installed)) {
+      doa4::np::RefuseRun(doa4::extras_copies::ExtrasRefusalMessage(colour.extras_error));
     }
   }
 
@@ -2358,6 +2373,7 @@ class DeadOrAlive4App : public rex::ReXApp {
     // attempt that worked (kInstalled with colours, else kNotUsable) and the block is skipped. On failure the copies are
     // dropped (one line) and the block runs as it did before Task 9, with no extras in it: its colour retry, its Decide
     // and its Fail never see an extras failure (Decide(false, false, ...) is kFailed: an extras-only PC would be failed).
+    // A match process whose X failed is refused on SetUpSuits' exit (MustRefuseExtras: its meta claims the copies).
     bool extras_installed = false;
     if (!extras_built_.chrtwo.empty()) {
       std::map<std::string, std::vector<doa4::afs::Replacement>> x_entries =
@@ -2382,6 +2398,7 @@ class DeadOrAlive4App : public rex::ReXApp {
       if (!x_overlays.empty()) x_error = doa4::afs::InstallOverlays(*rt->file_system(), x_overlays, x_labels);
       if (!x_overlays.empty() && x_error.empty()) {
         extras_installed = true;
+        colour->extras_installed = true;
         const doa4::colour_costumes::InstallOutcome outcome =
             doa4::colour_costumes::Decide(colours.usable, true, true, false);
         colour->outcome = outcome;  // kInstalled or kNotUsable: what the refusal on SetUpSuits' exit reads
@@ -2395,7 +2412,9 @@ class DeadOrAlive4App : public rex::ReXApp {
           REXLOG_INFO("[doa4][COLOURS] none installed (not usable); the swimsuits as without them");
         }
       } else {
-        REXLOG_WARN("[doa4][EXTRAS] copies dropped: {}; installing without them", x_error);
+        colour->extras_dropped = true;  // a match process is refused on SetUpSuits' exit (MustRefuseExtras)
+        colour->extras_error = x_error;
+        REXLOG_WARN("[doa4][EXTRAS] the attempt with the extras copies failed: {}; installing without them", x_error);
       }
     }
     if (extras_installed) {
