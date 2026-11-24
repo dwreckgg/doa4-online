@@ -24,6 +24,13 @@
   title says "Preparing colour costumes") into a `colour_costumes` folder in your saves folder, about 86 MB. They are
   in every online session, for both players. A PC that could not make one shows a stand-in for it and still plays
   the same match.
+  **These colours are not final, and feedback is welcome.** None of these costumes are meant to stay exactly as they
+  are in this release; they are open to change. Alpha-152's colours are based on her costume colours in DOA
+  Dimensions, but her costume there is less transparent than in this game, which changes how the colours look, so
+  they may not carry over as well as hoped.
+  Tell us what you think of the Alpha-152 and Spartan-458 colours on the subreddit
+  [r/doa4online](https://www.reddit.com/r/doa4online) or on
+  [issue #13](https://github.com/dwreckgg/doa4-online/issues/13), the request for more Alpha-152 colours.
 - **"Vanilla DoA4 content only"** (Esc menu > Extras, at the top). While it is on (it applies after a restart), the
   costume select screen leaves out the colour costumes and the DOAX2 swimsuits, and the swimsuit import is off.
   Nothing is deleted, and the game tweaks, the extra costumes and the "Age:" box follow their own boxes as before. It
