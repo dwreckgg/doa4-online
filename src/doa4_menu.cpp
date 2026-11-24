@@ -43,6 +43,7 @@
 #include "doa4_config.h"
 #include "doa4_discord.h"
 #include "doa4_display.h"
+#include "doa4_extras_copies.h"
 #include "doa4_gamefiles.h"
 #include "doa4_graphics.h"
 #include "doa4_language.h"
@@ -481,6 +482,8 @@ float MenuDialog::WidestRow() {
   w.push_back(row({text("Applies after a restart"), button("Restart now")}));
   for (const tweaks::Tweak& t : tweaks::AllTweaks()) w.push_back(toggle(t.label));
   for (const bool running : {false, true}) w.push_back(text(AlphaRestartNote(running)));  // the "Restart now" button: above
+  for (const char* t : extras_copies::kRestartNote) w.push_back(text(t));  // under the extra-costume boxes
+  w.push_back(button(extras_copies::kRestartButton));  // CalcTextSize hides the "##extrascopies" part
   w.push_back(toggle("Age:"));
   w.push_back(display::MenuPx(kBustAgeSliderWidth, ImGui::GetFontSize()));  // "##bust_age": its label draws no text
   for (const std::string& note : host_.suits_notes) w.push_back(text(note));
@@ -937,6 +940,25 @@ void MenuDialog::DrawExtrasTab() {
       ImGui::TextColored(kNoteColor, "%s", AlphaRestartNote(note == tweaks::RestartNote::kRunningWith));
       ImGui::BeginDisabled(extras_locked);
       if (ImGui::Button("Restart now##alpha152")) {
+        Restart(online_view::Control::kExtras);
+      }
+      ImGui::EndDisabled();
+      if (const char* warning = UnsavedUnlocksWarning(*host_.extras)) {
+        ImGui::TextColored(kErrorColor, "%s", warning);
+      }
+    }
+  }
+  // Directly under the extra-costume boxes (the loop's last rows): the restart note, always shown, and "Restart now"
+  // while a box is on now that was off at start (its reflection and shadow copies are built only at start-up,
+  // doa4_extras_copies.h). Both values are asked each draw: this menu may be built before the load.
+  for (const char* line : extras_copies::kRestartNote) ImGui::TextDisabled("%s", line);
+  {
+    const int at_start = host_.extras_copies_at_start ? host_.extras_copies_at_start() : -1;
+    const bool opera_now = rex::cvar::Query<bool>(tweaks::AllTweaks()[tweaks::kHelenaOpera].cvar);
+    const bool kimonos_now = rex::cvar::Query<bool>(tweaks::AllTweaks()[tweaks::kKokoroKimonos].cvar);
+    if (extras_copies::ShowRestartButton(at_start, opera_now, kimonos_now)) {
+      ImGui::BeginDisabled(extras_locked);
+      if (ImGui::Button(extras_copies::kRestartButton)) {
         Restart(online_view::Control::kExtras);
       }
       ImGui::EndDisabled();

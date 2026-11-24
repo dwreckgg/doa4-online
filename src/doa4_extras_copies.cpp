@@ -233,6 +233,11 @@ std::string ExtrasRefusalMessage(std::string_view error) {
          "); check the game files and the swimsuit import, then restart";
 }
 
+bool ShowRestartButton(int at_start_bits, bool opera_now, bool kimonos_now) {
+  if (at_start_bits < 0) return false;  // unknown: the build has not run (or no getter)
+  return (opera_now && !(at_start_bits & 1)) || (kimonos_now && !(at_start_bits & 2));
+}
+
 ReadEntry ReadEntryFromSource(std::shared_ptr<const afs::Source> archive) {
   struct State {
     std::shared_ptr<const afs::Source> source;

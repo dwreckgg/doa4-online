@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -106,5 +107,21 @@ bool MustRefuseExtras(bool match_process, bool built, bool installed);
 // import, then restart" (the colour refusal's closing words for a failed install, doa4_colour_make.cpp RefusalMessage).
 // An empty error reads "the overlay install failed".
 std::string ExtrasRefusalMessage(std::string_view error);
+
+// ---- The Extras tab's restart note and "Restart now" button (Task 10; design section 3) ----
+// Whether the tab shows "Restart now" under the note: a box is on now whose copies this run did not build because the
+// box was off at start. at_start_bits = MenuHost::extras_copies_at_start (Built::boxes_at_start: bit 0 Helena's opera
+// dress, bit 1 Kokoro's kimonos), negative (-1) while unknown: then false. Otherwise true exactly when
+// (opera_now && bit 0 clear) || (kimonos_now && bit 1 clear); bits above bit 1 are ignored. Christie's box and the
+// other tweaks are not inputs. "At start" is the boxes the builder was ASKED for, not the copies installed: a box on
+// at start whose copies failed on this PC would fail again after a restart (ledger X89).
+bool ShowRestartButton(int at_start_bits, bool opera_now, bool kimonos_now);
+// The grey note under the extra-costume boxes, always shown: two lines, as the tab's other TextDisabled notes are
+// split (each at most 68 characters, the longest kAntiAliasingNote line, so it does not widen the menu). Joined with
+// one space they are the plan's Interfaces text.
+inline constexpr std::array<const char*, 2> kRestartNote = {
+    "Restart the game after switching on Helena's opera dress or Kokoro's",
+    "kimonos, or their reflections and shadows will not show properly."};
+inline constexpr const char* kRestartButton = "Restart now##extrascopies";
 
 }  // namespace doa4::extras_copies

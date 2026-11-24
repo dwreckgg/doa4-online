@@ -1355,6 +1355,56 @@ static void TestExtrasRefusal() {
          "%s", m0.c_str());
 }
 
+// Task 10, ShowRestartButton (brief R1): the full table at_start_bits {-2, -1, 0, 1, 2, 3, 4} x opera_now x kimonos_now,
+// each expected value written out by hand from the rule, never computed by it. -1 is "unknown" (the getter's value
+// before the build); -2 is another negative (false too; it separates "< 0" from "== -1" and from a deleted guard,
+// since -1 has every bit set and -2 has bit 0 clear); 4 is a bit above bit 1 (ignored: reads as 0); 3 = both on at
+// start (never a button). Rows where the button shows: bits 0 (3), 1 (2), 2 (2), 4 (3) = 10.
+struct RestartRow {
+  int bits;
+  bool opera, kimonos, expect;
+};
+static constexpr RestartRow kRestartRows[] = {
+    {-2, false, false, false}, {-2, false, true, false}, {-2, true, false, false}, {-2, true, true, false},
+    {-1, false, false, false}, {-1, false, true, false}, {-1, true, false, false}, {-1, true, true, false},
+    {0, false, false, false},  {0, false, true, true},   {0, true, false, true},   {0, true, true, true},
+    {1, false, false, false},  {1, false, true, true},   {1, true, false, false},  {1, true, true, true},
+    {2, false, false, false},  {2, false, true, false},  {2, true, false, true},   {2, true, true, true},
+    {3, false, false, false},  {3, false, true, false},  {3, true, false, false},  {3, true, true, false},
+    {4, false, false, false},  {4, false, true, true},   {4, true, false, true},   {4, true, true, true},
+};
+static constexpr int CountTrueRows() {
+  int n = 0;
+  for (const RestartRow& r : kRestartRows) n += r.expect ? 1 : 0;
+  return n;
+}
+static_assert(sizeof(kRestartRows) / sizeof(kRestartRows[0]) == 28, "7 x 2 x 2 rows");
+static_assert(CountTrueRows() == 10, "the brief's count of rows that show the button (R6)");
+
+static void TestShowRestartButton() {
+  for (const RestartRow& r : kRestartRows) {
+    const bool got = xc::ShowRestartButton(r.bits, r.opera, r.kimonos);
+    CHECKF(got == r.expect, "at_start_bits=%d opera_now=%d kimonos_now=%d: expected %d, got %d", r.bits, r.opera,
+           r.kimonos, r.expect, got);
+  }
+}
+
+// Task 10, the note's text (brief R3): a pin, not a behaviour. Joined with one space the two lines are the plan's
+// Interfaces text (plan :195-196, its line break read as one space); each line at most 68 characters (the longest line
+// of kAntiAliasingNote in doa4_menu.cpp, so the note does not widen the menu through WidestRow); the button's label
+// and ImGui ID.
+static void TestRestartNoteText() {
+  const std::string joined = std::string(xc::kRestartNote[0]) + " " + xc::kRestartNote[1];
+  CHECKF(joined ==
+             "Restart the game after switching on Helena's opera dress or Kokoro's kimonos, or their reflections "
+             "and shadows will not show properly.",
+         "%s", joined.c_str());
+  for (const char* line : xc::kRestartNote) {
+    CHECKF(std::strlen(line) <= 68, "%zu chars: %s", std::strlen(line), line);
+  }
+  CHECKF(std::string(xc::kRestartButton) == "Restart now##extrascopies", "%s", xc::kRestartButton);
+}
+
 int main(int argc, char** argv) {  // no arguments are read
   (void)argc;
   (void)argv;
@@ -1382,6 +1432,8 @@ int main(int argc, char** argv) {  // no arguments are read
   RunGroup(TestHashFailureInstallsNothing, "hash_failure_installs_nothing");
   RunGroup(TestInstallOrder, "install_order");
   RunGroup(TestExtrasRefusal, "extras_refusal");
+  RunGroup(TestShowRestartButton, "show_restart_button");
+  RunGroup(TestRestartNoteText, "restart_note_text");
   RunRealArchive();
   if (g_failures) {
     std::printf("FAILED: %d checks, %d failures\n", g_checks, g_failures);
