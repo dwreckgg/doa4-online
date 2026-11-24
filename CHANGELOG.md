@@ -51,6 +51,8 @@
   online check could end the session as a desync although both games were in step: a drawing pointer of the menus,
   which can differ for a few frames with each PC's loading speed, was part of the check. It is left out now, like
   the other drawing and timing values. Tested with four online Tag sessions that hit the old cause.
+- Native Linux: the 3D picture, the PRESS START bar and a missing-library start-up error fixed (rynoster,
+  Dwreckgg/rexglue-sdk#1).
 
 ### Notes
 - Both players need 0.3.8: it does not connect to 0.3.7.
