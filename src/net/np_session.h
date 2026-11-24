@@ -73,8 +73,9 @@ struct Host {
   std::filesystem::path game_data_root;
   // The SHA-1 of the extras copies this process built at start-up (doa4_extras_copies.h Built::sha1), "" when none: the
   // online, record and replay starts put it in their meta as extras_copies=<sha1> (np::ExtrasCopiesMetaLine). A replay
-  // whose copies differ from the recording's is refused (MetaMismatch); a match process whose built copies were not
-  // installed refuses itself at start (MustRefuseExtras, on SetUpSuits' exit); two live PCs compare no meta.
+  // whose copies differ from the recording's is refused (MetaMismatch); a match process refuses itself at start (on
+  // SetUpSuits' exit) when a selected costume's copies were not built (MustRefuseNotBuilt) or built copies were not
+  // installed (MustRefuseExtras); two live PCs compare no meta.
   std::string extras_copies_sha1;
 
   // ---- online (Task 12) ----

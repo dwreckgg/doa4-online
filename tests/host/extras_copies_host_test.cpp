@@ -12,8 +12,11 @@
 // Groups: fixture_anchor, costumes_table, boxes_off_reads_nothing, opera_only_reads_two_entries, built_replaces_both_entries,
 // hash_mismatch_keeps_standin, core_refusal_keeps_standin, over_limit_refused, unreadable_archive,
 // read_callback_throws, sha1_of_built_is_stable_and_ordered, boxes_at_start_bits, unknown_cvar_row, read_entry_from,
-// reader_promises, toc_refusal_reason, allocation_failures (a replaced global operator new, armed only in that group);
-// then the gated real-archive check "extras real archive": DOA4_EXTRAS_GAME_DIR (a game folder holding chrtwo.afs, read
+// reader_promises, toc_refusal_reason, allocation_failures and allocation_failures_sticky (a replaced global operator
+// new, armed only in those groups), default_opener, hash_failure_installs_nothing, install_order, extras_refusal,
+// not_built_refusal, built_counts, show_restart_button, restart_note_text (in the order main runs them); the Builds of
+// the groups from boxes_off_reads_nothing to hash_failure_installs_nothing, built_counts and the real-archive group go
+// through BuildI, which also checks Built::built == chrtwo.size() / 2 (Task 11 fix wave); then the gated real-archive check "extras real archive": DOA4_EXTRAS_GAME_DIR (a game folder holding chrtwo.afs, read
 // only) runs Build on the real archive and expects all three built with G0's SHA-1s (g0_sha1.txt); unset, it prints
 // "extras real archive: SKIPPED (DOA4_EXTRAS_GAME_DIR unset)" and counts nothing. DOA4_EXTRAS_TEST_FLIP=1 (with the
 // game folder) flips one byte of what the reader returns for entry 46: the group must then fail on hak03 alone.
@@ -476,6 +479,19 @@ static bool ClosingLine(const std::string& s, int k, int n, bool unhashed = fals
 
 static std::string LogAt(const xc::Built& b, size_t i) { return i < b.log.size() ? b.log[i] : std::string("<none>"); }
 
+// Task 11 fix wave F1 (ledger X99): every Build of the groups from boxes_off_reads_nothing to
+// hash_failure_installs_nothing, and the real-archive group, goes through here, so each of them also checks the header's
+// invariant Built::built == chrtwo.size() / 2 and built <= selected (one extra check per Build call). The
+// allocation_failures groups count the same invariant per K instead (a CHECK there would run while the allocator is
+// armed).
+static xc::Built BuildI(bool opera_on, bool kimonos_on, const xc::ReadEntry& read_entry,
+                        std::span<const xc::Costume> table = xc::Costumes(), const xc::Hasher& hash = {}) {
+  xc::Built b = xc::Build(opera_on, kimonos_on, read_entry, table, hash);
+  CHECKF(b.built == b.chrtwo.size() / 2 && b.built <= b.selected, "built %u, selected %u, %zu replacements", b.built,
+         b.selected, b.chrtwo.size());
+  return b;
+}
+
 // the direct core outputs of the default inputs (the oracle for every built costume)
 static const std::vector<Direct>& Directs() {
   static const std::vector<Direct> d = [] {
@@ -532,14 +548,14 @@ static void TestBoxesOffReadsNothing() {
   const auto in = DefaultInputs();
   Table t = TableOf(in);
   Archive a = ArchiveOf(in);
-  const xc::Built b = xc::Build(false, false, a.Fn(), t.span());
+  const xc::Built b = BuildI(false, false, a.Fn(), t.span());
   CHECKF(a.reads.empty(), "%zu reads", a.reads.size());
   CHECK(b.chrtwo.empty() && b.sha1.empty() && b.boxes_at_start == 0);
   CHECKF(b.log.size() <= 1, "%zu lines", b.log.size());
   CHECKF(b.log.size() == 1 && ClosingLine(b.log[0], 0, 0), "%s", LogAt(b, 0).c_str());
   // the game's table, through the defaulted argument (as the game calls it)
   Archive g = ArchiveOf(in);
-  const xc::Built bg = xc::Build(false, false, g.Fn());
+  const xc::Built bg = BuildI(false, false, g.Fn());
   CHECKF(g.reads.empty() && bg.chrtwo.empty() && bg.sha1.empty() && bg.log.size() <= 1, "%zu reads, %zu lines",
          g.reads.size(), bg.log.size());
 }
@@ -549,14 +565,14 @@ static void TestOperaOnlyReadsTwoEntries() {
   const auto in = DefaultInputs();
   Table t = TableOf(in);
   Archive a = ArchiveOf(in);
-  const xc::Built b = xc::Build(true, false, a.Fn(), t.span());
+  const xc::Built b = BuildI(true, false, a.Fn(), t.span());
   CHECKF(a.reads == (std::vector<uint32_t>{16, 17}), "%zu reads", a.reads.size());
   CHECK(Entries(b) == (std::vector<uint32_t>{16, 17}));
   CHECKF(b.log.size() == 2 && b.log[0] == BuiltLine("hel03", Directs()[0].out) && ClosingLine(b.log[1], 1, 1), "%s | %s",
          LogAt(b, 0).c_str(), LogAt(b, 1).c_str());
   // and the kimonos alone: their four entries, in table order, hel03 untouched
   Archive k = ArchiveOf(in);
-  const xc::Built bk = xc::Build(false, true, k.Fn(), t.span());
+  const xc::Built bk = BuildI(false, true, k.Fn(), t.span());
   CHECK(k.reads == (std::vector<uint32_t>{46, 47, 56, 57}));
   CHECK(Entries(bk) == (std::vector<uint32_t>{46, 47, 56, 57}));
 }
@@ -567,7 +583,7 @@ static void TestBuiltReplacesBothEntries() {
   const auto in = DefaultInputs();
   Table t = TableOf(in);
   Archive a = ArchiveOf(in);
-  const xc::Built b = xc::Build(true, true, a.Fn(), t.span());
+  const xc::Built b = BuildI(true, true, a.Fn(), t.span());
   CHECK(Entries(b) == (std::vector<uint32_t>{16, 17, 46, 47, 56, 57}));
   CHECK(a.reads == (std::vector<uint32_t>{16, 17, 46, 47, 56, 57}));
   const auto& d = Directs();
@@ -605,7 +621,7 @@ static void TestHashMismatchKeepsStandin() {
     Bytes& b46 = a.entries[46];
     b46[b46.size() - 1] ^= 0x01;
   }
-  const xc::Built b = xc::Build(true, true, a.Fn(), t.span());
+  const xc::Built b = BuildI(true, true, a.Fn(), t.span());
   CHECK(Entries(b) == (std::vector<uint32_t>{16, 17, 56, 57}));
   CHECKF(LogAt(b, 1) == KeptLine("hak03", "hak03.tpr (chrtwo.afs entry 46) is not the retail file"), "%s",
          LogAt(b, 1).c_str());
@@ -615,7 +631,7 @@ static void TestHashMismatchKeepsStandin() {
   // and a flipped byte in hel03's cat: hel03 kept, naming its cat
   Archive c = ArchiveOf(in);
   c.entries[17][0] ^= 0x80;
-  const xc::Built bc = xc::Build(true, false, c.Fn(), t.span());
+  const xc::Built bc = BuildI(true, false, c.Fn(), t.span());
   CHECK(bc.chrtwo.empty() && bc.sha1.empty());
   CHECKF(LogAt(bc, 0) == KeptLine("hel03", "hel03.cat (chrtwo.afs entry 17) is not the retail file"), "%s",
          LogAt(bc, 0).c_str());
@@ -633,7 +649,7 @@ static void TestCoreRefusalKeepsStandin() {
          "direct: ok %d, '%s'", d.ok, d.error.c_str());
   Table t = TableOf(in);
   Archive a = ArchiveOf(in);
-  const xc::Built b = xc::Build(true, true, a.Fn(), t.span());
+  const xc::Built b = BuildI(true, true, a.Fn(), t.span());
   CHECK(Entries(b) == (std::vector<uint32_t>{16, 17, 56, 57}));
   CHECKF(LogAt(b, 1) == KeptLine("hak03", d.error), "%s", LogAt(b, 1).c_str());
   CHECKF(LogAt(b, 2) == BuiltLine("hak08", Directs()[2].out), "%s", LogAt(b, 2).c_str());
@@ -656,7 +672,7 @@ static void TestOverLimitRefused() {
       (which == 0 ? in[1].tpr_limit : in[1].cat_limit) = limit;
       Table t = TableOf(in);
       Archive a = ArchiveOf(in);
-      const xc::Built b = xc::Build(true, true, a.Fn(), t.span());
+      const xc::Built b = BuildI(true, true, a.Fn(), t.span());
       const char* file = which == 0 ? "tpr" : "cat";
       if (delta < 0) {
         CHECKF(Entries(b) == (std::vector<uint32_t>{16, 17, 56, 57}), "%s limit size-1: hak03 refused, others built", file);
@@ -677,7 +693,7 @@ static void TestUnreadableArchive() {
   const auto in = DefaultInputs();
   Table t = TableOf(in);
   Archive a;  // no entries: every read returns false
-  const xc::Built b = xc::Build(true, true, a.Fn(), t.span());
+  const xc::Built b = BuildI(true, true, a.Fn(), t.span());
   CHECK(b.chrtwo.empty() && b.sha1.empty() && b.boxes_at_start == 3);
   CHECKF(b.log.size() == 4, "%zu lines", b.log.size());
   CHECKF(LogAt(b, 0) == KeptLine("hel03", "could not read chrtwo.afs entry 16"), "%s", LogAt(b, 0).c_str());
@@ -687,7 +703,7 @@ static void TestUnreadableArchive() {
   // only hak03's cat unreadable: the line names entry 47, hak08 still built
   Archive c = ArchiveOf(in);
   c.fail = {47};
-  const xc::Built bc = xc::Build(true, true, c.Fn(), t.span());
+  const xc::Built bc = BuildI(true, true, c.Fn(), t.span());
   CHECK(Entries(bc) == (std::vector<uint32_t>{16, 17, 56, 57}));
   CHECKF(LogAt(bc, 1) == KeptLine("hak03", "could not read chrtwo.afs entry 47"), "%s", LogAt(bc, 1).c_str());
 }
@@ -704,7 +720,7 @@ static void TestReadCallbackThrows() {
   bool threw = false;
   xc::Built b;
   try {
-    b = xc::Build(true, true, a.Fn(), t.span());
+    b = BuildI(true, true, a.Fn(), t.span());
   } catch (...) {
     threw = true;
   }
@@ -726,8 +742,8 @@ static void TestSha1OfBuiltIsStableAndOrdered() {
   const auto in = DefaultInputs();
   Table t = TableOf(in);
   Archive a1 = ArchiveOf(in), a2 = ArchiveOf(in);
-  const xc::Built b1 = xc::Build(true, true, a1.Fn(), t.span());
-  const xc::Built b2 = xc::Build(true, true, a2.Fn(), t.span());
+  const xc::Built b1 = BuildI(true, true, a1.Fn(), t.span());
+  const xc::Built b2 = BuildI(true, true, a2.Fn(), t.span());
   const std::string all =
       Sha1(Concat({&d[0].out.tpr, &d[0].out.cat, &d[1].out.tpr, &d[1].out.cat, &d[2].out.tpr, &d[2].out.cat}));
   CHECKF(b1.sha1 == all, "%s want %s", b1.sha1.c_str(), all.c_str());
@@ -735,18 +751,18 @@ static void TestSha1OfBuiltIsStableAndOrdered() {
   // one costume drops out (hak03's tpr flipped): the hash of hel03 and hak08 only
   Archive a3 = ArchiveOf(in);
   a3.entries[46][100] ^= 0x10;
-  const xc::Built b3 = xc::Build(true, true, a3.Fn(), t.span());
+  const xc::Built b3 = BuildI(true, true, a3.Fn(), t.span());
   const std::string two = Sha1(Concat({&d[0].out.tpr, &d[0].out.cat, &d[2].out.tpr, &d[2].out.cat}));
   CHECKF(b3.sha1 == two && b3.sha1 != all, "%s want %s", b3.sha1.c_str(), two.c_str());
   // the opera alone
   Archive a4 = ArchiveOf(in);
-  const xc::Built b4 = xc::Build(true, false, a4.Fn(), t.span());
+  const xc::Built b4 = BuildI(true, false, a4.Fn(), t.span());
   CHECK(b4.sha1 == Sha1(Concat({&d[0].out.tpr, &d[0].out.cat})));
   // two rows swapped (hak08 before hak03): the hash follows the table order
   std::vector<Input> sw = {in[0], in[2], in[1]};
   Table ts = TableOf(sw);
   Archive a5 = ArchiveOf(sw);
-  const xc::Built b5 = xc::Build(true, true, a5.Fn(), ts.span());
+  const xc::Built b5 = BuildI(true, true, a5.Fn(), ts.span());
   const std::string swapped =
       Sha1(Concat({&d[0].out.tpr, &d[0].out.cat, &d[2].out.tpr, &d[2].out.cat, &d[1].out.tpr, &d[1].out.cat}));
   CHECKF(b5.sha1 == swapped && b5.sha1 != all, "%s want %s", b5.sha1.c_str(), swapped.c_str());
@@ -761,8 +777,8 @@ static void TestBoxesAtStartBits() {
   for (int bits = 0; bits < 4; ++bits) {
     const bool opera = bits & 1, kimonos = bits & 2;
     Archive good = ArchiveOf(in), none;
-    const xc::Built bg = xc::Build(opera, kimonos, good.Fn(), t.span());
-    const xc::Built bn = xc::Build(opera, kimonos, none.Fn(), t.span());
+    const xc::Built bg = BuildI(opera, kimonos, good.Fn(), t.span());
+    const xc::Built bn = BuildI(opera, kimonos, none.Fn(), t.span());
     CHECKF(bg.boxes_at_start == static_cast<unsigned>(bits) && bn.boxes_at_start == static_cast<unsigned>(bits),
            "bits %d: built %u, nothing built %u", bits, bg.boxes_at_start, bn.boxes_at_start);
     const size_t want = (opera ? 2 : 0) + (kimonos ? 4 : 0);
@@ -778,7 +794,7 @@ static void TestUnknownCvarRow() {
   Table t = TableOf(in);
   for (int bits = 0; bits < 4; ++bits) {
     Archive a = ArchiveOf(in);
-    const xc::Built b = xc::Build(bits & 1, bits & 2, a.Fn(), t.span());
+    const xc::Built b = BuildI(bits & 1, bits & 2, a.Fn(), t.span());
     CHECKF(std::count(a.reads.begin(), a.reads.end(), 70u) == 0 && std::count(a.reads.begin(), a.reads.end(), 71u) == 0,
            "bits %d: chr01 read", bits);
     const auto e = Entries(b);
@@ -881,8 +897,8 @@ static void TestReaderPromises() {
     const auto in = DefaultInputs();
     Table t = TableOf(in);
     const xc::ReadEntry r = xc::ReadEntryFrom(fs::path("X:/game/chrtwo.afs"), opener);
-    const xc::Built b = xc::Build(false, false, r, t.span());
-    const xc::Built bg = xc::Build(false, false, r);
+    const xc::Built b = BuildI(false, false, r, t.span());
+    const xc::Built bg = BuildI(false, false, r);
     CHECKF(opens == 0 && b.chrtwo.empty() && bg.chrtwo.empty(), "boxes off: %d opens", opens);
   }
   const xc::ReadEntry r = xc::ReadEntryFrom(fs::path("X:/game/chrtwo.afs"), opener);
@@ -903,11 +919,11 @@ static void TestTocRefusalReason() {
   Table t = TableOf(in);
   Bytes bad = Afs({{1, 2, 3}});
   bad[0] = 'X';
-  const xc::Built b = xc::Build(true, false, xc::ReadEntryFromSource(std::make_shared<afs::MemorySource>(bad)), t.span());
+  const xc::Built b = BuildI(true, false, xc::ReadEntryFromSource(std::make_shared<afs::MemorySource>(bad)), t.span());
   CHECKF(LogAt(b, 0) == KeptLine("hel03", "could not read chrtwo.afs entry 16: not an AFS archive"), "%s",
          LogAt(b, 0).c_str());
   CHECK(b.chrtwo.empty() && b.sha1.empty());
-  const xc::Built bm = xc::Build(true, false, xc::ReadEntryFrom(fs::path("Z:/no/such/folder/chrtwo.afs")), t.span());
+  const xc::Built bm = BuildI(true, false, xc::ReadEntryFrom(fs::path("Z:/no/such/folder/chrtwo.afs")), t.span());
   CHECKF(LogAt(bm, 0) == KeptLine("hel03", "could not read chrtwo.afs entry 16"), "%s", LogAt(bm, 0).c_str());
   // M2: a REFUSED TOC is read once too (wrong version: tried only when the TOC was accepted, so the header is read
   // again on every call), and every call gives the same reason
@@ -997,7 +1013,7 @@ static void TestHashFailureInstallsNothing() {
        {std::string(), std::string("abc"), std::string(40, 'z'), std::string("0123456789ABCDEF0123456789ABCDEF01234567"),
         good + "0", good.substr(0, 39) + "g", std::string("0123456789abcdef0123:56789abcdef01234567")}) {
     int calls = 0;
-    const xc::Built b = xc::Build(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>& r) {
+    const xc::Built b = BuildI(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>& r) {
       ++calls;
       return r.size() == 6 ? answer : std::string("<wrong set>");
     });
@@ -1010,7 +1026,7 @@ static void TestHashFailureInstallsNothing() {
   // positive control: a well-formed answer is the sha1 and everything is installed (the seam is the one used)
   {
     int calls = 0;
-    const xc::Built b = xc::Build(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>&) {
+    const xc::Built b = BuildI(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>&) {
       ++calls;
       return good;
     });
@@ -1020,7 +1036,7 @@ static void TestHashFailureInstallsNothing() {
   // route (a) without an allocator: the hasher throws twice (nothing installed), or once (the retry's real digest)
   for (int throws : {2, 1}) {
     int calls = 0;
-    const xc::Built b = xc::Build(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>&) -> std::string {
+    const xc::Built b = BuildI(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>&) -> std::string {
       if (++calls <= throws) throw std::runtime_error("hash failed");
       return good;
     });
@@ -1034,7 +1050,7 @@ static void TestHashFailureInstallsNothing() {
   // nothing built: the hasher is not asked, and the closing line is the plain one
   {
     int calls = 0;
-    const xc::Built b = xc::Build(false, false, fn, t.span(), [&](const std::vector<afs::Replacement>&) {
+    const xc::Built b = BuildI(false, false, fn, t.span(), [&](const std::vector<afs::Replacement>&) {
       ++calls;
       return std::string();
     });
@@ -1101,6 +1117,7 @@ static void AllocationSweep(bool sticky) {
       ks.push_back(k);
   long long escaped = 0, sha_bad = 0, lines_bad = 0, closing_bad = 0, not_fired = 0, kept_runs = 0, bytes_bad = 0;
   long long first_bad = -1, inv_bad = 0, unhashed_runs = 0, no_closing = 0;
+  long long counts_bad = 0;  // F1 (ledger X99): Built::built != chrtwo.size() / 2, or Built::selected != 3
   const auto ts = std::chrono::steady_clock::now();
   for (size_t n = 0; n < ks.size(); ++n) {
     const long long k = ks[n];
@@ -1157,6 +1174,8 @@ static void AllocationSweep(bool sticky) {
                          return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
                        });
     if (b.sha1.empty() != b.chrtwo.empty() || (!b.sha1.empty() && !hex40)) ++inv_bad, bad = true;
+    // both boxes on, three known rows: three selected whatever failed; built counts the installed pairs
+    if (b.built * 2 != b.chrtwo.size() || b.selected != 3) ++counts_bad, bad = true;
     const int pairs_n = static_cast<int>(b.chrtwo.size() / 2);
     const bool unhashed_line = !b.log.empty() && ClosingLine(b.log.back(), 0, 3, true);
     const bool plain_line = !b.log.empty() && ClosingLine(b.log.back(), pairs_n, 3);
@@ -1179,6 +1198,8 @@ static void AllocationSweep(bool sticky) {
               ks.size(), sweep_s, kept_runs, escaped, sha_bad, bytes_bad, lines_bad, closing_bad, not_fired, inv_bad,
               unhashed_runs, no_closing, first_bad);
   CHECKF(inv_bad == 0, "%lld runs broke sha1.empty() == chrtwo.empty() or 40 hex (first bad K %lld)", inv_bad, first_bad);
+  CHECKF(counts_bad == 0, "%lld runs broke built == chrtwo.size() / 2 or selected == 3 (first bad K %lld)", counts_bad,
+         first_bad);
   // evidence the sticky sweep reached the hash failing twice (copies built, none installed); single-shot never does
   if (sticky) CHECKF(unhashed_runs > 0 && no_closing > 0, "%lld unhashed, %lld without a closing line", unhashed_runs,
                      no_closing);
@@ -1211,7 +1232,7 @@ static void RunRealArchive() {
     if (ok && flip && entry == 46 && !out->empty()) (*out)[out->size() / 2] ^= 0x01;
     return ok;
   };
-  const xc::Built b = xc::Build(true, true, read);
+  const xc::Built b = BuildI(true, true, read);
   for (const std::string& l : b.log) std::printf("extras real archive: log: %s\n", l.c_str());
   struct Want {
     const char* name;
@@ -1355,6 +1376,103 @@ static void TestExtrasRefusal() {
          "%s", m0.c_str());
 }
 
+// Task 11 fix wave F1 (ledger X99): a match process whose selected costumes were not all built refuses. The full table
+// match {false, true} x selected {0, 1, 2} x built {0 .. selected}, each expected value written out by hand from the
+// rule match && built < selected. Rows that refuse: (true, 1, 0), (true, 2, 0), (true, 2, 1) = 3. Wrong versions: `<=`
+// (refuses every match row with built == selected, (true, 0, 0) too), the match input dropped (the three false rows
+// with built < selected refuse), a refusal on selected > 0 alone ((true, 1, 1) and (true, 2, 2) refuse).
+struct NotBuiltRow {
+  bool match;
+  unsigned selected, built;
+  bool refuse;
+};
+static constexpr NotBuiltRow kNotBuiltRows[] = {
+    {false, 0, 0, false}, {false, 1, 0, false}, {false, 1, 1, false}, {false, 2, 0, false},
+    {false, 2, 1, false}, {false, 2, 2, false}, {true, 0, 0, false},  {true, 1, 0, true},
+    {true, 1, 1, false},  {true, 2, 0, true},   {true, 2, 1, true},   {true, 2, 2, false},
+};
+static_assert(sizeof(kNotBuiltRows) / sizeof(kNotBuiltRows[0]) == 12, "2 x (1 + 2 + 3) rows");
+
+static void TestNotBuiltRefusal() {
+  int refused = 0;
+  for (const NotBuiltRow& r : kNotBuiltRows) {
+    const bool got = xc::MustRefuseNotBuilt(r.match, r.selected, r.built);
+    refused += got ? 1 : 0;
+    CHECKF(got == r.refuse, "match %d selected %u built %u: want %d, got %d", r.match, r.selected, r.built, r.refuse, got);
+  }
+  CHECKF(refused == 3, "%d rows refused", refused);
+  // The message in full (the brief's text, numbers in decimal: <built> of <selected>), one line.
+  const std::string tail = " selected costumes not built (see the [doa4][EXTRAS] lines); untick the extra-costume boxes "
+                           "(online: on the host) or check the game files, then restart";
+  const std::string m21 = xc::ExtrasNotBuiltMessage(2, 1);
+  CHECKF(m21 == "extras copies: 1 of 2" + tail, "%s", m21.c_str());
+  const std::string m10 = xc::ExtrasNotBuiltMessage(1, 0);
+  CHECKF(m10 == "extras copies: 0 of 1" + tail, "%s", m10.c_str());
+  // two digits and the argument order (selected first): (12, 3) reads "3 of 12"
+  const std::string m = xc::ExtrasNotBuiltMessage(12, 3);
+  CHECKF(m == "extras copies: 3 of 12" + tail, "%s", m.c_str());
+  CHECKF(m21.find('\n') == std::string::npos && m21.find('\r') == std::string::npos, "%s", m21.c_str());
+}
+
+// Task 11 fix wave F1: Built::selected and Built::built from real Build calls (expected values from the rule: selected
+// = known-box rows whose box is on; built = costumes installed, 0 after the hash failed twice). Wrong versions: selected
+// counted before the box test (an unknown-box row, or every row, counted), built taken before the unhashed reset (3
+// after the hash failed twice), a failed costume counted as built, the two fields swapped.
+static void TestBuiltCounts() {
+  const auto in = DefaultInputs();
+  Table t = TableOf(in);
+  const auto counts = [](const xc::Built& b, unsigned sel, unsigned built, const char* what) {
+    CHECKF(b.selected == sel && b.built == built, "%s: selected %u built %u, want %u %u", what, b.selected, b.built, sel,
+           built);
+  };
+  {
+    Archive a = ArchiveOf(in);
+    counts(BuildI(false, false, a.Fn(), t.span()), 0, 0, "both boxes off");
+  }
+  {
+    Archive a = ArchiveOf(in);
+    counts(BuildI(true, true, a.Fn(), t.span()), 3, 3, "all built");
+  }
+  {
+    Archive a = ArchiveOf(in);
+    counts(BuildI(true, false, a.Fn(), t.span()), 1, 1, "the opera alone");
+  }
+  {
+    Archive a = ArchiveOf(in);
+    a.fail = {47};  // hak03's cat unreadable
+    counts(BuildI(true, true, a.Fn(), t.span()), 3, 2, "one read failing");
+  }
+  {
+    Archive a;  // every read fails: the kimonos alone, none built
+    counts(BuildI(false, true, a.Fn(), t.span()), 2, 0, "kimonos, nothing readable");
+  }
+  {
+    Archive a = ArchiveOf(in);
+    a.entries[46][0] ^= 0x01;  // hak03's tpr is not the retail file
+    counts(BuildI(true, true, a.Fn(), t.span()), 3, 2, "a retail SHA-1 mismatch");
+  }
+  {
+    Archive a = ArchiveOf(in);
+    int calls = 0;
+    const xc::Built b = BuildI(true, true, a.Fn(), t.span(), [&](const std::vector<afs::Replacement>&) -> std::string {
+      ++calls;
+      throw std::runtime_error("hash failed");
+    });
+    counts(b, 3, 0, "the hash failing twice");
+    CHECKF(calls == 2 && b.chrtwo.empty(), "%d calls, %zu replacements", calls, b.chrtwo.size());
+  }
+  // an unknown-box row (Christie's) is never counted, whichever boxes are on
+  auto inu = DefaultInputs();
+  inu.push_back({"doa4_christie_costume", "chr01", 70, 71, fx::Variant(1).tpr, fx::Variant(1).cat});
+  Table tu = TableOf(inu);
+  for (int bits = 0; bits < 4; ++bits) {
+    Archive a = ArchiveOf(inu);
+    const unsigned want = (bits & 1 ? 1u : 0u) + (bits & 2 ? 2u : 0u);
+    const std::string what = "unknown-box row, bits " + std::to_string(bits);
+    counts(BuildI(bits & 1, bits & 2, a.Fn(), tu.span()), want, want, what.c_str());
+  }
+}
+
 // Task 10, ShowRestartButton (brief R1): the full table at_start_bits {-2, -1, 0, 1, 2, 3, 4} x opera_now x kimonos_now,
 // each expected value written out by hand from the rule, never computed by it. -1 is "unknown" (the getter's value
 // before the build); -2 is another negative (false too; it separates "< 0" from "== -1" and from a deleted guard,
@@ -1432,6 +1550,8 @@ int main(int argc, char** argv) {  // no arguments are read
   RunGroup(TestHashFailureInstallsNothing, "hash_failure_installs_nothing");
   RunGroup(TestInstallOrder, "install_order");
   RunGroup(TestExtrasRefusal, "extras_refusal");
+  RunGroup(TestNotBuiltRefusal, "not_built_refusal");
+  RunGroup(TestBuiltCounts, "built_counts");
   RunGroup(TestShowRestartButton, "show_restart_button");
   RunGroup(TestRestartNoteText, "restart_note_text");
   RunRealArchive();

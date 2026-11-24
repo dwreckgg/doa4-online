@@ -2145,9 +2145,11 @@ class DeadOrAlive4App : public rex::ReXApp {
   // Alpha-152's bytes are in guest memory since the load: 1 or 0, and -1 until the load is over (not known yet). The saved
   // setting is the cvar. Written once by the load, read by the menu's draw (another thread).
   std::atomic<int> running_alpha152_{-1};
-  // The extras copies (BuildExtrasCopies): written once in OnPostLoadXexImage before StartNetplaySession, read later by
-  // StartNetplaySession (the meta key) and SetUpSuits (the overlay attempt), all on the same thread. Copies are installed
-  // only when chrtwo is not empty (its "built" log lines can stay when the hash failed and nothing is: ledger X80).
+  // The extras copies (BuildExtrasCopies): written once in OnPostLoadXexImage before StartNetplaySession, and read later
+  // by StartNetplaySession (the meta key) and SetUpSuits (OnPostSetup: the overlay attempt and the refusals), in the
+  // hooks' order: the same hand-off kind_ and guest_ rely on (which thread runs each hook is the SDK's). Copies are
+  // installed only when chrtwo is not empty (its "built" log lines can stay when the hash failed and nothing is: ledger
+  // X80).
   doa4::extras_copies::Built extras_built_;
   // Built::boxes_at_start, or -1 until the build has run. Written once by the load, read by the menu's draw (another
   // thread), like running_alpha152_.
@@ -2205,10 +2207,9 @@ class DeadOrAlive4App : public rex::ReXApp {
     std::string error, retry_error;       // the overlay install's, and the retry's without the colour entries
     bool test_unusable = false;           // DOA4_COLOURS_TEST_UNUSABLE
     bool test_unequal = false;            // DOA4_COLOURS_TEST_UNEQUAL
-    // The extras copies' attempt X (InstallSuitsAndColours): installed, or dropped with X's error. Both stay false when
-    // X never ran (no copies built, or the install's early return).
+    // The extras copies' attempt X (InstallSuitsAndColours): installed, or dropped with X's error (extras_error set).
+    // extras_installed stays false when X never ran (no copies built, or the install's early return).
     bool extras_installed = false;
-    bool extras_dropped = false;
     std::string extras_error;
   };
   void SetUpSuits() {
@@ -2217,20 +2218,24 @@ class DeadOrAlive4App : public rex::ReXApp {
     // The one exit. Every way out of the install passes here, so a match process that did not install the colour
     // entries never runs its match: an online session ends through np::Abort, a record or replay run quits with a
     // "refused: " line (np::RefuseRun). The test switch DOA4_COLOURS_TEST_UNEQUAL skips it on purpose.
+    // The extras copies: a match process (online, record, replay) is refused in two more cases. (1) Its copies were
+    // built but not installed (fix wave 1, the user's decision, ledger X84): its meta already carries their
+    // extras_copies key (written at session start, before the install). (2) A selected costume's copies were not built
+    // on this PC (Task 11 fix wave, the user's decision, ledger X99: a read error, a retail SHA-1 mismatch, a size
+    // limit, the hash failing twice): it would draw the stand-in where a PC that built draws the copy, and two live PCs
+    // compare no meta. A lobby process is never refused (it keeps the stand-in). One else-if chain, so RefuseRun is
+    // called at most once: the colour message wins, then (1), then (2); all after the test_unequal return, so that
+    // test switch skips the extras refusals too, as it skips the colour one.
     if (colour.test_unequal) return;
+    const bool match_process = kind_ == doa4::colour_costumes::ProcessKind::kMatch;
     if (doa4::colour_costumes::MustRefuse(kind_, colour.outcome)) {
       doa4::np::RefuseRun(doa4::colour_costumes::RefusalMessage(colour.outcome, colour.usable, colour.load_notes,
                                                                 colour.error, colour.retry_error, colour.test_unusable));
-    }
-    // The extras copies (fix wave 1, the user's decision, ledger X84): a match process (online, record, replay) whose
-    // copies were built but not installed is refused too, because its meta already carries their extras_copies key
-    // (written at session start, before the install). Only when the colour check did not refuse, so the colour message
-    // wins when both hold and RefuseRun is called once; after the test_unequal return above, so that test switch skips
-    // this refusal too, as it skips the other.
-    if (!doa4::colour_costumes::MustRefuse(kind_, colour.outcome) &&
-        doa4::extras_copies::MustRefuseExtras(kind_ == doa4::colour_costumes::ProcessKind::kMatch,
-                                              !extras_built_.chrtwo.empty(), colour.extras_installed)) {
+    } else if (doa4::extras_copies::MustRefuseExtras(match_process, !extras_built_.chrtwo.empty(),
+                                                     colour.extras_installed)) {
       doa4::np::RefuseRun(doa4::extras_copies::ExtrasRefusalMessage(colour.extras_error));
+    } else if (doa4::extras_copies::MustRefuseNotBuilt(match_process, extras_built_.selected, extras_built_.built)) {
+      doa4::np::RefuseRun(doa4::extras_copies::ExtrasNotBuiltMessage(extras_built_.selected, extras_built_.built));
     }
   }
 
@@ -2412,8 +2417,7 @@ class DeadOrAlive4App : public rex::ReXApp {
           REXLOG_INFO("[doa4][COLOURS] none installed (not usable); the swimsuits as without them");
         }
       } else {
-        colour->extras_dropped = true;  // a match process is refused on SetUpSuits' exit (MustRefuseExtras)
-        colour->extras_error = x_error;
+        colour->extras_error = x_error;  // a match process is refused on SetUpSuits' exit (MustRefuseExtras)
         REXLOG_WARN("[doa4][EXTRAS] the attempt with the extras copies failed: {}; installing without them", x_error);
       }
     }

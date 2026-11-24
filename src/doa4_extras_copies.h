@@ -47,6 +47,9 @@ struct Built {
                                          // table row with an unknown box, then "extras copies: <k> built of <n>
                                          // selected in <ms> ms" ("... selected (the copies could not be hashed;
                                          // none installed) in <ms> ms" when the hash failed: then chrtwo is empty)
+  unsigned selected = 0;  // costumes whose box was on (a table row with an unknown box is never counted): the closing
+                          // line's <n>
+  unsigned built = 0;     // costumes whose copies are in chrtwo: the closing line's <k>, after the unhashed reset
 };
 
 // Reads chrtwo.afs entry `entry` into *out: exactly the entry's TOC-size bytes. False when the archive or the entry
@@ -60,7 +63,8 @@ using Hasher = std::function<std::string(const std::vector<afs::Replacement>& ch
 // Never throws. With neither box on, read_entry is never called. sha1 is computed at the end from chrtwo as installed
 // (`hash`, empty = gamefiles::Sha1 over each replacement's bytes read back). Whatever the input and whatever fails
 // (an allocation, the hash): sha1.empty() == chrtwo.empty(), sha1 is 40 hex chars when not empty, and the closing
-// line's built count == chrtwo.size() / 2. When copies were built but their hash is not 40 hex chars (after one retry
+// line's built count == built == chrtwo.size() / 2, and built <= selected (ledger X99: a match process refuses when
+// built < selected, MustRefuseNotBuilt). When copies were built but their hash is not 40 hex chars (after one retry
 // of a throw), nothing is installed: chrtwo is cleared and the closing line says so; the costumes' "built" lines stay.
 Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::span<const Costume> table = Costumes(),
             const Hasher& hash = {});
@@ -98,11 +102,20 @@ struct InstallPlan {
 // installed; an attempt past the end of `results` counts as failed.
 InstallPlan InstallOrder(bool extras_present, bool colours_usable, bool suits_present, const std::vector<bool>& results);
 
-// ---- The refusal (Task 9 fix wave 1; the user's decision, ledger X84) ----
-// A match process (online, record, replay: colour_costumes::ProcessKind::kMatch) whose copies were built (Built::chrtwo
-// not empty) but not installed (attempt X failed, or the install never ran) must not run: its meta carries the copies'
-// extras_copies key, written before the install, so it would claim files it does not draw. = match && built && !installed.
+// ---- The refusals (Task 9 fix wave 1 and Task 11 fix wave; the user's decisions, ledger X84 and X99) ----
+// A match process (online, record, replay: colour_costumes::ProcessKind::kMatch) refuses at start in two cases; a lobby
+// process never does (it keeps the stand-ins). (1) Copies were built (Built::chrtwo not empty) but not installed
+// (attempt X failed, or the install never ran): its meta carries the copies' extras_copies key, written before the
+// install, so it would claim files it does not draw. (2) A selected costume's copies were not built (Built::built <
+// Built::selected: a read error, a retail SHA-1 mismatch, a size limit, an allocation, the hash failing twice): it draws
+// the stand-in where another PC that built draws the copy, and two live PCs compare no meta. A replay compares the key
+// with the recording's through MetaMismatch. (1) = match && built && !installed.
 bool MustRefuseExtras(bool match_process, bool built, bool installed);
+// (2) = match && built < selected.
+bool MustRefuseNotBuilt(bool match_process, unsigned selected, unsigned built);
+// Its one line: "extras copies: <built> of <selected> selected costumes not built (see the [doa4][EXTRAS] lines);
+// untick the extra-costume boxes (online: on the host) or check the game files, then restart" (decimal numbers).
+std::string ExtrasNotBuiltMessage(unsigned selected, unsigned built);
 // The refusal's one line: "extras copies: built but not installed (<error>); check the game files and the swimsuit
 // import, then restart" (the colour refusal's closing words for a failed install, doa4_colour_make.cpp RefusalMessage).
 // An empty error reads "the overlay install failed".

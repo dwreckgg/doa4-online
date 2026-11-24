@@ -198,6 +198,9 @@ Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::sp
                          " selected" + (unhashed ? " (the copies could not be hashed; none installed)" : "") + " in " +
                          std::to_string(ms.count()) + " ms");
   });
+  // the closing line's counts, after the unhashed reset (the header: built == chrtwo.size() / 2, built <= selected)
+  result.selected = static_cast<unsigned>(selected);
+  result.built = static_cast<unsigned>(built_count);
   return result;
 }
 
@@ -225,6 +228,16 @@ InstallPlan InstallOrder(bool extras_present, bool colours_usable, bool suits_pr
 
 bool MustRefuseExtras(bool match_process, bool built, bool installed) {
   return match_process && built && !installed;
+}
+
+bool MustRefuseNotBuilt(bool match_process, unsigned selected, unsigned built) {
+  return match_process && built < selected;
+}
+
+std::string ExtrasNotBuiltMessage(unsigned selected, unsigned built) {
+  return "extras copies: " + std::to_string(built) + " of " + std::to_string(selected) +
+         " selected costumes not built (see the [doa4][EXTRAS] lines); untick the extra-costume boxes (online: on the "
+         "host) or check the game files, then restart";
 }
 
 std::string ExtrasRefusalMessage(std::string_view error) {
