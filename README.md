@@ -271,7 +271,9 @@ The top of the Game tab:
 - **Game tweaks:** "All stages in Tag battle", "Hidden characters in multiplayer select" and "Alpha-152
   playable". "Alpha-152 playable" applies after a restart: the tab says so and offers **Restart now**.
 - **Extra costumes:** "Helena's opera dress", "Kokoro's pink and blue kimonos" and "Christie's cutscene
-  costume", added after each character's own costumes.
+  costume", added after each character's own costumes. Since 0.3.8 the opera dress and the kimonos show in stage
+  reflections and shadows: the game builds those copies from your game files at start-up, so after ticking one of
+  them the tab offers **Restart now**.
 - **Wipe unlocks...** locks everything again, as in a new save, after it asks; a backup of your save is
   made first.
 - **Physics:** **Age:** sets the breast movement for every costume. Off (the default) is retail DOA4; on, the
@@ -327,8 +329,12 @@ restored when it ends.
 
 ## Linux
 
-Linux is not officially supported yet: there is no Linux build. Players report that the Windows build now works under Proton, offline and online, including online sessions
-with players on Windows.
+Linux is not officially supported yet, and there is no Linux download. **Use the Windows build under Proton**: players
+report that it works offline and online, including online sessions with players on Windows.
+
+Since 0.3.8 the source also builds as a native Linux program (thanks to rynoster; the steps are the ones the
+`.github/workflows/linux-build.yml` job runs). That is for people who build it themselves: online, a self-built game can only
+join the same self-built game, never the release, so for playing online with everyone else, Proton is the way.
 
 - **0.3.8 fixes the black screen at start-up under Proton**
   ([issue #12](https://github.com/dwreckgg/doa4-online/issues/12)). The `net.ipv4.ip_unprivileged_port_start`
@@ -365,7 +371,6 @@ with players on Windows.
 |---|---|
 | A rare crash with `Call to invalid or unregistered function at guest address 0x...` in the log, at one particular move or moment. | A function the recompiler missed. Send the log (`logs\`) and say which move or moment, so it can be added in the next release. |
 | The imported DOAX2 swimsuits still need polish: some show clipping, physics that don't look right, or visible seams in the models. | Being worked on in later releases. |
-| The extra costumes (Esc menu, **Extras** tab: Helena's opera dress, Kokoro's pink and blue kimonos): reflections on the stage scenery show the character in a different costume. | A fix is planned. |
 | First start with an extracted *Dead or Alive 4* folder: choosing it on the setup screen starts the game right away, before the optional DOAX2 swimsuit step. | Import the swimsuits any time from the Esc menu, **Extras** tab, **Import DOAX2 swimsuits...**. A fix is planned. |
 | Alpha-152 (Esc menu, **Extras** tab, **Alpha-152 playable**): her icon in the Team Battle team list and on the results screen shows "?". | A proper icon is planned. |
 | Alpha-152: her model does not show on character select in an online match where the two players' DOAX2 swimsuit imports differ, or in Tag's second-fighter panel. | She is still playable there; only the select-screen model is missing. A fix is planned. |

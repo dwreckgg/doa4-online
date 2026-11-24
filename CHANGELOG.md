@@ -28,6 +28,14 @@
   costume select screen leaves out the colour costumes and the DOAX2 swimsuits, and the swimsuit import is off.
   Nothing is deleted, and the game tweaks, the extra costumes and the "Age:" box follow their own boxes as before. It
   only changes the game you start: an online session ignores it, and it is not sent to the other player.
+- **Extras costumes: proper reflections and shadows.** Helena's opera dress and Kokoro's pink and blue kimonos
+  (unlocked in the Esc menu's Extras tab) showed a plain stand-in body in stage reflections (the DOATEC Great Hall
+  glass, the Waterfall Valley water), and their shadows had no long skirt or sleeves. At start-up the game now builds
+  proper reflection and shadow copies of these three costumes from your own DOA4 files (no game data is in the
+  release). They are built only at start-up, so the Extras tab now says so under those boxes and shows a "Restart
+  now" button after you tick one. If a selected costume's copies could not be built or installed, a match with them
+  (online, record or replay) is refused with a message saying so, instead of starting with a picture that differs
+  between the players; untick the extra-costume boxes (online: on the host) or check the game files, then restart.
 - **"Age:" box and slider for breast movement** (Esc menu > Extras > Physics). Off (the default) is retail DOA4; on,
   the slider sets the movement for every costume from 1 to 99, and 18 is retail. It takes effect at once. Online, the
   host's box and age are used for both players. It replaces the "Full DOAX2 breast movement" box, whose old setting is
@@ -51,6 +59,12 @@
   online check could end the session as a desync although both games were in step: a drawing pointer of the menus,
   which can differ for a few frames with each PC's loading speed, was part of the check. It is left out now, like
   the other drawing and timing values. Tested with four online Tag sessions that hit the old cause.
+- **Experimental Playground: no seam through the raptors.** The small raptors on the
+  Playground were cut by a vertical seam at the middle of the screen, and the left half could jump to another pose.
+  The game draws each frame in two halves, and the emulated GPU read the creatures' pose data while the game was
+  already writing the next frame's. It now reads a copy of that data taken when the frame was handed over. The
+  game's state is the same with the fix on and off; online, the host's setting is used for both players. If
+  anything looks wrong, `gpu_submit_snapshot = false` in `dead_or_alive_4.toml` draws as 0.3.7 did.
 - Native Linux: the 3D picture, the PRESS START bar and a missing-library start-up error fixed (rynoster,
   Dwreckgg/rexglue-sdk#1).
 
@@ -58,6 +72,9 @@
 - Both players need 0.3.8: it does not connect to 0.3.7.
 - Linux: players report that the Windows build works under Proton, offline and online, including online with players
   on Windows. Linux is still not officially supported.
+- The source now also builds as a native Linux program, for people who build it themselves; there is no Linux
+  download. Online, a self-built game only joins the same self-built game, so Proton stays the way to play with
+  everyone else.
 
 ## 0.3.7 (2026-11-19)
 
