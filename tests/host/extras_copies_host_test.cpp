@@ -45,6 +45,14 @@
 #include <string>
 #include <vector>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>  // GetModuleFileNameW (the default-opener group's folder)
+
 namespace fs = std::filesystem;
 namespace tp = doa4::suitconv::tpr;
 namespace sl = doa4::suitconv::slim;
@@ -919,21 +927,39 @@ static void TestTocRefusalReason() {
   CHECKF(what[0] == "not an AFS archive" && what[1] == what[0], "%s / %s", what[0].c_str(), what[1].c_str());
 }
 
-// The folder the runner writes its output to (the bat's %OUT%, or DOA4_SUITCONV_OUT, or a probe's row folder): the
-// test executable's own folder, from argv[0]. Never %TEMP%.
+// The folder the runner writes its output to: the test executable's own folder (GetModuleFileNameW, not argv[0], which
+// may be a bare or relative name), i.e. the bat's %OUT%. That is %TEMP%\doa4_suitconv_test by default, or
+// DOA4_SUITCONV_OUT when set (a probe's row folder). The group writes one file there and removes it.
 static fs::path g_out_dir;
+
+static fs::path ExeFolder() {
+  std::wstring buf(32768, L'\0');
+  const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+  if (n == 0 || n >= buf.size()) return {};
+  buf.resize(n);
+  return fs::path(buf).parent_path();
+}
 
 static void TestDefaultOpener() {
   // M1: ReadEntryFrom with NO opener reads a real file through the production default (afs::FileSource::Open). Wrong
   // version: the default opener gives no source (every read false). The file is written here and removed after.
-  if (g_out_dir.empty() || !fs::is_directory(g_out_dir)) return CHECKF(false, "no output folder from argv[0]");
+  if (g_out_dir.empty() || !fs::is_directory(g_out_dir)) return CHECKF(false, "no output folder (GetModuleFileNameW)");
   const fs::path p = g_out_dir / "extras_default_opener.afs";
   const std::vector<Bytes> e = {{1, 2, 3}, Bytes(0x900, 0x42), {9, 8, 7, 6, 5}};
   const Bytes file = Afs(e);
   {
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    f.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
-    if (!f) return CHECKF(false, "could not write %s", p.string().c_str());
+    bool written = false;
+    {
+      std::ofstream f(p, std::ios::binary | std::ios::trunc);
+      f.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+      f.close();
+      written = static_cast<bool>(f);
+    }
+    if (!written) {  // a partial file is not left behind
+      std::error_code ec;
+      fs::remove(p, ec);
+      return CHECKF(false, "could not write %s", p.string().c_str());
+    }
   }
   {
     const xc::ReadEntry r = xc::ReadEntryFrom(p);
@@ -965,8 +991,11 @@ static void TestHashFailureInstallsNothing() {
   const xc::ReadEntry fn = a.Fn();
   const char* names[3] = {"hel03", "hak03", "hak08"};
   const std::string good = "0123456789abcdef0123456789abcdef01234567";
-  for (const std::string& answer : {std::string(), std::string("abc"), std::string(40, 'z'),
-                                    std::string("0123456789ABCDEF0123456789ABCDEF01234567"), good + "0"}) {
+  // The two edge answers (m2): 40 chars that are hex but for one 'g' (the letter after 'f'; excludes `c <= 'g'`), and
+  // one ':' (the char after '9'; excludes `c <= ':'`).
+  for (const std::string& answer :
+       {std::string(), std::string("abc"), std::string(40, 'z'), std::string("0123456789ABCDEF0123456789ABCDEF01234567"),
+        good + "0", good.substr(0, 39) + "g", std::string("0123456789abcdef0123:56789abcdef01234567")}) {
     int calls = 0;
     const xc::Built b = xc::Build(true, true, fn, t.span(), [&](const std::vector<afs::Replacement>& r) {
       ++calls;
@@ -1230,8 +1259,10 @@ static void RunRealArchive() {
               flip ? " (entry 46 flipped)" : "");
 }
 
-int main(int argc, char** argv) {
-  if (argc > 0 && argv[0]) g_out_dir = fs::absolute(fs::path(argv[0])).parent_path();
+int main(int argc, char** argv) {  // no arguments are read
+  (void)argc;
+  (void)argv;
+  g_out_dir = ExeFolder();
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   RunGroup(TestFixtureAnchor, "fixture_anchor");
   RunGroup(TestCostumesTable, "costumes_table");

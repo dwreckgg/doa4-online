@@ -184,7 +184,8 @@ Built Build(bool opera_on, bool kimonos_on, const ReadEntry& read_entry, std::sp
       !TwoTries([&] { result.sha1 = hash ? hash(result.chrtwo) : HashInstalled(result.chrtwo); }))
     result.sha1.clear();
   // Keyed on the value, whatever produced it (two throws, or a hasher that answered "" or junk): copies with no real
-  // digest are not installed, since Task 9 keys the shader-cache meta on sha1. Nothing here throws.
+  // digest are not installed, since Task 9 writes sha1 as the extras_copies meta key (online, record and replay), and
+  // installed copies with no key would let two PCs or a replay differ unseen. Nothing here throws.
   const bool unhashed = !result.chrtwo.empty() && !IsSha1Hex(result.sha1);
   if (unhashed) {
     result.chrtwo.clear();
