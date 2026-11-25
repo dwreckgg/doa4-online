@@ -364,11 +364,14 @@ void WorkersFrame(const uint8_t* base) {
 }
 
 void WorkersStop() {
-  {
-    std::lock_guard lk(g_mu);
-    g_token = 0;
+  // Issue #22: after a window close the waiters are dead (and one may have died holding g_mu): no lock, no wake.
+  if (auto pass = GuestWakePass(); pass.owns_lock()) {
+    {
+      std::lock_guard lk(g_mu);
+      g_token = 0;
+    }
+    g_cv.notify_all();  // waiters see Stopped() and run free
   }
-  g_cv.notify_all();  // waiters see Stopped() and run free
   // mode 4's waiters too; then the last lanes:, vsm: and cpu: lines (Mode() answers 0 once stopped: the decided mode is read)
   eng::Stop(g_mode.load(std::memory_order_relaxed));
 }

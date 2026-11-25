@@ -352,6 +352,8 @@ void MiddlewareStart() {
 // has tested the predicate (false) but not yet blocked: it holds g_loader_mu until it blocks, so the
 // notify below cannot be lost.
 void MiddlewareStop() {
+  auto pass = GuestWakePass();  // issue #22: after a window close the sleepers are dead; no wake
+  if (!pass.owns_lock()) return;
   { std::lock_guard lk(g_loader_mu); }
   g_loader_cv.notify_all();
   // Same for the frame boundary's wait for CRI thread B (its predicate also ends on Stopped()).

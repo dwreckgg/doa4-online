@@ -216,6 +216,8 @@ std::vector<std::string> SessionLines(int mode) {
 }
 
 void WakeAll() {
+  auto pass = GuestWakePass();  // issue #22: after a window close the sleepers are dead; no wake
+  if (!pass.owns_lock()) return;
   { std::lock_guard lk(g_mu); }  // a waiter between its test and its wait holds the lock: it sees the change, or it is woken
   g_cv.notify_all();
 }

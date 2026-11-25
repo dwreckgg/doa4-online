@@ -325,6 +325,9 @@ void OnFrame(uint32_t frame, PPCContext& ctx, uint8_t* base) {
 
 void Stop() {
   if (g_stopped.exchange(true, std::memory_order_acq_rel)) return;  // once
+  if (!GuestWakePass().owns_lock()) {
+    LogLine("stop after the title was terminated (window close): the layer's wakes of guest sleepers are skipped (issue #22)");
+  }
   WorkersStop();
   MiddlewareStop();  // a loader job waiting at the gate sees Stopped() now, not after its 500 ms timeout
   const uint32_t fixes = g_fixes.load(std::memory_order_acquire);

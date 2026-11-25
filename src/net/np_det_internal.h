@@ -6,11 +6,29 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <shared_mutex>
 #include <string>
 
 #include <rex/ppc/context.h>
+#include <rex/system/kernel_state.h>
 
 namespace doa4::np::det {
+
+// Issue #22: a window close runs KernelState::TerminateTitle, which kills guest threads asleep on this layer's
+// condition variables and leaves their wait blocks linked to freed stacks; the closing thread then reaches Stop()
+// (np::Shutdown, Quit). Stop's wakes (WorkersStop, eng WakeAll, MiddlewareStop) are made holding this pass and skipped
+// without one: once the title is terminated those sleepers are dead and the wake would walk their freed stacks. While a
+// wake holds the pass, TerminateTitle waits before it suspends anyone. The other wakes of these variables run on guest
+// threads only, and TerminateTitle suspends every guest thread before it kills any, so none of them runs after a kill.
+inline std::shared_lock<std::shared_mutex> GuestWakePass() {
+  if (auto* ks = rex::system::kernel_state()) {
+    return ks->TryGuestWakePass();
+  }
+  // No kernel state: before the runtime exists, or after it is gone (np::Shutdown runs before the runtime is reset):
+  // a pass that always succeeds.
+  static std::shared_mutex no_title;
+  return std::shared_lock<std::shared_mutex>(no_title);
+}
 
 enum Fix : uint32_t {
   kSeed = 1u << 0,      // MT seeds from the session seed
